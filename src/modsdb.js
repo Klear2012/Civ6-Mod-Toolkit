@@ -181,32 +181,21 @@ function pruneBackups(dbPath) {
   }
 }
 
-// changes: [{ modId, enabled }]. Caller must make sure the game is closed.
-// Backs up the database, applies all changes in one transaction to the active
-// mod group, then verifies; on any failure the backup is put back.
-function applyChanges(dbPath, changes) {
-  if (!DatabaseSync) throw new Error(loadError);
-  if (!Array.isArray(changes) || !changes.length) throw new Error('no changes');
-
+// The shared write path for every change to Mods.sqlite: back the file up, run
+// `fn(db)` in one transaction, check the database, and read back what was
+// written. If anything fails after the commit the backup is put back; if it
+// failed before, the redundant backup is removed. `fn` throws on any problem it
+// finds - that is what triggers the rollback/restore.
+function mutateDb(dbPath, fn) {
   const backupPath = backupFile(dbPath);
   let db;
   let committed = false;
   try {
     db = new DatabaseSync(dbPath);
-    const { active } = activeGroupOf(db);
-    if (!active) throw new Error('the mod database has no mod group');
-
-    const rowIds = new Map(db.prepare('SELECT ModId, ModRowId FROM Mods').all().map((r) => [normId(r.ModId), r.ModRowId]));
-    const update = db.prepare('UPDATE ModGroupItems SET Disabled = ? WHERE ModGroupRowId = ? AND ModRowId = ?');
-
     db.exec('BEGIN IMMEDIATE');
+    let result;
     try {
-      for (const c of changes) {
-        const rowId = rowIds.get(normId(c.modId));
-        if (rowId == null) throw new Error(`mod ${c.modId} is not in the game's database yet (start the game once)`);
-        const n = update.run(c.enabled ? 0 : 1, active.id, rowId).changes;
-        if (n !== 1) throw new Error(`mod ${c.modId} is not part of the active mod group`);
-      }
+      result = fn(db);
       db.exec('COMMIT');
       committed = true;
     } catch (e) {
@@ -217,16 +206,10 @@ function applyChanges(dbPath, changes) {
     const check = db.prepare('PRAGMA quick_check').get();
     if (Object.values(check)[0] !== 'ok') throw new Error('database check failed after saving');
 
-    // Read back what we wrote.
-    const read = db.prepare('SELECT Disabled FROM ModGroupItems WHERE ModGroupRowId = ? AND ModRowId = ?');
-    for (const c of changes) {
-      const row = read.get(active.id, rowIds.get(normId(c.modId)));
-      if (!row || !!row.Disabled === !!c.enabled) throw new Error(`verification failed for mod ${c.modId}`);
-    }
     db.close();
     db = null;
     pruneBackups(dbPath);
-    return { backupPath, changed: changes.length, group: active };
+    return { result, backupPath };
   } catch (e) {
     try { if (db) db.close(); } catch (_) { /* ignore */ }
     if (committed) {
@@ -241,4 +224,213 @@ function applyChanges(dbPath, changes) {
   }
 }
 
-module.exports = { readModState, readModDetails, applyChanges, classifyPath };
+function requireDb() {
+  if (!DatabaseSync) throw new Error(loadError);
+}
+
+// changes: [{ modId, enabled }]. Caller must make sure the game is closed.
+// Backs up the database, applies all changes in one transaction to the active
+// mod group, then verifies; on any failure the backup is put back.
+function applyChanges(dbPath, changes) {
+  requireDb();
+  if (!Array.isArray(changes) || !changes.length) throw new Error('no changes');
+
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const { active } = activeGroupOf(db);
+    if (!active) throw new Error('the mod database has no mod group');
+
+    const rowIds = new Map(db.prepare('SELECT ModId, ModRowId FROM Mods').all().map((r) => [normId(r.ModId), r.ModRowId]));
+    const update = db.prepare('UPDATE ModGroupItems SET Disabled = ? WHERE ModGroupRowId = ? AND ModRowId = ?');
+
+    for (const c of changes) {
+      const rowId = rowIds.get(normId(c.modId));
+      if (rowId == null) throw new Error(`mod ${c.modId} is not in the game's database yet (start the game once)`);
+      const n = update.run(c.enabled ? 0 : 1, active.id, rowId).changes;
+      if (n !== 1) throw new Error(`mod ${c.modId} is not part of the active mod group`);
+    }
+
+    // Read back what we wrote.
+    const read = db.prepare('SELECT Disabled FROM ModGroupItems WHERE ModGroupRowId = ? AND ModRowId = ?');
+    for (const c of changes) {
+      const row = read.get(active.id, rowIds.get(normId(c.modId)));
+      if (!row || !!row.Disabled === !!c.enabled) throw new Error(`verification failed for mod ${c.modId}`);
+    }
+    return { changed: changes.length, group: active };
+  });
+  return { backupPath, ...result };
+}
+
+// ---------------------------------------------------------------------------
+// Mod groups (player profiles)
+//
+// A profile is a ModGroups row plus its ModGroupItems rows. The game shows them
+// under Additional Content > Mod Groups. Custom groups are created with
+// SortIndex 100, which is what the game itself uses.
+// ---------------------------------------------------------------------------
+
+const GROUPS_SQL = `
+  SELECT g.ModGroupRowId AS id, g.Name AS name, g.CanDelete AS canDelete,
+    g.Selected AS selected, g.SortIndex AS sortIndex,
+    (SELECT count(*) FROM ModGroupItems i WHERE i.ModGroupRowId = g.ModGroupRowId) AS total,
+    (SELECT count(*) FROM ModGroupItems i WHERE i.ModGroupRowId = g.ModGroupRowId AND i.Disabled = 0) AS enabled
+  FROM ModGroups g
+  ORDER BY g.SortIndex, g.ModGroupRowId`;
+
+function readGroups(db) {
+  return db.prepare(GROUPS_SQL).all().map((r) => ({
+    id: r.id,
+    name: r.name,
+    canDelete: !!r.canDelete,
+    selected: !!r.selected,
+    sortIndex: r.sortIndex,
+    total: r.total,
+    enabled: r.enabled,
+  }));
+}
+
+// One group by id, with its enabled/total counts. Throws when it isn't there.
+function requireGroup(db, id) {
+  const g = readGroups(db).find((x) => x.id === Number(id));
+  if (!g) throw new Error('that mod group no longer exists');
+  return g;
+}
+
+// Names are free-form; only emptiness and a sane length are rejected.
+function cleanName(name) {
+  const n = String(name == null ? '' : name).trim();
+  if (!n) throw new Error('the profile needs a name');
+  if (n.length > 100) throw new Error('the profile name is too long (100 characters at most)');
+  return n;
+}
+
+// Exactly one group must be selected - the game reads Selected to know which
+// one it is using.
+function selectGroup(db, id) {
+  db.prepare('UPDATE ModGroups SET Selected = 0 WHERE Selected <> 0').run();
+  const r = db.prepare('UPDATE ModGroups SET Selected = 1 WHERE ModGroupRowId = ?').run(Number(id));
+  if (r.changes !== 1) throw new Error('that mod group no longer exists');
+  const n = db.prepare('SELECT count(*) AS n FROM ModGroups WHERE Selected = 1').get().n;
+  if (n !== 1) throw new Error('failed to select the mod group');
+}
+
+// A new profile with every known mod present but turned off, so it can be
+// toggled right away (a group with no rows can't be changed at all).
+function fillGroupDisabled(db, id) {
+  db.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) SELECT ?, ModRowId, 1 FROM Mods').run(Number(id));
+}
+
+function copyGroupItems(db, fromId, toId) {
+  db.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) SELECT ?, ModRowId, Disabled FROM ModGroupItems WHERE ModGroupRowId = ?')
+    .run(Number(toId), Number(fromId));
+}
+
+function insertGroup(db, name) {
+  const r = db.prepare('INSERT INTO ModGroups (Name, CanDelete, Selected, SortIndex) VALUES (?, 1, 0, 100)').run(cleanName(name));
+  return r.lastInsertRowid;
+}
+
+function itemCount(db, id) {
+  return db.prepare('SELECT count(*) AS n FROM ModGroupItems WHERE ModGroupRowId = ?').get(Number(id)).n;
+}
+
+// Reads every profile, plus the active one. Same read-only access as
+// readModState: a failure is reported, not thrown.
+function listGroups(dbPath) {
+  if (!DatabaseSync) return { ok: false, error: loadError, groups: [], active: null };
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const groups = readGroups(db);
+    return { ok: true, groups, active: groups.find((g) => g.selected) || null };
+  } catch (e) {
+    return { ok: false, error: `Could not read the mod database: ${e.message}`, groups: [], active: null };
+  } finally {
+    try { if (db) db.close(); } catch (_) { /* ignore */ }
+  }
+}
+
+// Create an empty profile (everything off) and make it the active one.
+function createGroup(dbPath, name) {
+  requireDb();
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const id = insertGroup(db, name);
+    fillGroupDisabled(db, id);
+    selectGroup(db, id);
+    const group = requireGroup(db, id);
+    const total = db.prepare('SELECT count(*) AS n FROM Mods').get().n;
+    if (group.total !== total || group.enabled !== 0) throw new Error('the new profile was not created correctly');
+    return { group, mods: total };
+  });
+  return { backupPath, ...result };
+}
+
+// Copy a profile's mods, under a new name, and make it the active one.
+function duplicateGroup(dbPath, id, name) {
+  requireDb();
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const source = requireGroup(db, id);
+    const newId = insertGroup(db, name);
+    copyGroupItems(db, source.id, newId);
+    selectGroup(db, newId);
+    const group = requireGroup(db, newId);
+    if (group.total !== source.total || group.enabled !== source.enabled) throw new Error('the profile was not copied correctly');
+    return { group, from: source };
+  });
+  return { backupPath, ...result };
+}
+
+function renameGroup(dbPath, id, name) {
+  requireDb();
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const group = requireGroup(db, id);
+    db.prepare('UPDATE ModGroups SET Name = ? WHERE ModGroupRowId = ?').run(cleanName(name), group.id);
+    const after = requireGroup(db, group.id);
+    if (after.name !== cleanName(name)) throw new Error('the profile was not renamed');
+    return { group: after };
+  });
+  return { backupPath, ...result };
+}
+
+// Delete a profile and its mods. The built-in group and the last remaining group
+// can't be deleted. Deleting the active one switches to `fallbackId` when given,
+// otherwise to the built-in group, otherwise to the oldest one left.
+function deleteGroup(dbPath, id, fallbackId) {
+  requireDb();
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const group = requireGroup(db, id);
+    if (!group.canDelete) throw new Error('the Default profile cannot be deleted');
+    const remaining = readGroups(db).filter((g) => g.id !== group.id);
+    if (!remaining.length) throw new Error('this is your only profile, so it cannot be deleted');
+    if (group.selected) {
+      const fallback = (fallbackId != null && remaining.find((g) => g.id === Number(fallbackId)))
+        || remaining.find((g) => !g.canDelete)
+        || remaining[0];
+      selectGroup(db, fallback.id);
+    }
+    db.prepare('DELETE FROM ModGroupItems WHERE ModGroupRowId = ?').run(group.id);
+    const del = db.prepare('DELETE FROM ModGroups WHERE ModGroupRowId = ?').run(group.id);
+    if (del.changes !== 1) throw new Error('the profile was not deleted');
+    const groups = readGroups(db);
+    if (groups.some((g) => g.id === group.id)) throw new Error('the profile was not deleted');
+    if (itemCount(db, group.id) !== 0) throw new Error('the profile was not emptied');
+    return { deleted: group.name, active: groups.find((g) => g.selected) || null, groups };
+  });
+  return { backupPath, ...result };
+}
+
+function activateGroup(dbPath, id) {
+  requireDb();
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const group = requireGroup(db, id);
+    selectGroup(db, group.id);
+    const active = readGroups(db).find((g) => g.selected);
+    if (!active || active.id !== group.id) throw new Error('the profile was not activated');
+    return { active };
+  });
+  return { backupPath, ...result };
+}
+
+module.exports = {
+  readModState, readModDetails, applyChanges, classifyPath,
+  listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
+};
