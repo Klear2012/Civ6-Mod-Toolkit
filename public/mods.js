@@ -90,8 +90,13 @@ function rowBody(m, all) {
     ? `<a class="ext" href="${workshopUrl(m.workshopId)}" target="_blank" rel="noopener" title="Open the Steam Workshop page"><span class="ext-text">Workshop page </span>↗</a>`
     : '';
   const sub = m.teaser ? `<span class="teaser">${renderCivText(m.teaser)}</span>` : `<small>${esc(m.id)}</small>`;
+  // A mod the game has never scanned has no row to toggle, so offer the
+  // action that creates one instead.
+  const register = m.scanned ? ''
+    : `<button type="button" class="small" data-register="${esc(m.idNorm)}" ${game.running ? 'disabled' : ''}
+        title="${game.running ? 'Close Civ6 to register new mods' : 'Register this mod so it can be turned on'}">Register</button>`;
   return `<span class="name"><b>${renderCivText(m.name)}</b>${sub}${probs}</span>
-    ${link}${sourceTag(m)}
+    ${link}${sourceTag(m)}${register}
     <button type="button" class="info" data-info="${esc(m.idNorm)}" title="Details">i</button>`;
 }
 
@@ -124,8 +129,16 @@ function renderMods() {
   if (game.running) alerts.push('<div class="alert warn"><b>Civ6 is running.</b> You can prepare changes, but close the game before applying them.</div>');
   const unscanned = d.mods.filter((m) => !m.scanned);
   if (unscanned.length) {
-    alerts.push(`<div class="alert info"><b>${unscanned.length} new mod${unscanned.length > 1 ? 's' : ''} not yet seen by the game.</b>
-      Start Civ6 once so it picks ${unscanned.length > 1 ? 'them' : 'it'} up, then ${unscanned.length > 1 ? 'they' : 'it'} can be turned on or off here.</div>`);
+    const one = unscanned.length === 1;
+    const names = unscanned.slice(0, 4).map((m) => esc(renderCivText(m.name))).join(', ')
+      + (unscanned.length > 4 ? ` and ${unscanned.length - 4} more` : '');
+    alerts.push(`<div class="alert info"><b>${unscanned.length} new mod${one ? '' : 's'} not registered yet:</b> ${names}.
+      Register ${one ? 'it' : 'them'} to turn ${one ? 'it' : 'them'} on without starting the game first.
+      <div class="alert-actions">
+        <button type="button" id="registerAll" ${game.running ? 'disabled' : ''}
+          title="${game.running ? 'Close Civ6 to register new mods' : 'Register every new mod'}">Register ${one ? 'it' : 'them all'}</button>
+        ${game.running ? '<small>Close Civ6 to register new mods.</small>' : ''}
+      </div></div>`);
   }
   $('modsAlerts').innerHTML = alerts.join('');
 
@@ -192,6 +205,40 @@ async function loadMods() {
   renderMods();
 }
 
+// ---- register --------------------------------------------------------------
+// Writes the registration the game would have written, so a newly subscribed
+// mod can be switched on without launching Civ6 first. An empty list registers
+// every mod still waiting. The mod is registered *and* enabled in the profile
+// in use - one click, which is what the game itself does for a new mod.
+async function registerMods(ids) {
+  if (game.running) {
+    toast('Civilization VI is running. Close the game first, then register new mods.', 'err');
+    return;
+  }
+  try {
+    const r = await postJson('/api/mods/register', { ids });
+    const n = r.registered.length;
+    const what = ids && ids.length ? 'Registered' : `Registered ${n} new mod${n === 1 ? '' : 's'}`;
+    const detail = [
+      n ? `on in "${esc(groupLabel(r.profile))}"` : null,
+      r.backupPath ? `backup: ${esc(r.backupPath)}` : null,
+    ].filter(Boolean).join('  ·  ');
+    toast(`${what}${n ? '' : ', nothing to do'}.`, 'ok', detail);
+    // Names of mods the game could not read are reported, never swallowed.
+    if (r.failed.length) {
+      toast(`${r.failed.length} mod${r.failed.length === 1 ? '' : 's'} could not be registered: `
+        + r.failed.map((f) => esc(f.file || f.error)).join(', '), 'err');
+    }
+    await loadMods();
+  } catch (err) {
+    toast(esc(err.message), 'err');
+  }
+}
+
+$('modsAlerts').addEventListener('click', (e) => {
+  if (e.target.closest('#registerAll')) registerMods([]);
+});
+
 pages.mods = {
   show(params) {
     const src = params.get('source');
@@ -224,7 +271,7 @@ $('viewSwitch').addEventListener('click', (e) => {
 });
 $('modsFilter').addEventListener('input', () => modsPage.data && renderMods());
 
-// Buttons inside rows (both views): "Turn it on" fixes and the details button.
+// Buttons inside rows (both views): "Turn it on" fixes, Register and details.
 function rowButtonClick(e) {
   const b = e.target.closest('button');
   if (!b) return false;
@@ -232,6 +279,11 @@ function rowButtonClick(e) {
     e.preventDefault(); // don't toggle the row's own checkbox
     setWanted(byNorm().get(b.dataset.fix), true);
     renderMods();
+    return true;
+  }
+  if (b.dataset.register) {
+    e.preventDefault();
+    registerMods([b.dataset.register]);
     return true;
   }
   if (b.dataset.info) {

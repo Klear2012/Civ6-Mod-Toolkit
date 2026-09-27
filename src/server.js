@@ -19,7 +19,7 @@ const editor = require('./editor');
 const {
   readModState, readModDetails, applyChanges,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
-  exportGroup, importGroup,
+  exportGroup, importGroup, registerMods,
 } = require('./modsdb');
 const { gameStatus } = require('./game');
 
@@ -237,6 +237,47 @@ async function handleApi(req, res, url) {
     try {
       const r = applyChanges(list.modsDb.path, clean);
       return send(res, 200, { ok: true, ...r });
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
+  }
+
+  // POST /api/mods/register { ids: [...] } -> register mods the game has never
+  // scanned, and switch them on in the profile in use. Without this a newly
+  // subscribed mod cannot be turned on until Civ6 has launched once. The client
+  // sends mod ids only; the .modinfo paths are resolved here, so the browser can
+  // never name a file. See FINDINGS.md for how the rows are derived.
+  if (req.method === 'POST' && url.pathname === '/api/mods/register') {
+    const { ids } = await readBody(req);
+    const game = await gameStatus();
+    if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then register new mods.' });
+
+    const list = modList();
+    if (!list.ok) return send(res, 400, { error: list.error });
+    const modsDb = paths.getModsDb();
+
+    // "Unscanned" means exactly what modList() calls it: on disk, not in the
+    // game's database. Reuse that rather than defining it a second time.
+    const pending = list.mods.filter((m) => !m.scanned);
+    const wanted = (Array.isArray(ids) && ids.length ? ids.map(normId) : pending.map((m) => m.idNorm));
+    const onDisk = new Map(scanMods(paths.getSources()).map((m) => [m.idNorm, m]));
+
+    const files = [];
+    const known = new Set(pending.map((m) => m.idNorm));
+    for (const id of wanted) {
+      if (!known.has(id)) return send(res, 400, { error: `unknown or already registered mod: ${id}` });
+      const f = onDisk.get(id);
+      if (!f) return send(res, 400, { error: `the .modinfo for ${id} is no longer on disk` });
+      files.push(f.path);
+    }
+    if (!files.length) return send(res, 400, { error: 'no new mods to register' });
+
+    const groups = listGroups(modsDb.path);
+    const active = groups.active;
+    if (!active) return send(res, 400, { error: 'the mod database has no mod group' });
+    try {
+      const r = registerMods(modsDb.path, files, true, active.id);
+      return send(res, 200, { ok: true, ...r, profile: active });
     } catch (e) {
       return send(res, 500, { error: e.message });
     }
