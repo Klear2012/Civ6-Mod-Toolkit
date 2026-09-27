@@ -12,6 +12,9 @@ A mod toolkit for Sid Meier's Civilization VI that runs outside the game:
   the game, with warnings for missing dependencies and conflicts. Handy when a
   broken mod stops the game from starting, or when the in-game mod screen is
   slow.
+- **Profiles** — Civ6 calls them *mod groups*. Create, duplicate, rename, delete
+  and switch between them here, and export/import a profile as a `.json` file,
+  so a set-up can be moved to another computer or shared.
 
 Website: <https://cru121.github.io/Civ6-Mod-Toolkit/>
 
@@ -106,6 +109,24 @@ Mods you've only just installed show **not scanned yet**: start Civ6 once so it
 registers them, then they can be toggled here. The toolkit edits the game's
 currently selected mod group (normally *Default*).
 
+### Profiles (mod groups)
+
+The **Profile** bar above the filters picks which group of mods you are
+editing — the same thing as Civ6's *Additional Content → Mod Groups*. Each entry
+shows how many mods it has on. The game must be **closed** to change them.
+
+- Pick one from the dropdown to make it the group the game uses.
+- **Manage…** creates an empty profile (every mod off), duplicates the selected
+  one, renames it, or deletes it. The built-in *Default* profile and your last
+  remaining profile can't be deleted; deleting the profile in use switches to
+  the one you had before it.
+- **Export** saves the selected profile as a `.json` file, **Import…** creates a
+  new profile from such a file. Mods in the file that you don't have installed
+  are reported and left out.
+
+Exporting is also the way to keep a copy of a profile: a game patch that
+changes the database format re-enables every mod (see below).
+
 ### Config editor
 
 1. Pick a **Configuration file** from the dropdown.
@@ -135,7 +156,7 @@ configuration).
 - The mod manager only writes to the game's mod database while Civ6 is closed,
   copies it to a timestamped `Mods.sqlite.bak-…` first (the newest 10 are kept),
   changes only the enabled/disabled flags, and checks the result — if anything
-  looks wrong, the backup is put back.
+  looks wrong, the backup is put back. The same applies to profile changes.
 
 ## Authors & feedback
 
@@ -148,7 +169,9 @@ AI assistant. Questions, bugs or ideas? Please
 A small Node server (`src/server.js`) exposes a JSON API used by the browser UI
 in `public/`. The format engine is `src/civ6cfg.js`; mod discovery is
 `src/modinfo.js` + `src/paths.js`; the safe-save logic is `src/editor.js`; the
-game's mod database is read and updated by `src/modsdb.js`, and `src/game.js` detects
-whether Civ6 is running. There
+game's mod database and mod groups are read and updated by `src/modsdb.js`, and
+`src/game.js` detects whether Civ6 is running. The profile UI is
+`public/profiles.js`. There
 is also a CLI, `src/edit-config.js` (`npm run edit -- --help`-style flags), which
-the server reuses. See `FINDINGS.md` for the reverse-engineered file format.
+the server reuses. `npm run phase4` checks the profile operations against a
+throwaway database. See `FINDINGS.md` for the reverse-engineered file format.

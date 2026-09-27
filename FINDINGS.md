@@ -133,6 +133,24 @@ schema `user_version` 24:
   (load-order hints). The mod manager warns on the first two.
   `ComponentRelationships` holds per-component `Include` / `Required`.
 
+Observed on a real database (2026-09-27), `user_version 24`:
+
+- `ModGroups` is `INTEGER PRIMARY KEY AUTOINCREMENT`; every user-created group
+  has `CanDelete=1, Selected=0, SortIndex=100` (only the built-in group differs:
+  `CanDelete=0, SortIndex=0`), so new groups are created the same way.
+- `ModGroupItems` is keyed `(ModGroupRowId, ModRowId)` with
+  `ON DELETE CASCADE` to both parents, and there is no unique `Selected` — more
+  than one group could be marked selected, so writes clear the flag first and
+  then check that exactly one group is left selected.
+- Groups are **not** full mod lists: real ones held between 1 and 422 rows
+  (422 mods installed). A group only carries the mods that were ever touched in
+  it, and a mod with no row reads as "not in this group" rather than off. A new
+  group is therefore created with a row per mod, all disabled, so it can be
+  toggled straight away; a group with no rows would be untoggleable.
+- The database has no "last used profile" column, so the toolkit remembers the
+  recently used groups in the browser's `localStorage` and falls back to the
+  built-in group, then the oldest one, when the profile in use is deleted.
+
 Behaviour verified in-game (2026-09-25): setting `Disabled=1` with the game
 closed shows the mod as disabled in *Additional Content*, and the flag survives
 a launch + exit. On launch the game rescans and adds newly installed mods
@@ -151,11 +169,31 @@ and restores the backup if anything fails after the commit. Mods on disk that
 the game hasn't scanned, and DB mods with no row in the active group (e.g.
 unowned DLC), are shown but can't be toggled.
 
+## Mod groups (profiles) — done
+
+`GET /api/modgroups` lists the profiles with their enabled/total counts;
+`POST /api/modgroups/{create,duplicate,rename,delete,activate}` changes them, and
+`GET /api/modgroups/export` / `POST /api/modgroups/import` move one as a `.json`
+file. Everything goes through the same `mutateDb()` path as `applyChanges`:
+backup, one `BEGIN IMMEDIATE` transaction, `PRAGMA quick_check`, read-back, and
+the backup restored if anything fails after the commit. All writes are refused
+with 409 while Civ6 runs.
+
+Export files hold `{toolkit, version, name, exportedAt, mods:[{modId, enabled}]}`
+— `ModId`, never `ModRowId`, which changes on every rescan. Import always
+creates a new group (name suffixed ` (2)`, ` (3)`… when taken) and reports mods
+this installation doesn't know rather than failing.
+
+`npm run phase4` proves the operations against a throwaway database and, when
+given a path, against a copy of a real `Mods.sqlite`.
+
 ## Possible follow-ups
 
 - Delete local mods / "open Steam page to unsubscribe" for Workshop mods.
-- Mod-group (profile) management; sync a group with a `.Civ6Cfg`'s mod list.
+- Sync a profile with a `.Civ6Cfg`'s mod list (the other direction of this).
 
 - Proper UTF-8/UTF-16 handling for non-Latin mod titles (cosmetic only today).
 - One-click launcher (e.g. a `.cmd` / packaged app) so there's no terminal at all.
 - Extend beyond mods to other config settings (needs more of the format mapped).
+- Backup names only have second resolution, so two writes in the same second
+  share a file name and the second overwrites the first.
