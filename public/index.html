@@ -117,6 +117,15 @@
   <section class="page" id="page-mods" hidden>
     <div id="modsAlerts"></div>
 
+    <div class="profilebar" id="profileBar" hidden>
+      <label class="profile-label" for="profileSelect">Profile</label>
+      <select id="profileSelect"></select>
+      <span id="profileMeta" class="meta"></span>
+      <div class="profile-actions">
+        <button id="profileManage" type="button" class="secondary">Manage…</button>
+      </div>
+    </div>
+
     <div class="toolbar">
       <div class="seg" id="srcFilter">
         <button type="button" data-src="mods">All mods <span></span></button>
@@ -166,6 +175,11 @@
       </div>
     </section>
 
+    <dialog id="profileDialog" class="dialog">
+      <button type="button" class="dialog-close" id="profileDialogClose" title="Close">×</button>
+      <div id="profileDialogBody"></div>
+    </dialog>
+
     <dialog id="modDialog" class="dialog">
       <button type="button" class="dialog-close" id="modDialogClose" title="Close">×</button>
       <div id="modDialogBody"></div>
@@ -194,5 +208,6 @@
   <script src="dashboard.js"></script>
   <script src="config.js"></script>
   <script src="mods.js"></script>
+  <script src="profiles.js"></script>
 </body>
 </html>

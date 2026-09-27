@@ -1,0 +1,204 @@
+'use strict';
+
+// Player profiles: the game's mod groups (Additional Content > Mod Groups).
+// The bar above the mod filters switches between them; the manage dialog
+// creates, renames, duplicates and deletes them. Every change is refused by
+// the server while Civ6 is running, so the controls are disabled then.
+
+const profilePage = { data: null };
+
+// Which profile the user had before, most recent first. The database has no
+// "last used" column, so deleting the active profile falls back to this.
+const LAST_USED_KEY = 'profileLastUsed';
+
+function lastUsed() {
+  try { return JSON.parse(localStorage.getItem(LAST_USED_KEY)) || []; } catch (_) { return []; }
+}
+
+function rememberUsed(id) {
+  const list = [id, ...lastUsed().filter((x) => x !== id)].slice(0, 5);
+  try { localStorage.setItem(LAST_USED_KEY, JSON.stringify(list)); } catch (_) { /* storage blocked */ }
+}
+
+function activeProfile() {
+  return profilePage.data && profilePage.data.active;
+}
+
+function profileById(id) {
+  return profilePage.data.groups.find((g) => g.id === Number(id));
+}
+
+// The profile to switch to when the active one is deleted: the one used before
+// it, and null lets the server pick the built-in group.
+function fallbackId() {
+  const current = activeProfile();
+  for (const id of lastUsed()) {
+    if (current && id === current.id) continue;
+    if (profileById(id)) return id;
+  }
+  return null;
+}
+
+// ---- bar --------------------------------------------------------------------
+
+function renderBar() {
+  const d = profilePage.data;
+  $('profileBar').hidden = !d;
+  if (!d) return;
+  const sel = $('profileSelect');
+  sel.innerHTML = d.groups
+    .map((g) => `<option value="${g.id}">${esc(groupLabel(g))} — ${g.enabled} of ${g.total} on</option>`)
+    .join('');
+  if (d.active) sel.value = String(d.active.id);
+  // Switching and editing both write to the game's database.
+  sel.disabled = game.running;
+  $('profileManage').disabled = game.running;
+  $('profileMeta').textContent = game.running ? 'Close Civ6 to change profiles' : '';
+}
+
+async function loadProfiles() {
+  profilePage.data = await api('/api/modgroups');
+  setGameStatus(profilePage.data.game);
+  if (profilePage.data.active) rememberUsed(profilePage.data.active.id);
+  renderBar();
+  if ($('profileDialog').open) renderDialog();
+  return profilePage.data;
+}
+
+// Runs one profile operation, then re-renders from the refreshed list the
+// server sends back and reloads the mod list (the mods shown belong to the
+// active profile).
+async function groupAction(action, body, message) {
+  try {
+    const r = await postJson('/api/modgroups/' + action, body);
+    profilePage.data = { ...profilePage.data, ok: true, groups: r.groups, active: r.active };
+    setGameStatus(r.game);
+    renderBar();
+    if ($('profileDialog').open) renderDialog();
+    toast(message(r), 'ok', `backup: ${esc(r.backupPath)}`);
+    await loadMods();
+    return r;
+  } catch (err) {
+    toast(esc(err.message), 'err');
+    return null;
+  }
+}
+
+async function switchTo(id) {
+  const current = activeProfile();
+  if (current && Number(id) === current.id) return;
+  if (modsPage.pending.size &&
+      !confirm('You have mod changes that haven\'t been applied. Switching profiles discards them. Continue?')) {
+    renderBar(); // put the select back on the profile actually in use
+    return;
+  }
+  modsPage.pending.clear();
+  await groupAction('activate', { id: Number(id) }, (r) => `Now using "${esc(groupLabel(r.active))}".`);
+  renderBar();
+}
+
+// ---- manage dialog ---------------------------------------------------------
+
+function profileRow(g, d) {
+  const blocked = game.running;
+  const oneLeft = d.groups.length < 2;
+  return `<div class="row">
+    <span class="name"><b>${esc(groupLabel(g))}</b><small>${g.enabled} of ${g.total} mods on</small></span>
+    ${g.selected ? '<span class="tag">in use</span>' : ''}
+    ${g.canDelete ? '' : '<span class="tag">built-in</span>'}
+    <button type="button" class="secondary small" data-use="${g.id}" ${g.selected || blocked ? 'disabled' : ''}>Use</button>
+    <button type="button" class="secondary small" data-duplicate="${g.id}" ${blocked ? 'disabled' : ''}>Duplicate</button>
+    <button type="button" class="secondary small" data-rename="${g.id}">Rename</button>
+    <button type="button" class="danger small" data-delete="${g.id}" ${!g.canDelete || oneLeft || blocked ? 'disabled' : ''}>Delete</button>
+  </div>`;
+}
+
+function renderDialog() {
+  const d = profilePage.data;
+  $('profileDialogBody').innerHTML = `
+    <h2>Profiles</h2>
+    <p class="hint">A profile is a set of mods turned on or off. Civ6 uses the one marked <b>in use</b>.
+      Changes are written to the game now and take effect the next time you start Civ6.</p>
+    <div class="panel-actions" style="margin-bottom:12px">
+      <button type="button" id="profileNew" ${game.running ? 'disabled' : ''}>New empty profile</button>
+    </div>
+    <div class="list">${d.groups.map((g) => profileRow(g, d)).join('')}</div>`;
+}
+
+function openDialog() {
+  renderDialog();
+  $('profileDialog').showModal();
+}
+
+function namePrompt(message, initial) {
+  const name = prompt(message, initial);
+  return name == null ? null : name.trim() || null;
+}
+
+async function createProfile() {
+  const name = namePrompt('Name for the new profile:', 'New profile');
+  if (!name) return;
+  await groupAction('create', { name }, (r) => `Created "${esc(groupLabel(r.group))}" with every mod off.`);
+}
+
+async function duplicateProfile(g) {
+  const name = namePrompt(`Name for the copy of "${groupLabel(g)}":`, `${groupLabel(g)} copy`);
+  if (!name) return;
+  await groupAction('duplicate', { id: g.id, name }, (r) => `Copied to "${esc(groupLabel(r.group))}".`);
+}
+
+async function renameProfile(g) {
+  const name = namePrompt('New name for this profile:', groupLabel(g));
+  if (!name) return;
+  await groupAction('rename', { id: g.id, name }, (r) => `Renamed to "${esc(groupLabel(r.group))}".`);
+}
+
+async function deleteProfile(g) {
+  const label = groupLabel(g);
+  const extra = g.selected ? '\n\nIt is the profile in use, so another one will be used instead.' : '';
+  if (!confirm(`Delete the profile "${label}" (${g.enabled} of ${g.total} mods on)?${extra}`)) return;
+  await groupAction('delete', { id: g.id, fallbackId: fallbackId() },
+    (r) => (r.active ? `Deleted "${esc(label)}". Now using "${esc(groupLabel(r.active))}".` : `Deleted "${esc(label)}".`));
+}
+
+// ---- events ----------------------------------------------------------------
+
+$('profileSelect').addEventListener('change', (e) => {
+  const id = Number(e.target.value);
+  switchTo(id).catch((err) => toast(esc(err.message), 'err'));
+});
+
+$('profileManage').addEventListener('click', openDialog);
+$('profileDialogClose').addEventListener('click', () => $('profileDialog').close());
+$('profileDialog').addEventListener('click', (e) => { if (e.target === $('profileDialog')) $('profileDialog').close(); });
+
+$('profileDialogBody').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b) return;
+  const d = profilePage.data;
+  if (b.id === 'profileNew') return void createProfile();
+  const g = profileById((b.dataset.use || b.dataset.duplicate || b.dataset.rename || b.dataset.delete));
+  if (!g) return;
+  if (b.dataset.use) switchTo(g.id);
+  else if (b.dataset.duplicate) duplicateProfile(g);
+  else if (b.dataset.rename) renameProfile(g);
+  else if (b.dataset.delete) deleteProfile(g);
+});
+
+// Profiles belong to the mod manager page, so they are loaded with it: wrap the
+// page's router entry point instead of listening for load events, which makes
+// the order of the script tags irrelevant. The bar is also re-rendered when the
+// game is opened or closed, since that decides what can be changed.
+const modsRoute = pages.mods.show;
+pages.mods = {
+  ...pages.mods,
+  show(params) {
+    return Promise.all([modsRoute(params), loadProfiles()]).then(([r]) => r);
+  },
+};
+
+document.addEventListener('gamestatus', () => {
+  if (document.body.dataset.page !== 'mods') return;
+  renderBar();
+  if ($('profileDialog').open) renderDialog();
+});
