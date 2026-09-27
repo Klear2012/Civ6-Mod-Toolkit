@@ -3,10 +3,18 @@ name: Release
 # Pushing a version tag (v1.1.0, v2.0.0-rc1, ...) builds the downloadable zip
 # and attaches it to a GitHub release. The checks below run first, so a broken
 # commit can never be published - the job simply fails and nothing is released.
+#
+# Re-running: "Run workflow" rebuilds the release for a tag that already exists,
+# so a failed publish never needs the tag deleted and pushed again.
 on:
   push:
     tags:
       - 'v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build the release for, e.g. v1.1.0'
+        required: true
 
 permissions:
   contents: write
@@ -18,9 +26,12 @@ jobs:
     runs-on: windows-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
+        with:
+          # A manual run builds the tag it was given, not the branch it is on.
+          ref: ${{ inputs.tag || github.ref }}
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: 'npm'
@@ -31,7 +42,7 @@ jobs:
       - name: Check every source file parses
         shell: pwsh
         run: |
-          # Judge by the exit code, not by stderr, so a failure reports the file.
+          # Judge by the exit code, not by stderr, so a failure names the file.
           $PSNativeCommandUseErrorActionPreference = $false
           Get-ChildItem src -Filter *.js | ForEach-Object {
             node --check $_.FullName
@@ -43,9 +54,11 @@ jobs:
         run: npm run phase4
 
       - name: Build the zip
+        id: build
         shell: pwsh
+        env:
+          TAG: ${{ inputs.tag || github.ref_name }}
         run: |
-          $tag = $env:GITHUB_REF_NAME
           $stage = Join-Path $env:GITHUB_WORKSPACE 'dist\Civ6-Mod-Toolkit'
           New-Item -ItemType Directory -Path $stage | Out-Null
           # Everything the user needs; nothing that is rebuilt, downloaded or
@@ -59,26 +72,30 @@ jobs:
             $path = Join-Path $env:GITHUB_WORKSPACE $item
             if (Test-Path $path) { Copy-Item $path -Destination $stage -Recurse }
           }
-          $zip = "Civ6-Mod-Toolkit-$tag.zip"
+          $zip = "Civ6-Mod-Toolkit-$env:TAG.zip"
           Push-Location $env:GITHUB_WORKSPACE\dist
           # bsdtar rather than Compress-Archive, which writes '\' inside the zip
           # instead of '/'. The full path keeps the Git Bash tar off it, and the
           # relative name keeps tar from reading "C:" as a remote host.
           & "$env:SystemRoot\System32\tar.exe" -a -c -f $zip Civ6-Mod-Toolkit
           Pop-Location
+          $built = Join-Path $env:GITHUB_WORKSPACE "dist\$zip"
+          if (-not (Test-Path $built)) { throw "the zip was not created: $built" }
           Get-ChildItem (Join-Path $stage '*') -Recurse -File |
             Measure-Object -Property Length -Sum |
             ForEach-Object { "{0:N1} MB uncompressed" -f ($_.Sum / 1MB) }
-          Write-Host "built $zip"
+          Write-Host "built dist\$zip"
+          # Hand the exact path to the next step instead of rebuilding the name.
+          "zip=dist/$zip" >> $env:GITHUB_OUTPUT
 
       - name: Create the release
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ inputs.tag || github.ref_name }}
+          ZIP: ${{ steps.build.outputs.zip }}
         run: |
-          $zip = "Civ6-Mod-Toolkit-$env:TAG.zip"
-          gh release create $env:TAG $zip `
+          gh release create $env:TAG $env:ZIP `
             --title $env:TAG `
             --generate-notes `
             --latest `
