@@ -43,10 +43,21 @@ function seed() {
       Disabled BOOLEAN DEFAULT 0, PRIMARY KEY(ModGroupRowId, ModRowId));
     CREATE TABLE ScannedFiles(ScannedFileRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, Path TEXT UNIQUE, LastWriteTime INTEGER DEFAULT 0);
     CREATE TABLE Mods(ModRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, ScannedFileRowId INTEGER NOT NULL,
-      ModId TEXT NOT NULL, Version INTEGER NOT NULL);`);
+      ModId TEXT NOT NULL, Version INTEGER NOT NULL);
+    CREATE TABLE ModProperties(ModRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL,
+      PRIMARY KEY(ModRowId, Name));
+    CREATE TABLE LocalizedText(ModRowId INTEGER NOT NULL, Tag TEXT NOT NULL, Locale TEXT NOT NULL, Text TEXT NOT NULL,
+      PRIMARY KEY(ModRowId, Tag, Locale));
+    CREATE TABLE ModRelationships(ModRowId INTEGER NOT NULL, OtherModId TEXT NOT NULL, Relationship TEXT NOT NULL, OtherModTitle TEXT);
+    CREATE TABLE Components(ModRowId INTEGER NOT NULL, ComponentType TEXT NOT NULL);
+    CREATE TABLE Settings(ModRowId INTEGER NOT NULL, SettingType TEXT NOT NULL);
+    CREATE TABLE ModFiles(ModRowId INTEGER NOT NULL);`);
   d.exec(`INSERT INTO ScannedFiles (Path) VALUES ('a'), ('b'), ('c'), ('d')`);
   const ids = ['mod-a', 'mod-b', 'mod-c', 'mod-d'];
-  ids.forEach((id, i) => d.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)').run(i + 1, id));
+  ids.forEach((id, i) => {
+    d.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)').run(i + 1, id);
+    d.prepare('INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, ?, ?)').run(i + 1, 'Name', id.toUpperCase());
+  });
   d.exec(`INSERT INTO ModGroups (Name, CanDelete, Selected, SortIndex) VALUES ('LOC_MODS_GROUP_DEFAULT_NAME', 0, 0, 0)`);
   d.exec(`INSERT INTO ModGroups (Name, CanDelete, Selected, SortIndex) VALUES ('Existing', 1, 1, 100)`);
   d.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (1, 1, 0)').run();
@@ -276,6 +287,115 @@ if (real && fs.existsSync(real)) {
   check('the copy still checks out', inCopy('PRAGMA quick_check')[0].quick_check === 'ok');
 } else if (real) {
   console.log(`\nTest 10: skipped - ${real} not found`);
+}
+
+// --- Test 12: registering a mod the game has not scanned --------------------
+console.log('\nTest 12: register an unscanned mod');
+{
+  // A .modinfo like the ones on disk, so registerMod has real input.
+  const modDir = path.join(TMP, 'mods', 'Test Mod');
+  fs.mkdirSync(modDir, { recursive: true });
+  const modinfo = path.join(modDir, 'Test Mod.modinfo');
+  fs.writeFileSync(modinfo, `<?xml version="1.0" encoding="utf-8"?>
+<Mod id="11111111-2222-3333-4444-555555555555" version="7">
+  <Properties>
+    <Name>Test Mod</Name>
+    <Teaser>A test.</Teaser>
+    <Description>Longer description.</Description>
+    <Authors>Somebody</Authors>
+    <CompatibleVersions>2.0</CompatibleVersions>
+  </Properties>
+</Mod>
+`);
+  const before = raw('SELECT (SELECT count(*) FROM Mods) m, (SELECT count(*) FROM ScannedFiles) f, (SELECT count(*) FROM ModGroupItems) g')[0];
+
+  const r = db.registerMods(DB_PATH, [modinfo]);
+  check('registered one mod', r.registered.length === 1, JSON.stringify(r.failed));
+  check('no failures', r.failed.length === 0);
+  check('a backup was made', !!r.backupPath && fs.existsSync(r.backupPath));
+  check('its id came from the .modinfo', r.registered[0].modId === '11111111-2222-3333-4444-555555555555');
+  check('it is a new row', r.registered[0].isNew === true);
+
+  // The game registers a new mod in the built-in group, and rebuilds that mod's
+  // group membership on its next scan - so that is the group to write.
+  check('registered in the built-in group', r.builtIn === 1, String(r.builtIn));
+  const builtIn = raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE i.ModGroupRowId = 1 AND lower(m.ModId) = '11111111-2222-3333-4444-555555555555'`)[0].n;
+  check('it has a row there', builtIn === 1);
+  check('and it is enabled there', raw(`SELECT i.Disabled d FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE i.ModGroupRowId = 1 AND lower(m.ModId) = '11111111-2222-3333-4444-555555555555'`)[0].d === 0);
+  check('no row written to other groups by default', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE i.ModGroupRowId != 1 AND lower(m.ModId) = '11111111-2222-3333-4444-555555555555'`)[0].n === 0);
+
+  const after = raw('SELECT (SELECT count(*) FROM Mods) m, (SELECT count(*) FROM ScannedFiles) f, (SELECT count(*) FROM ModGroupItems) g')[0];
+  check('one mod row added', after.m === before.m + 1, `${before.m} -> ${after.m}`);
+  check('one scanned file added', after.f === before.f + 1, `${before.f} -> ${after.f}`);
+  check('one group item added', after.g === before.g + 1, `${before.g} -> ${after.g}`);
+
+  const row = raw(`SELECT s.Path AS path, CAST(s.LastWriteTime AS TEXT) AS lwt, m.ModId AS modId, m.Version AS version
+    FROM Mods m JOIN ScannedFiles s ON s.ScannedFileRowId = m.ScannedFileRowId
+    WHERE lower(m.ModId) = '11111111-2222-3333-4444-555555555555'`)[0];
+  check('path uses forward slashes', !row.path.includes('\\'), row.path);
+  check('path points at the .modinfo', row.path.toLowerCase().endsWith('test mod.modinfo'));
+  check('version comes from the .modinfo', row.version === 7, String(row.version));
+  const fileMs = Math.floor(fs.statSync(modinfo).mtimeMs);
+  const lwtMs = Number(BigInt(row.lwt) / 10000n - 11644473600000n);
+  check('LastWriteTime is the file mtime', Math.abs(lwtMs - fileMs) < 1, `${lwtMs} vs ${fileMs}`);
+  check('a Name property was written', raw(`SELECT Value FROM ModProperties WHERE Name='Name' AND ModRowId =
+    (SELECT ModRowId FROM Mods WHERE lower(ModId)='11111111-2222-3333-4444-555555555555')`)[0].Value === 'Test Mod');
+
+  // The toolkit now treats it as a normal mod. It has no row in the active
+  // profile (that is Test 13's job), so here it reads as "not available" there.
+  const st = db.readModState(DB_PATH);
+  const seen = st.mods.find((m) => m.idNorm === '11111111-2222-3333-4444-555555555555');
+  check('the toolkit sees it', !!seen);
+  check('with its real name', seen && seen.name === 'Test Mod', seen && seen.name);
+  check('not in the active profile unless asked', seen && seen.disabled === null, String(seen && seen.disabled));
+  check('it is on in the built-in group', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE i.ModGroupRowId=1 AND i.Disabled=0 AND lower(m.ModId)='11111111-2222-3333-4444-555555555555'`)[0].n === 1);
+
+  // Idempotent: the game rescans on every launch, so repeats must be safe.
+  const again = db.registerMods(DB_PATH, [modinfo]);
+  const after2 = raw('SELECT (SELECT count(*) FROM Mods) m, (SELECT count(*) FROM ModGroupItems) g')[0];
+  check('re-registering adds nothing', after2.m === after.m && after2.g === after.g, `mods ${after.m}->${after2.m}, items ${after.g}->${after2.g}`);
+  check('and reports it as not new', again.registered[0].isNew === false);
+
+  check('registering nothing is a no-op', db.registerMods(DB_PATH, []).registered.length === 0);
+  check('a modinfo with no id is reported, not thrown', (() => {
+    const bad = path.join(modDir, 'bad.modinfo');
+    fs.writeFileSync(bad, '<Mod version="1"></Mod>');
+    const res = db.registerMods(DB_PATH, [bad]);
+    return res.registered.length === 0 && res.failed.length === 1;
+  })());
+  check('a missing file is reported, not thrown', (() => {
+    const res = db.registerMods(DB_PATH, [path.join(modDir, 'nope.modinfo')]);
+    return res.registered.length === 0 && res.failed.length === 1;
+  })());
+  check('the database is still intact', raw('PRAGMA quick_check')[0].quick_check === 'ok');
+  check('and has no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
+}
+
+console.log('\nTest 13: registering into a chosen profile as well');
+{
+  const modDir = path.join(TMP, 'mods', 'Second Mod');
+  fs.mkdirSync(modDir, { recursive: true });
+  const file = path.join(modDir, 'Second.modinfo');
+  fs.writeFileSync(file, '<Mod id="99999999-8888-7777-6666-555555555555" version="2"><Properties><Name>Second Mod</Name></Properties></Mod>');
+  const r = db.registerMods(DB_PATH, [file], true, 2); // profile "Existing"
+  check('registered', r.registered.length === 1 && r.failed.length === 0, JSON.stringify(r.failed));
+  check('reports the profile row was written', r.registered[0].profileRow === true);
+  check('has a row in the built-in group', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE i.ModGroupRowId=1 AND lower(m.ModId)='99999999-8888-7777-6666-555555555555'`)[0].n === 1);
+  check('and a row in the chosen profile', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE i.ModGroupRowId=2 AND lower(m.ModId)='99999999-8888-7777-6666-555555555555'`)[0].n === 1);
+  // readModState reports flags for whichever profile is in use, so make it ours.
+  db.activateGroup(DB_PATH, 2);
+  const st = db.readModState(DB_PATH);
+  const inExisting = st.mods.find((m) => m.idNorm === '99999999-8888-7777-6666-555555555555');
+  check('readable and enabled once that profile is in use', inExisting && inExisting.disabled === false,
+    inExisting ? String(inExisting.disabled) : '(not found)');
+  check('an unknown profile is rejected', fails(() => db.registerMods(DB_PATH, [file], true, 9999)));
+  check('a profile id of the built-in group is fine', db.registerMods(DB_PATH, [file], true, 1).registered.length === 1);
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });

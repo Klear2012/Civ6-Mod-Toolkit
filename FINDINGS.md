@@ -159,6 +159,49 @@ change on rescan**, so always key by `ModId`. The `Migrations` table (run on
 schema upgrades) copies `ModGroupItems` without `Disabled`, so a game patch that
 bumps the schema would re-enable everything.
 
+## Registering a mod without launching the game (done)
+
+A mod on disk has no database row until the game scans it, which is why the mod
+manager says *not scanned yet* and refuses to switch it on. The game can be
+skipped: writing the same rows the game would makes it adopt the mod, scan it,
+and fill in the rest. Verified on a real database (2026-09-27) with a subscribed
+Workshop mod that had never been scanned.
+
+What the game writes, and how to reproduce it exactly:
+
+- `ScannedFiles.Path` — absolute, **forward slashes even on Windows**, pointing
+  at the `.modinfo` file itself (not its folder).
+- `ScannedFiles.LastWriteTime` — a **Windows FILETIME**: 100-nanosecond ticks
+  since 1601-01-01, equal to the `.modinfo`'s mtime. Verified to match the file
+  mtime exactly for every row checked. It is far larger than a JavaScript number
+  can hold, so it must be read back as TEXT/BigInt, never as a number.
+- `Mods.Version` — the `version=` attribute of the `<Mod>` tag (matched for
+  every mod checked), not a schema or library version.
+- `ModProperties` — `Name`, `Description`, `Teaser`, `Authors` and
+  `CompatibleVersions` are copied straight out of the `.modinfo`. `Name` matters:
+  without it the mod manager lists the mod by its raw GUID.
+
+Two behaviours that are easy to get wrong, both found the hard way:
+
+1. **A newly discovered mod is registered in the built-in group**
+   (`CanDelete=0`, `LOC_MODS_GROUP_DEFAULT_NAME`), never in the group in use.
+   Every one of the 423 mods in a real database has a row there. When the game
+   adopts a mod it *rebuilds that mod's group membership from scratch*, so a row
+   written into another group is silently deleted on the next launch — which is
+   exactly what happened on the first attempt: the mod was registered, enabled,
+   and then wiped from the profile by the game on its next run.
+2. **Registration is two-phase.** The toolkit can write the rows the game needs
+   to notice a mod, but it cannot know which files the mod contributes. The game
+   supplies those itself: after adopting our minimal row it added 127 `ModFiles`,
+   6 `Components` and 5 `Settings` rows, and left our `Mods` row (same
+   `ModRowId`) in place. A profile toggle written *before* that first launch is
+   lost; written after, it survives indefinitely.
+
+So the safe order is: register in the built-in group, let the game scan once to
+fill in the file list, then set the profile toggle. `registerMods()` writes the
+built-in row always, and the active profile's row only when asked — which is
+correct only for a mod the game has already scanned.
+
 ## Mod manager (done)
 
 `POST /api/mods/apply` refuses while the game runs (process check), backs up

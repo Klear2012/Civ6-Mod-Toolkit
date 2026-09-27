@@ -506,8 +506,166 @@ function importGroup(dbPath, data) {
   return { backupPath, ...result };
 }
 
+// ---------------------------------------------------------------------------
+// Registering a mod the game has not scanned yet
+//
+// The game normally owns this: on launch it walks the mod folders and writes
+// ScannedFiles / Mods / ModProperties / ModGroupItems rows. Until it has, a mod
+// on disk has no row and cannot be switched on. This writes the same rows, so
+// a newly subscribed mod can be used without starting the game.
+//
+// Observed on a real database (2026-09-27):
+//   - ScannedFiles.Path is absolute, uses forward slashes even on Windows, and
+//     points at the .modinfo file itself rather than its folder.
+//   - ScannedFiles.LastWriteTime is a Windows FILETIME (100ns ticks since 1601)
+//     equal to the .modinfo's mtime. It does not fit in a JS number, so it is
+//     always read back as TEXT.
+//   - Mods.Version is the version= attribute of the <Mod> tag.
+//   - The descriptive ModProperties (Name, Description, Teaser, Authors,
+//     CompatibleVersions) are copied out of the .modinfo; without a Name the
+//     mod is listed by its raw GUID.
+// What the game does NOT do here is record ModFiles/Components/Settings - those
+// say which files the mod contributes. See FINDINGS.md for what that means.
+// ---------------------------------------------------------------------------
+
+const FILETIME_EPOCH_MS = 11644473600000n; // 1601-01-01 to 1970-01-01, in ms
+const MAX_REGISTER_MODS = 2000;
+
+// .modinfo -> { id, version, properties }. The same fields modinfo.js already
+// reads, plus the ones the game copies into ModProperties.
+function readModinfoMeta(file) {
+  const fs = require('fs');
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+  } catch (e) {
+    return null;
+  }
+  const tag = (text.match(/<Mod\b[^>]*>/i) || [''])[0];
+  const id = (tag.match(/\bid\s*=\s*"([^"]+)"/i) || [])[1];
+  if (!id) return null;
+  const version = Number((tag.match(/\bversion\s*=\s*"?(\d+)"?/i) || [])[1] || 1);
+  const field = (name) => {
+    const m = text.match(new RegExp(`<${name}>\\s*([^<]*?)\\s*<\\/${name}>`, 'i'));
+    return m ? m[1].trim() : '';
+  };
+  return {
+    id,
+    version: Number.isFinite(version) && version > 0 ? version : 1,
+    properties: {
+      Name: field('Name'),
+      Description: field('Description'),
+      Teaser: field('Teaser'),
+      Authors: field('Authors'),
+      CompatibleVersions: field('CompatibleVersions'),
+    },
+  };
+}
+
+function toFileTime(mtimeMs) {
+  return (BigInt(Math.floor(mtimeMs)) + FILETIME_EPOCH_MS) * 10000n;
+}
+
+function registerMod(db, file, activeGroupId, enabled = true) {
+  const fs = require('fs');
+  const meta = readModinfoMeta(file);
+  if (!meta) throw new Error('no mod id in the .modinfo');
+  // The game stores forward slashes even on Windows.
+  const rel = file.replace(/\\/g, '/');
+  const mtime = toFileTime(fs.statSync(file).mtimeMs);
+
+  const seen = db.prepare('SELECT ScannedFileRowId FROM ScannedFiles WHERE Path = ?').get(rel);
+  let fileRowId = seen && seen.ScannedFileRowId;
+  if (fileRowId) {
+    db.prepare('UPDATE ScannedFiles SET LastWriteTime = ? WHERE ScannedFileRowId = ?').run(mtime, fileRowId);
+  } else {
+    fileRowId = db.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, ?)').run(rel, mtime).lastInsertRowid;
+  }
+
+  const known = db.prepare('SELECT ModRowId FROM Mods WHERE lower(ModId) = lower(?)').get(meta.id);
+  const isNew = !known;
+  const modRowId = isNew
+    ? db.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, ?)').run(fileRowId, meta.id, meta.version).lastInsertRowid
+    : known.ModRowId;
+
+  // Only describe a mod we just created; never overwrite what the game wrote.
+  if (isNew) {
+    const put = db.prepare('INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, ?, ?)');
+    for (const [name, value] of Object.entries(meta.properties)) {
+      if (value) put.run(modRowId, name, value);
+    }
+  }
+
+  // The game rescans on every launch, so this has to be safe to repeat.
+  db.prepare(`INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)
+    ON CONFLICT (ModGroupRowId, ModRowId) DO UPDATE SET Disabled = excluded.Disabled`)
+    .run(activeGroupId, modRowId, enabled ? 0 : 1);
+  return { modId: meta.id, name: meta.properties.Name || meta.id, file, isNew, modRowId };
+}
+
+// The built-in group. Every mod the game knows has a row here - verified on a
+// real database (2026-09-27): all 423 mods, no exceptions. When the game finds a
+// mod it has not scanned before it registers it here, and rebuilds that mod's
+// group membership from scratch, which is why a row written into another group
+// does not survive the next launch. Registration therefore always targets this
+// group, and the active profile is handled separately by applyChanges.
+const DEFAULT_GROUP_NAME = 'LOC_MODS_GROUP_DEFAULT_NAME';
+
+function defaultGroupOf(db) {
+  const g = db.prepare('SELECT ModGroupRowId AS id FROM ModGroups WHERE CanDelete = 0 ORDER BY SortIndex, ModGroupRowId LIMIT 1').get();
+  if (g) return g.id;
+  const byName = db.prepare('SELECT ModGroupRowId AS id FROM ModGroups WHERE Name = ? LIMIT 1').get(DEFAULT_GROUP_NAME);
+  if (byName) return byName.id;
+  throw new Error('the mod database has no built-in mod group');
+}
+
+// Registers mods in the built-in group, the same way the game does, so they can
+// be switched on without the game having scanned them. `files` are .modinfo
+// paths. Caller must make sure the game is closed. If `groupId` is given, a row
+// is also written to that profile so the mod is immediately usable there; the
+// game leaves that alone once it has scanned the mod itself.
+function registerMods(dbPath, files, enabled = true, groupId = null) {
+  requireDb();
+  if (!Array.isArray(files) || !files.length) return { registered: [], failed: [], backupPath: null };
+  if (files.length > MAX_REGISTER_MODS) throw new Error('too many mods at once');
+
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const builtIn = defaultGroupOf(db);
+    const extra = groupId == null ? null : Number(groupId);
+    if (extra != null && !db.prepare('SELECT 1 FROM ModGroups WHERE ModGroupRowId = ?').get(extra)) {
+      throw new Error('that mod group no longer exists');
+    }
+    const registered = [];
+    const failed = [];
+    for (const file of files) {
+      try {
+        const entry = registerMod(db, file, builtIn, enabled);
+        if (extra != null && extra !== builtIn) {
+          db.prepare(`INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)
+            ON CONFLICT (ModGroupRowId, ModRowId) DO UPDATE SET Disabled = excluded.Disabled`)
+            .run(extra, entry.modRowId, enabled ? 0 : 1);
+          entry.profileRow = true;
+        }
+        registered.push(entry);
+      } catch (e) {
+        failed.push({ file, error: e.message });
+      }
+    }
+    // Read back: every one of them must now have a row in the built-in group.
+    if (registered.length) {
+      const check = db.prepare(`SELECT count(*) AS n FROM Mods m JOIN ModGroupItems i ON i.ModRowId = m.ModRowId
+        WHERE i.ModGroupRowId = ? AND lower(m.ModId) IN (${registered.map(() => 'lower(?)').join(',')})`)
+        .get(builtIn, ...registered.map((r) => r.modId));
+      if (check.n !== registered.length) throw new Error('the mods were not registered correctly');
+    }
+    return { registered, failed, group: extra == null ? builtIn : extra, builtIn };
+  });
+  return { backupPath, ...result };
+}
+
 module.exports = {
   readModState, readModDetails, applyChanges, classifyPath,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
   exportGroup, importGroup, EXPORT_TOOLKIT, EXPORT_VERSION,
+  registerMod, registerMods, readModinfoMeta, toFileTime,
 };
