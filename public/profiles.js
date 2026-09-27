@@ -50,9 +50,12 @@ function renderBar() {
     .map((g) => `<option value="${g.id}">${esc(groupLabel(g))} — ${g.enabled} of ${g.total} on</option>`)
     .join('');
   if (d.active) sel.value = String(d.active.id);
-  // Switching and editing both write to the game's database.
+  // Switching and editing both write to the game's database; exporting and the
+  // manage dialog's read-only view still work while it runs.
   sel.disabled = game.running;
   $('profileManage').disabled = game.running;
+  $('profileImport').disabled = game.running;
+  $('profileExport').disabled = !d.active;
   $('profileMeta').textContent = game.running ? 'Close Civ6 to change profiles' : '';
 }
 
@@ -161,6 +164,46 @@ async function deleteProfile(g) {
     (r) => (r.active ? `Deleted "${esc(label)}". Now using "${esc(groupLabel(r.active))}".` : `Deleted "${esc(label)}".`));
 }
 
+// ---- export / import -------------------------------------------------------
+
+// A download is a plain navigation to the endpoint, which answers with the file.
+function exportProfile() {
+  const active = activeProfile();
+  if (!active) return;
+  $('profileMeta').textContent = 'Exporting…';
+  const a = document.createElement('a');
+  a.href = '/api/modgroups/export?id=' + encodeURIComponent(active.id);
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  $('profileMeta').textContent = '';
+}
+
+// Import always creates a new profile; the file's own mods that this install
+// doesn't have are reported instead of silently dropped.
+async function importProfile(file) {
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch (_) {
+    toast(esc(`${file.name} is not valid JSON.`), 'err');
+    return;
+  }
+  const r = await groupAction('import', { profile: data },
+    (x) => `Imported "${esc(groupLabel(x.group))}" with ${x.imported} mod${x.imported === 1 ? '' : 's'}.`);
+  if (!r) return;
+  if (r.skipped && r.skipped.length) {
+    // Prefer a name the player recognises over the bare id.
+    const known = new Map((modsPage.data ? modsPage.data.mods : []).map((m) => [m.idNorm, m.name]));
+    const names = r.skipped.map((id) => known.get(String(id).toLowerCase()) || id);
+    const shown = names.slice(0, 5).map(esc).join(', ');
+    toast(`${r.skipped.length} mod${r.skipped.length === 1 ? '' : 's'} in the file ` +
+      `${r.skipped.length === 1 ? 'is' : 'are'} not installed here and ${r.skipped.length === 1 ? 'was' : 'were'} left out.`,
+      'err', shown + (names.length > 5 ? `, +${names.length - 5} more` : ''));
+  }
+}
+
 // ---- events ----------------------------------------------------------------
 
 $('profileSelect').addEventListener('change', (e) => {
@@ -169,6 +212,13 @@ $('profileSelect').addEventListener('change', (e) => {
 });
 
 $('profileManage').addEventListener('click', openDialog);
+$('profileExport').addEventListener('click', exportProfile);
+$('profileImport').addEventListener('click', () => $('profileFile').click());
+$('profileFile').addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = ''; // so the same file can be picked twice
+  if (file) importProfile(file).catch((err) => toast(esc(err.message), 'err'));
+});
 $('profileDialogClose').addEventListener('click', () => $('profileDialog').close());
 $('profileDialog').addEventListener('click', (e) => { if (e.target === $('profileDialog')) $('profileDialog').close(); });
 
