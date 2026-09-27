@@ -78,9 +78,15 @@
   <section class="hero">
     <h1>Manage your Civ VI mods without starting the game</h1>
     <p class="lede">A small Windows tool for Sid Meier's Civilization VI. It opens in your browser. You can turn mods and DLC on and off, and add or remove mods in a saved game configuration without setting it up again.</p>
-    <a class="download" id="download" href="https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/download/v1.3.0/Civ6-Mod-Toolkit-v1.3.0.zip">
+    <!-- The script below replaces this with a direct link to the newest zip. If
+         it cannot reach the API - unauthenticated GitHub allows 60 requests an
+         hour per address, which a shared or NAT'd one can exhaust - this stays
+         a link to the releases page. Deliberate: a pinned zip URL would look
+         current while being a release behind, whereas the page always shows
+         what is actually newest. -->
+    <a class="download" id="download" href="https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>
-      <span id="download-label">Download v1.3.0</span>
+      <span id="download-label">Download</span>
     </a>
     <div class="meta"><span id="download-meta">Windows 10 or 11 · needs Node.js 22.5+</span> · <a href="https://github.com/Klear2012/Civ6-Mod-Toolkit/releases">All releases</a></div>
   </section>
