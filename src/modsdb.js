@@ -640,7 +640,13 @@ function xmlActions(blocks) {
         properties: xmlSections(body, 'Properties').flatMap((b) => [
           ...b.matchAll(/<([A-Za-z][A-Za-z0-9]*)>([\s\S]*?)<\/\1>/g),
         ]).map((x) => ({ name: x[1], value: x[2].trim() })),
-        files: [...body.matchAll(/<File>([\s\S]*?)<\/File>/g)].map((x) => x[1].trim()).filter(Boolean),
+        // <File> may carry attributes - `<File priority="2">` is common - and a
+        // regex for a bare <File> silently drops those files, losing their
+        // links entirely. The priority itself is not copied: the game writes 0
+        // for every link where the two disagree, which was every disagreement
+        // seen across 6144 real links.
+        files: [...body.matchAll(/<File\b[^>]*>([\s\S]*?)<\/File>/g)].map((x) => x[1].trim())
+          .filter(Boolean),
       });
     }
   }
@@ -697,7 +703,7 @@ function parseModinfo(file) {
   if (!meta) return null;
   return {
     ...meta,
-    files: xmlSections(text, 'Files').flatMap((b) => [...b.matchAll(/<File>([\s\S]*?)<\/File>/g)].map((x) => x[1].trim()))
+    files: xmlSections(text, 'Files').flatMap((b) => [...b.matchAll(/<File\b[^>]*>([\s\S]*?)<\/File>/g)].map((x) => x[1].trim()))
       .filter(Boolean),
     inGame: xmlActions(xmlSections(text, 'InGameActions')),
     frontEnd: xmlActions(xmlSections(text, 'FrontEndActions')),
@@ -786,8 +792,8 @@ function writeModContent(db, modRowId, info) {
       : db.prepare('INSERT INTO Settings (ModRowId, SettingId, SettingType) VALUES (?, ?, ?)');
     const addProp = db.prepare('INSERT INTO ComponentProperties (ComponentRowId, Name, Value) VALUES (?, ?, ?)');
     const link = kind === 'component'
-      ? db.prepare('INSERT INTO ComponentFiles (ComponentRowId, FileRowId, Priority) VALUES (?, ?, 0)')
-      : db.prepare('INSERT INTO SettingFiles (SettingRowId, FileRowId, Priority) VALUES (?, ?, 0)');
+      ? db.prepare('INSERT INTO ComponentFiles (ComponentRowId, FileRowId, Priority) VALUES (?, ?, ?)')
+      : db.prepare('INSERT INTO SettingFiles (SettingRowId, FileRowId, Priority) VALUES (?, ?, ?)');
     let count = 0;
     for (const a of actions) {
       const actionId = addAction.run(modRowId, a.id, a.type).lastInsertRowid;
@@ -799,7 +805,7 @@ function writeModContent(db, modRowId, info) {
         const target = fileRowId.get(rel.split('\\').join('/'));
         // A file the modinfo references but never lists is not loadable; skip
         // it rather than link a row that points at nothing.
-        if (target != null) link.run(actionId, target);
+        if (target != null) link.run(actionId, target, 0);
       }
     }
     return count;

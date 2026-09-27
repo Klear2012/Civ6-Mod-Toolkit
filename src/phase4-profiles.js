@@ -503,6 +503,40 @@ console.log('\nTest 15: every .modinfo property and <Dependencies> are recorded'
   check('no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
 }
 
+console.log('\nTest 16: <File> elements that carry attributes are not dropped');
+{
+  const dir = path.join(TMP, 'mods', 'Attr Mod');
+  fs.mkdirSync(path.join(dir, 'Data'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Data', 'a.xml'), 'x');
+  fs.writeFileSync(path.join(dir, 'Data', 'b.xml'), 'x');
+  const file = path.join(dir, 'Attr.modinfo');
+  fs.writeFileSync(file, `<?xml version="1.0" encoding="utf-8"?>
+<Mod id="88888888-7777-6666-5555-444444444444" version="1">
+  <Properties><Name>Attr Mod</Name></Properties>
+  <InGameActions>
+    <UpdateIcons id="Icon">
+      <File>Data/a.xml</File>
+      <File priority="1">Data/b.xml</File>
+      <File Priority="2">Data/c.xml</File>
+    </UpdateIcons>
+  </InGameActions>
+  <Files><File>Data/a.xml</File><File>Data/b.xml</File></Files>
+</Mod>
+`);
+  const r = db.registerMods(DB_PATH, [file]);
+  check('registered', r.registered.length === 1 && r.failed.length === 0, JSON.stringify(r.failed));
+  const mid = raw('SELECT ModRowId FROM Mods WHERE lower(ModId)=?', '88888888-7777-6666-5555-444444444444')[0].ModRowId;
+  const links = raw(`SELECT mf.Path AS p FROM ComponentFiles cf JOIN Components c ON c.ComponentRowId=cf.ComponentRowId
+    JOIN ModFiles mf ON mf.FileRowId=cf.FileRowId WHERE c.ModRowId=?`, mid).map((r) => r.p);
+  check('the lowercase priority= file is linked, not dropped', links.includes('Data/b.xml'), JSON.stringify(links));
+  check('the capitalised Priority= file is not linked (absent from <Files>)', !links.includes('Data/c.xml'), JSON.stringify(links));
+  check('two links in total', links.length === 2, JSON.stringify(links));
+  check('all links at priority 0', raw(`SELECT cf.Priority AS pr FROM ComponentFiles cf JOIN Components c ON c.ComponentRowId=cf.ComponentRowId
+    WHERE c.ModRowId=?`, mid).every((r) => r.pr === 0));
+  check('database still intact', raw('PRAGMA quick_check')[0].quick_check === 'ok');
+  check('no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log('\n============================================================');
 console.log(pass ? 'PROFILES: ALL CHECKS PASSED' : 'PROFILES: FAILURES PRESENT');
