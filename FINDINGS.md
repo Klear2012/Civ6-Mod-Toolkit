@@ -190,17 +190,15 @@ Two behaviours that are easy to get wrong, both found the hard way:
    written into another group is silently deleted on the next launch — which is
    exactly what happened on the first attempt: the mod was registered, enabled,
    and then wiped from the profile by the game on its next run.
-2. **Registration is two-phase.** The toolkit can write the rows the game needs
-   to notice a mod, but it cannot know which files the mod contributes. The game
-   supplies those itself: after adopting our minimal row it added 127 `ModFiles`,
-   6 `Components` and 5 `Settings` rows, and left our `Mods` row (same
-   `ModRowId`) in place. A profile toggle written *before* that first launch is
-   lost; written after, it survives indefinitely.
-
-So the safe order is: register in the built-in group, let the game scan once to
-fill in the file list, then set the profile toggle. `registerMods()` writes the
-built-in row always, and the active profile's row only when asked — which is
-correct only for a mod the game has already scanned.
+2. **Registration is not two-phase any more.** An earlier version wrote only the
+   three rows the game needs to *notice* a mod and left the rest to the game,
+   which added 127 `ModFiles`, 6 `Components` and 5 `Settings` of its own on the
+   next launch. A profile toggle written before that launch was then lost, and
+   this file said so. The complete registration below removes the need for the
+   game's pass entirely, so **the two-phase caveat no longer applies** and a
+   profile toggle written at registration time is permanent. What survives from
+   the old behaviour: a newly discovered mod lands in the built-in group, so the
+   registration must write the built-in row itself rather than only the profile.
 
 ### The complete registration, and the two details that make it stick
 

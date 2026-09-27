@@ -11,7 +11,8 @@ A mod toolkit for Sid Meier's Civilization VI that runs outside the game:
 - **Mod manager** — turn mods (and official DLC) on and off without starting
   the game, with warnings for missing dependencies and conflicts. Handy when a
   broken mod stops the game from starting, or when the in-game mod screen is
-  slow.
+  slow. A mod you have just subscribed to can be registered and switched on
+  here too, instead of starting the game once so it notices the mod.
 - **Profiles** — Civ6 calls them *mod groups*. Create, duplicate, rename, delete
   and switch between them here, and export/import a profile as a `.json` file,
   so a set-up can be moved to another computer or shared.
@@ -80,7 +81,8 @@ auto-detected; if one shows **not found**, click **Edit paths**, fix it, and
 **Save paths**.
 
 If you've just installed or subscribed to a mod, the dashboard tells you when
-the game hasn't picked it up yet — start Civ6 once and it will.
+the game hasn't picked it up yet — the mod manager can **register** it for you
+(see below), so you don't have to start the game just for that.
 
 ### Mod manager
 
@@ -105,9 +107,13 @@ the game hasn't picked it up yet — start Civ6 once and it will.
    applying is blocked while Civ6 runs. Changes take effect the next time you
    start the game.
 
-Mods you've only just installed show **not scanned yet**: start Civ6 once so it
-registers them, then they can be toggled here. The toolkit edits the game's
-currently selected mod group (normally *Default*).
+Mods you've only just subscribed to are not in the game's database yet, so they
+show **not registered yet** and can't be ticked. Click **Register** on the mod —
+or **Register them all** in the banner — and the toolkit writes the same
+registration the game would, and switches the mod on in the profile you are
+editing. Nothing to do afterwards except start Civ6 to play. The game must be
+**closed** to register, like it must be to apply changes. The toolkit edits the
+game's currently selected mod group (normally *Default*).
 
 ### Profiles (mod groups)
 
@@ -155,8 +161,8 @@ configuration).
   from its own page (other websites open in your browser can't talk to it).
 - The mod manager only writes to the game's mod database while Civ6 is closed,
   copies it to a timestamped `Mods.sqlite.bak-…` first (the newest 10 are kept),
-  changes only the enabled/disabled flags, and checks the result — if anything
-  looks wrong, the backup is put back. The same applies to profile changes.
+  and checks the result — if anything looks wrong, the backup is put back. The
+  same applies to profile changes and to registering a mod.
 
 ## Authors & feedback
 
@@ -169,9 +175,10 @@ AI assistant. Questions, bugs or ideas? Please
 A small Node server (`src/server.js`) exposes a JSON API used by the browser UI
 in `public/`. The format engine is `src/civ6cfg.js`; mod discovery is
 `src/modinfo.js` + `src/paths.js`; the safe-save logic is `src/editor.js`; the
-game's mod database and mod groups are read and updated by `src/modsdb.js`, and
-`src/game.js` detects whether Civ6 is running. The profile UI is
-`public/profiles.js`. There
+game's mod database, mod groups and mod registration are read and updated by
+`src/modsdb.js`, and `src/game.js` detects whether Civ6 is running. The profile
+UI is `public/profiles.js`. There
 is also a CLI, `src/edit-config.js` (`npm run edit -- --help`-style flags), which
-the server reuses. `npm run phase4` checks the profile operations against a
-throwaway database. See `FINDINGS.md` for the reverse-engineered file format.
+the server reuses. `npm run phase4` checks the profile and registration
+operations against a throwaway database. See `FINDINGS.md` for the
+reverse-engineered file format and the mod database schema.
