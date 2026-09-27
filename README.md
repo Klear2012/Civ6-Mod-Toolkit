@@ -17,7 +17,7 @@ A mod toolkit for Sid Meier's Civilization VI that runs outside the game:
   and switch between them here, and export/import a profile as a `.json` file,
   so a set-up can be moved to another computer or shared.
 
-Website: <https://cru121.github.io/Civ6-Mod-Toolkit/>
+Website: <https://klear2012.github.io/Civ6-Mod-Toolkit/>
 
 Not affiliated with or endorsed by Firaxis Games or 2K.
 
@@ -26,7 +26,7 @@ Not affiliated with or endorsed by Firaxis Games or 2K.
 Windows 10 or 11.
 
 1. **Download** `Civ6-Mod-Toolkit-vX.Y.Z.zip` from the
-   [latest release](https://github.com/cru121/Civ6-Mod-Toolkit/releases/latest).
+   [latest release](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 2. **Unblock it** (recommended): right-click the zip → *Properties* → tick
    **Unblock** → *OK*. Otherwise Windows may show a blue *"Windows protected
    your PC"* warning when you start the launcher — if it does, click
@@ -176,9 +176,10 @@ configuration).
 
 ## Authors & feedback
 
-Made by **cru121** (Steam: *evzenhouzvicka*) together with Claude, Anthropic's
-AI assistant. Questions, bugs or ideas? Please
-[open an issue](https://github.com/cru121/Civ6-Mod-Toolkit/issues).
+Originally by **cru121** (Steam: *evzenhouzvicka*), maintained by
+**Klear2012**, together with Claude, Anthropic's AI assistant. Questions, bugs
+or ideas? Please
+[open an issue](https://github.com/Klear2012/Civ6-Mod-Toolkit/issues).
 
 ## What's under the hood
 

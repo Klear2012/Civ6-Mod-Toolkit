@@ -70,7 +70,7 @@
     <a href="#install">Install</a>
     <a href="#usage">Usage</a>
     <a href="#safety">Safety</a>
-    <a href="https://github.com/cru121/Civ6-Mod-Toolkit">GitHub</a>
+    <a href="https://github.com/Klear2012/Civ6-Mod-Toolkit">GitHub</a>
   </nav>
 </header>
 
@@ -78,16 +78,17 @@
   <section class="hero">
     <h1>Manage your Civ VI mods without starting the game</h1>
     <p class="lede">A small Windows tool for Sid Meier's Civilization VI. It opens in your browser. You can turn mods and DLC on and off, and add or remove mods in a saved game configuration without setting it up again.</p>
-    <a class="download" id="download" href="https://github.com/cru121/Civ6-Mod-Toolkit/releases/download/v1.0.0/Civ6-Mod-Toolkit-v1.0.0.zip">
+    <a class="download" id="download" href="https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/download/v1.3.0/Civ6-Mod-Toolkit-v1.3.0.zip">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M12 3v12m0 0-5-5m5 5 5-5M4 20h16"/></svg>
-      <span id="download-label">Download v1.0.0</span>
+      <span id="download-label">Download v1.3.0</span>
     </a>
-    <div class="meta"><span id="download-meta">Windows 10 or 11 · needs Node.js 22.5+</span> · <a href="https://github.com/cru121/Civ6-Mod-Toolkit/releases">All releases</a></div>
+    <div class="meta"><span id="download-meta">Windows 10 or 11 · needs Node.js 22.5+</span> · <a href="https://github.com/Klear2012/Civ6-Mod-Toolkit/releases">All releases</a></div>
   </section>
 
   <div class="features">
     <div class="card"><h3>Dashboard</h3><p>Shows your Workshop and local mods, saved configurations, official DLC, whether the game is running, and which folders the toolkit uses.</p></div>
     <div class="card"><h3>Mod manager</h3><p>Turn mods and DLC on or off, with warnings about missing dependencies and conflicts. Useful when a broken mod stops the game from starting.</p></div>
+    <div class="card"><h3>Profiles</h3><p>Keep a separate set of mods per profile, the same as Civ6's mod groups. Create, rename, duplicate, delete, and export or import them.</p></div>
     <div class="card"><h3>Config editor</h3><p>Add or remove mods in an existing <code>.Civ6Cfg</code>. Your other game settings stay as they are.</p></div>
   </div>
 
@@ -108,15 +109,19 @@ npm start</code></pre>
 
   <h2 id="usage">Usage</h2>
   <h3>Dashboard</h3>
-  <p>The toolkit finds your mod folders, configurations folder and the game's <code>Mods.sqlite</code> database automatically. If one shows <strong>not found</strong>, click <strong>Edit paths</strong>. If you just installed a mod, start Civ6 once so the game registers it.</p>
+  <p>The toolkit finds your mod folders, configurations folder and the game's <code>Mods.sqlite</code> database automatically. If one shows <strong>not found</strong>, click <strong>Edit paths</strong>. A mod you have just subscribed to does not need a game launch — the mod manager can register it for you.</p>
 
   <h3>Mod manager</h3>
   <ol>
     <li>Filter by <strong>Workshop</strong>, <strong>Local</strong> or <strong>Official DLC</strong>, by enabled or disabled, or by name.</li>
+    <li>A mod that cannot be ticked yet gets a button instead: <strong>Register</strong> if the game has never scanned it, <strong>Add to profile</strong> if the game knows it but it is not in the profile you are editing. Use <strong>Add them all</strong> in the banner for the lot. Civ6 must be <strong>closed</strong> first.</li>
     <li>Tick or untick mods, or switch to <strong>Two panes</strong> and click mods to move them between <em>Available</em> and <em>Enabled</em>.</li>
     <li>Click <strong>i</strong> on a mod to see its details, dependencies, conflicts, and which of your configurations use it.</li>
     <li>Click <strong>Apply changes</strong>. Civ6 must be <strong>closed</strong> first.</li>
   </ol>
+
+  <h3>Profiles (mod groups)</h3>
+  <p>The <strong>Profile</strong> bar picks which group of mods you are editing — the same thing as Civ6's <em>Additional Content → Mod Groups</em>. <strong>Manage…</strong> creates, duplicates, renames and deletes profiles; <strong>Export</strong> and <strong>Import…</strong> move one between machines. Registering a mod switches it on in the profile you are editing and leaves it available but off in your others, so it stays switchable wherever you are.</p>
 
   <h3>Config editor</h3>
   <ol>
@@ -130,20 +135,21 @@ npm start</code></pre>
   <ul>
     <li>Before it overwrites a file, the toolkit saves a timestamped backup (<code>.bak-…</code>).</li>
     <li>It changes only the mod list in a configuration, and checks the result before writing. If the check fails, nothing is written.</li>
-    <li>It changes the mod database only while Civ6 is closed. It changes only the enabled/disabled flags, and restores the backup if the result looks wrong.</li>
+    <li>It changes the mod database only while Civ6 is closed. Ticking a mod changes its enabled/disabled flag; registering a new one writes the same rows the game would have written, then reads them back and restores the backup if the result looks wrong.</li>
+    <li>Registering many mods at once is all-or-nothing, and the browser only ever sends mod ids — never a file path.</li>
     <li>It listens only on <code>127.0.0.1</code>, and accepts requests only from its own page.</li>
   </ul>
 
   <footer>
-    Made by <strong>cru121</strong> (Steam: <em>evzenhouzvicka</em>) together with Claude, Anthropic's AI assistant.
-    Bugs or ideas? <a href="https://github.com/cru121/Civ6-Mod-Toolkit/issues">Open an issue</a>.<br>
+    Originally by <strong>cru121</strong> (Steam: <em>evzenhouzvicka</em>), maintained by <a href="https://github.com/Klear2012">Klear2012</a>, together with Claude, Anthropic's AI assistant.
+    Bugs or ideas? <a href="https://github.com/Klear2012/Civ6-Mod-Toolkit/issues">Open an issue</a>.<br>
     Not affiliated with or endorsed by Firaxis Games or 2K.
   </footer>
 </main>
 
 <script>
   // Point the download button at the newest release's zip. The static href is the fallback.
-  fetch('https://api.github.com/repos/cru121/Civ6-Mod-Toolkit/releases/latest')
+  fetch('https://api.github.com/repos/Klear2012/Civ6-Mod-Toolkit/releases/latest')
     .then(r => r.ok ? r.json() : Promise.reject(r.status))
     .then(rel => {
       const zip = (rel.assets || []).find(a => /\.zip$/i.test(a.name));
