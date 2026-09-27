@@ -19,6 +19,7 @@ const editor = require('./editor');
 const {
   readModState, readModDetails, applyChanges,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
+  exportGroup, importGroup,
 } = require('./modsdb');
 const { gameStatus } = require('./game');
 
@@ -253,6 +254,29 @@ async function handleApi(req, res, url) {
     return send(res, 200, { ...list, game: await gameStatus() });
   }
 
+  // GET /api/modgroups/export?id=... -> the profile as a downloadable .json
+  // file. Read-only, so it also works while the game is running.
+  if (req.method === 'GET' && url.pathname === '/api/modgroups/export') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    const id = groupId(url.searchParams.get('id'));
+    if (id === null) return send(res, 400, { error: 'which profile?' });
+    let file;
+    try {
+      file = exportGroup(modsDb.path, id);
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
+    // Keep the name readable but out of the file name: quotes, slashes and
+    // Windows' forbidden characters would break the download.
+    const safe = file.name.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60) || 'profile';
+    res.writeHead(200, {
+      'Content-Type': 'application/json; charset=utf-8',
+      'Content-Disposition': `attachment; filename="civ6-profile-${safe}.json"`,
+    });
+    return res.end(JSON.stringify(file, null, 2));
+  }
+
   if (req.method === 'POST' && url.pathname.startsWith('/api/modgroups/')) {
     const action = url.pathname.slice('/api/modgroups/'.length);
     const body = await readBody(req);
@@ -263,8 +287,8 @@ async function handleApi(req, res, url) {
     const game = await gameStatus();
     if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then try again.' });
 
-    const id = groupId(body.id);
-    if (id === null && action !== 'create') return send(res, 400, { error: 'which profile?' });
+    const id = groupId(action === 'import' ? null : body.id);
+    if (id === null && action !== 'create' && action !== 'import') return send(res, 400, { error: 'which profile?' });
     try {
       let r;
       if (action === 'create') r = createGroup(modsDb.path, body.name);
@@ -272,6 +296,7 @@ async function handleApi(req, res, url) {
       else if (action === 'rename') r = renameGroup(modsDb.path, id, body.name);
       else if (action === 'delete') r = deleteGroup(modsDb.path, id, body.fallbackId);
       else if (action === 'activate') r = activateGroup(modsDb.path, id);
+      else if (action === 'import') r = importGroup(modsDb.path, body.profile);
       else return send(res, 404, { error: 'not found' });
       // Re-read so the UI always gets the state that is really on disk.
       const list = listGroups(modsDb.path);

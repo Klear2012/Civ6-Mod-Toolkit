@@ -22,6 +22,7 @@ const check = (label, cond, extra = '') => {
   console.log(`  [${cond ? 'PASS' : 'FAIL'}] ${label}${extra ? ' :: ' + extra : ''}`);
   if (!cond) pass = false;
 };
+const MAX = 10000; // the server's cap on mods in an imported file
 const fails = (fn) => {
   try { fn(); return false; } catch (_) { return true; }
 };
@@ -186,7 +187,52 @@ console.log('\nTest 9: backups');
     `${beforeCount} -> ${baks().length}`);
 }
 
-// --- Test 10: a real database copy ------------------------------------------
+// --- Test 10: export / import -----------------------------------------------
+console.log('\nTest 10: export and import');
+{
+  const source = groupNamed('LOC_MODS_GROUP_DEFAULT_NAME'); // four mods, one on
+  const file = db.exportGroup(DB_PATH, source.id);
+  check('carries the toolkit and version', file.toolkit === 'civ6-mod-toolkit' && file.version === 1);
+  check('carries the profile name', file.name === 'LOC_MODS_GROUP_DEFAULT_NAME', file.name);
+  check('has an export timestamp', !Number.isNaN(Date.parse(file.exportedAt)));
+  check('lists every mod with its state', file.mods.length === 4 && file.mods.filter((m) => m.enabled).length === 1,
+    `${file.mods.length} mods, ${file.mods.filter((m) => m.enabled).length} on`);
+  check('keys mods by ModId', file.mods.every((m) => typeof m.modId === 'string' && typeof m.enabled === 'boolean'));
+  check('no ModRowId leaks into the file', !JSON.stringify(file).includes('ModRowId'));
+
+  // A file with a mod the game doesn't know: skipped and reported.
+  const withUnknown = { ...file, name: 'Imported', mods: [...file.mods, { modId: 'mod-does-not-exist', enabled: true }] };
+  const r = db.importGroup(DB_PATH, withUnknown);
+  check('creates a new profile', !!r.group && r.group.name === 'Imported', r.group && r.group.name);
+  check('imports the known mods', r.imported === 4, `${r.imported}`);
+  check('reports the unknown mod', JSON.stringify(r.skipped) === JSON.stringify(['mod-does-not-exist']), JSON.stringify(r.skipped));
+  check('new profile is active', groupNamed('Imported').selected);
+  check('exactly one selected group', raw('SELECT count(*) n FROM ModGroups WHERE Selected = 1')[0].n === 1);
+  check('the imported states match the file', (() => {
+    const g = groupNamed('Imported');
+    const rows = raw('SELECT m.ModId AS id, i.Disabled AS d FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId WHERE i.ModGroupRowId = ?', g.id);
+    const byId = new Map(rows.map((x) => [x.id, !x.d]));
+    return file.mods.every((m) => byId.get(m.modId) === m.enabled) && byId.size === 4;
+  })());
+  check('the source profile is untouched', (() => { const s = groupNamed('LOC_MODS_GROUP_DEFAULT_NAME'); return s.enabled === 1; })());
+
+  // Importing always creates: the same name gets a suffix.
+  const again = db.importGroup(DB_PATH, file);
+  check('a second import does not overwrite', again.group.name === 'LOC_MODS_GROUP_DEFAULT_NAME (2)', again.group.name);
+  check('the first imported profile is still there', groupNamed('Imported').total === 4);
+  const third = db.importGroup(DB_PATH, file);
+  check('a third import counts up', third.group.name === 'LOC_MODS_GROUP_DEFAULT_NAME (3)', third.group.name);
+  const fresh = db.importGroup(DB_PATH, { mods: file.mods });
+  check('a file with no name gets a default one', fresh.group.name === 'Imported profile', fresh.group.name);
+  const noClash = db.importGroup(DB_PATH, { name: 'Brand new', mods: file.mods });
+  check('a name that is free is used as is', noClash.group.name === 'Brand new', noClash.group.name);
+
+  check('a file without mods is rejected', fails(() => db.importGroup(DB_PATH, { name: 'x' })));
+  check('a file that is not an object is rejected', fails(() => db.importGroup(DB_PATH, 'nope')));
+  check('a huge mod list is rejected', fails(() => db.importGroup(DB_PATH, { mods: new Array(MAX + 1).fill({ modId: 'a', enabled: true }) })));
+}
+
+// --- Test 11: a real database copy ------------------------------------------
 // The checks above run against a known small database. Given a path to a real
 // Mods.sqlite it is copied here and the same operations are smoke-tested
 // against the real schema and the real number of mods. The original is only

@@ -430,7 +430,84 @@ function activateGroup(dbPath, id) {
   return { backupPath, ...result };
 }
 
+// ---------------------------------------------------------------------------
+// Export / import
+//
+// A profile file lists the mods by their stable ModId (never ModRowId, which
+// changes when the game rescans) with the state they had in that profile.
+// Importing always creates a new profile: it never overwrites an existing one.
+// ---------------------------------------------------------------------------
+
+const EXPORT_TOOLKIT = 'civ6-mod-toolkit';
+const EXPORT_VERSION = 1;
+const MAX_IMPORT_MODS = 10000;
+
+// One profile as a portable object: every mod the profile lists, on or off.
+function exportGroup(dbPath, id) {
+  if (!DatabaseSync) throw new Error(loadError);
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const group = readGroups(db).find((g) => g.id === Number(id));
+    if (!group) throw new Error('that mod group no longer exists');
+    const mods = db.prepare(`
+      SELECT m.ModId AS modId, i.Disabled AS disabled
+      FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId
+      WHERE i.ModGroupRowId = ?
+      ORDER BY m.ModId`).all(group.id)
+      .map((r) => ({ modId: r.modId, enabled: !r.disabled }));
+    return { toolkit: EXPORT_TOOLKIT, version: EXPORT_VERSION, name: group.name, exportedAt: new Date().toISOString(), mods };
+  } finally {
+    try { if (db) db.close(); } catch (_) { /* ignore */ }
+  }
+}
+
+// "Name", "Name (2)", "Name (3)" ... so an import never silently replaces one.
+function unusedName(db, wanted) {
+  const taken = new Set(db.prepare('SELECT Name AS name FROM ModGroups').all().map((r) => String(r.name).toLowerCase()));
+  if (!taken.has(wanted.toLowerCase())) return wanted;
+  for (let n = 2; n < 1000; n++) {
+    const candidate = `${wanted} (${n})`;
+    if (!taken.has(candidate.toLowerCase())) return candidate;
+  }
+  return `${wanted} (${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')})`;
+}
+
+// Create a new profile from an exported file and make it the active one. Mods
+// the game doesn't know (uninstalled, or from another installation) are skipped
+// and reported rather than failing the whole import.
+function importGroup(dbPath, data) {
+  requireDb();
+  if (!data || typeof data !== 'object') throw new Error('that file is not a profile');
+  if (!Array.isArray(data.mods)) throw new Error('that file has no list of mods');
+  if (data.mods.length > MAX_IMPORT_MODS) throw new Error('that file lists too many mods');
+  // Leave room for the " (2)" suffix unusedName may add.
+  const wanted = String(data.name == null ? '' : data.name).trim().slice(0, 90) || 'Imported profile';
+
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const known = new Map(db.prepare('SELECT ModId, ModRowId FROM Mods').all().map((r) => [normId(r.ModId), r.ModRowId]));
+    const id = insertGroup(db, unusedName(db, wanted));
+    fillGroupDisabled(db, id);
+    const setFlag = db.prepare('UPDATE ModGroupItems SET Disabled = ? WHERE ModGroupRowId = ? AND ModRowId = ?');
+    const skipped = [];
+    let imported = 0;
+    for (const m of data.mods) {
+      const modId = m && typeof m.modId === 'string' ? m.modId : null;
+      const rowId = modId ? known.get(normId(modId)) : null;
+      if (rowId == null) { if (modId) skipped.push(modId); continue; }
+      setFlag.run(m.enabled ? 0 : 1, id, rowId);
+      imported++;
+    }
+    selectGroup(db, id);
+    const group = requireGroup(db, id);
+    if (group.total !== known.size) throw new Error('the profile was not imported correctly');
+    return { group, imported, skipped };
+  });
+  return { backupPath, ...result };
+}
+
 module.exports = {
   readModState, readModDetails, applyChanges, classifyPath,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
+  exportGroup, importGroup, EXPORT_TOOLKIT, EXPORT_VERSION,
 };
