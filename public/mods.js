@@ -90,11 +90,14 @@ function rowBody(m, all) {
     ? `<a class="ext" href="${workshopUrl(m.workshopId)}" target="_blank" rel="noopener" title="Open the Steam Workshop page"><span class="ext-text">Workshop page </span>↗</a>`
     : '';
   const sub = m.teaser ? `<span class="teaser">${renderCivText(m.teaser)}</span>` : `<small>${esc(m.id)}</small>`;
-  // A mod the game has never scanned has no row to toggle, so offer the
-  // action that creates one instead.
-  const register = m.scanned ? ''
-    : `<button type="button" class="small" data-register="${esc(m.idNorm)}" ${game.running ? 'disabled' : ''}
-        title="${game.running ? 'Close Civ6 to register new mods' : 'Register this mod so it can be turned on'}">Register</button>`;
+  // A mod with no row in the profile in use cannot be ticked, so offer the
+  // action that adds one: registering a mod the game has never seen, or adding
+  // one it knows to this profile.
+  const register = m.canRegister
+    ? `<button type="button" class="small" data-register="${esc(m.idNorm)}" ${game.running ? 'disabled' : ''}
+        title="${game.running ? 'Close Civ6 to add mods' : 'Add this mod to the profile in use, switched on'}">
+        ${m.scanned ? 'Add to profile' : 'Register'}</button>`
+    : '';
   return `<span class="name"><b>${renderCivText(m.name)}</b>${sub}${probs}</span>
     ${link}${sourceTag(m)}${register}
     <button type="button" class="info" data-info="${esc(m.idNorm)}" title="Details">i</button>`;
@@ -127,17 +130,19 @@ function renderMods() {
   const alerts = [];
   if (!d.ok) alerts.push(`<div class="alert warn"><b>Can't read which mods are enabled.</b> ${esc(d.error || '')}</div>`);
   if (game.running) alerts.push('<div class="alert warn"><b>Civ6 is running.</b> You can prepare changes, but close the game before applying them.</div>');
-  const unscanned = d.mods.filter((m) => !m.scanned);
-  if (unscanned.length) {
-    const one = unscanned.length === 1;
-    const names = unscanned.slice(0, 4).map((m) => esc(renderCivText(m.name))).join(', ')
-      + (unscanned.length > 4 ? ` and ${unscanned.length - 4} more` : '');
-    alerts.push(`<div class="alert info"><b>${unscanned.length} new mod${one ? '' : 's'} not registered yet:</b> ${names}.
-      Register ${one ? 'it' : 'them'} to turn ${one ? 'it' : 'them'} on without starting the game first.
+  const addable = d.mods.filter((m) => m.canRegister);
+  if (addable.length) {
+    const one = addable.length === 1;
+    const names = addable.slice(0, 4).map((m) => esc(renderCivText(m.name))).join(', ')
+      + (addable.length > 4 ? ` and ${addable.length - 4} more` : '');
+    const others = Math.max(0, (d.profiles || 1) - 1);
+    alerts.push(`<div class="alert info"><b>${addable.length} mod${one ? '' : 's'} can be added:</b> ${names}.
+      ${one ? 'It' : 'They'} will be switched on in this profile, and available but off in your other
+      ${others === 1 ? 'profile' : `${others} profiles`} — without starting the game first.
       <div class="alert-actions">
         <button type="button" id="registerAll" ${game.running ? 'disabled' : ''}
-          title="${game.running ? 'Close Civ6 to register new mods' : 'Register every new mod'}">Register ${one ? 'it' : 'them all'}</button>
-        ${game.running ? '<small>Close Civ6 to register new mods.</small>' : ''}
+          title="${game.running ? 'Close Civ6 to add mods' : 'Add every listed mod'}">Add ${one ? 'it' : 'them all'}</button>
+        ${game.running ? '<small>Close Civ6 to add mods.</small>' : ''}
       </div></div>`);
   }
   $('modsAlerts').innerHTML = alerts.join('');
@@ -208,25 +213,27 @@ async function loadMods() {
 // ---- register --------------------------------------------------------------
 // Writes the registration the game would have written, so a newly subscribed
 // mod can be switched on without launching Civ6 first. An empty list registers
-// every mod still waiting. The mod is registered *and* enabled in the profile
-// in use - one click, which is what the game itself does for a new mod.
+// every mod still waiting. The mod is switched on in the profile in use and
+// made available - but off - in every other profile, so it stays switchable
+// wherever you are.
 async function registerMods(ids) {
   if (game.running) {
-    toast('Civilization VI is running. Close the game first, then register new mods.', 'err');
+    toast('Civilization VI is running. Close the game first, then add mods.', 'err');
     return;
   }
   try {
     const r = await postJson('/api/mods/register', { ids });
     const n = r.registered.length;
-    const what = ids && ids.length ? 'Registered' : `Registered ${n} new mod${n === 1 ? '' : 's'}`;
+    const elsewhere = n ? (r.registered[0].offElsewhere || 0) : 0;
     const detail = [
       n ? `on in "${esc(groupLabel(r.profile))}"` : null,
+      elsewhere > 0 ? `available but off in your other ${elsewhere} profile${elsewhere === 1 ? '' : 's'}` : null,
       r.backupPath ? `backup: ${esc(r.backupPath)}` : null,
     ].filter(Boolean).join('  ·  ');
-    toast(`${what}${n ? '' : ', nothing to do'}.`, 'ok', detail);
+    toast(n === 1 ? 'Added 1 mod.' : `Added ${n} mods.`, 'ok', detail);
     // Names of mods the game could not read are reported, never swallowed.
     if (r.failed.length) {
-      toast(`${r.failed.length} mod${r.failed.length === 1 ? '' : 's'} could not be registered: `
+      toast(`${r.failed.length} mod${r.failed.length === 1 ? '' : 's'} could not be added: `
         + r.failed.map((f) => esc(f.file || f.error)).join(', '), 'err');
     }
     await loadMods();

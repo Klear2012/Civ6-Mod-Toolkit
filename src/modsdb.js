@@ -841,11 +841,16 @@ function defaultGroupOf(db) {
   throw new Error('the mod database has no built-in mod group');
 }
 
-// Registers mods in the built-in group, the same way the game does, so they can
-// be switched on without the game having scanned them. `files` are .modinfo
-// paths. Caller must make sure the game is closed. If `groupId` is given, a row
-// is also written to that profile so the mod is immediately usable there; the
-// game leaves that alone once it has scanned the mod itself.
+// Registers mods the way the game does, so they can be switched on without it
+// having scanned them. `files` are .modinfo paths; the caller must make sure
+// the game is closed.
+//
+// Every profile gets a row for the mod, so it stays switchable wherever you are:
+// on in the built-in group and in `groupId` (the profile in use), off - but
+// present - in the rest. Writing only the active profile's row left the mod
+// reading "not available" as soon as you switched profile, which is the same
+// untoggleable state a newly registered mod has. The game leaves an already
+// scanned mod's rows alone, so the extra rows are permanent.
 function registerMods(dbPath, files, enabled = true, groupId = null) {
   requireDb();
   if (!Array.isArray(files) || !files.length) return { registered: [], failed: [], backupPath: null };
@@ -857,30 +862,40 @@ function registerMods(dbPath, files, enabled = true, groupId = null) {
     if (extra != null && !db.prepare('SELECT 1 FROM ModGroups WHERE ModGroupRowId = ?').get(extra)) {
       throw new Error('that mod group no longer exists');
     }
+    // On in the built-in group and the profile being edited, present-but-off in
+    // the rest - which is what a profile made by createGroup() looks like.
+    const everyGroup = db.prepare('SELECT ModGroupRowId AS id FROM ModGroups ORDER BY SortIndex, ModGroupRowId').all().map((g) => g.id);
+    const insert = db.prepare(`INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)
+      ON CONFLICT (ModGroupRowId, ModRowId) DO UPDATE SET Disabled = excluded.Disabled`);
     const registered = [];
     const failed = [];
     for (const file of files) {
       try {
         const entry = registerMod(db, file, builtIn, enabled);
-        if (extra != null && extra !== builtIn) {
-          db.prepare(`INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)
-            ON CONFLICT (ModGroupRowId, ModRowId) DO UPDATE SET Disabled = excluded.Disabled`)
-            .run(extra, entry.modRowId, enabled ? 0 : 1);
-          entry.profileRow = true;
-        }
+        const on = new Set(extra == null ? [builtIn] : [builtIn, extra]);
+        for (const gid of everyGroup) insert.run(gid, entry.modRowId, on.has(gid) ? 0 : 1);
+        if (extra != null) entry.profileRow = true;
+        entry.offElsewhere = everyGroup.length - on.size;
         registered.push(entry);
       } catch (e) {
         failed.push({ file, error: e.message });
       }
     }
-    // Read back: every one of them must now have a row in the built-in group.
+    // Read back: every one of them must now have a row in the built-in group
+    // and in every profile, so none of them can come back as "not available".
     if (registered.length) {
-      const check = db.prepare(`SELECT count(*) AS n FROM Mods m JOIN ModGroupItems i ON i.ModRowId = m.ModRowId
-        WHERE i.ModGroupRowId = ? AND lower(m.ModId) IN (${registered.map(() => 'lower(?)').join(',')})`)
-        .get(builtIn, ...registered.map((r) => r.modId));
-      if (check.n !== registered.length) throw new Error('the mods were not registered correctly');
+      const list = registered.map((r) => 'lower(?)').join(',');
+      const ids = registered.map((r) => r.modId);
+      const inBuiltIn = db.prepare(`SELECT count(*) AS n FROM Mods m JOIN ModGroupItems i ON i.ModRowId = m.ModRowId
+        WHERE i.ModGroupRowId = ? AND lower(m.ModId) IN (${list})`).get(builtIn, ...ids).n;
+      if (inBuiltIn !== registered.length) throw new Error('the mods were not registered correctly');
+      const inAll = db.prepare(`SELECT count(*) AS n FROM (SELECT DISTINCT lower(m.ModId) AS id FROM Mods m
+        JOIN ModGroupItems i ON i.ModRowId = m.ModRowId WHERE lower(m.ModId) IN (${list})
+        GROUP BY lower(m.ModId) HAVING count(DISTINCT i.ModGroupRowId) = ?)`)
+        .get(...ids, everyGroup.length).n;
+      if (inAll !== registered.length) throw new Error('the mods are not available in every profile');
     }
-    return { registered, failed, group: extra == null ? builtIn : extra, builtIn };
+    return { registered, failed, group: extra == null ? builtIn : extra, builtIn, profiles: everyGroup.length };
   });
   return { backupPath, ...result };
 }

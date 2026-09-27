@@ -94,6 +94,10 @@ function modList() {
       source: f ? f.type : d.source,
       enabled: d.disabled == null ? null : !d.disabled,
       scanned: true,
+      // The game knows this mod, but it has no row in the profile in use, so
+      // it cannot be switched on. If the files are here the toolkit can add
+      // that row, the same way it registers a brand-new mod.
+      canRegister: d.disabled == null && !!f,
       teaser: d.teaser,
       workshopId: f ? f.workshopId || null : null,
       folder: f ? f.folder : null,
@@ -107,13 +111,17 @@ function modList() {
       if (inDb.has(f.idNorm)) continue;
       out.push({
         id: f.id, idNorm: f.idNorm, name: f.name, source: f.type, enabled: null, scanned: false, teaser: null,
+        canRegister: true,
         workshopId: f.workshopId || null, folder: f.folder, requires: [], blocks: [],
       });
     }
   }
   const plain = (n) => n.replace(/\[[^\]]*\]/g, '').trim(); // sort without Civ [COLOR_*] markup
   out.sort((a, b) => plain(a.name).localeCompare(plain(b.name), undefined, { sensitivity: 'base' }));
-  return { modsDb, ok: st.ok, error: st.error || null, activeGroup: st.activeGroup || null, mods: out };
+  // Registering a mod writes a row in every profile, so the UI needs to know
+  // how many there are to describe what will happen.
+  const groups = st.ok ? listGroups(paths.getModsDb().path).groups.length : 0;
+  return { modsDb, ok: st.ok, error: st.error || null, activeGroup: st.activeGroup || null, profiles: groups, mods: out };
 }
 
 // Size, file count and newest modification time of a mod folder.
@@ -256,21 +264,22 @@ async function handleApi(req, res, url) {
     if (!list.ok) return send(res, 400, { error: list.error });
     const modsDb = paths.getModsDb();
 
-    // "Unscanned" means exactly what modList() calls it: on disk, not in the
-    // game's database. Reuse that rather than defining it a second time.
-    const pending = list.mods.filter((m) => !m.scanned);
-    const wanted = (Array.isArray(ids) && ids.length ? ids.map(normId) : pending.map((m) => m.idNorm));
+    // Two kinds of mod can be added here: one the game has never scanned, and
+    // one it knows but which has no row in the profile in use (so it shows as
+    // "not available"). modList() decides which, via canRegister.
+    const registrable = list.mods.filter((m) => m.canRegister);
+    const wanted = (Array.isArray(ids) && ids.length ? ids.map(normId) : registrable.map((m) => m.idNorm));
     const onDisk = new Map(scanMods(paths.getSources()).map((m) => [m.idNorm, m]));
 
     const files = [];
-    const known = new Set(pending.map((m) => m.idNorm));
+    const known = new Set(registrable.map((m) => m.idNorm));
     for (const id of wanted) {
-      if (!known.has(id)) return send(res, 400, { error: `unknown or already registered mod: ${id}` });
+      if (!known.has(id)) return send(res, 400, { error: `that mod is already in this profile: ${id}` });
       const f = onDisk.get(id);
       if (!f) return send(res, 400, { error: `the .modinfo for ${id} is no longer on disk` });
       files.push(f.path);
     }
-    if (!files.length) return send(res, 400, { error: 'no new mods to register' });
+    if (!files.length) return send(res, 400, { error: 'nothing to register' });
 
     const groups = listGroups(modsDb.path);
     const active = groups.active;

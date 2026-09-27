@@ -31,6 +31,7 @@ const raw = (sql, ...a) => {
   const conn = new DatabaseSync(DB_PATH, { readOnly: true });
   try { return conn.prepare(sql).all(...a); } finally { conn.close(); }
 };
+const PROFILES = raw('SELECT count(*) AS n FROM ModGroups')[0].n;
 
 // A handful of mods, the built-in group (full, one mod on) and a user group
 // with a subset, so empty / duplicate / delete have something real to work on.
@@ -325,18 +326,26 @@ console.log('\nTest 12: register an unscanned mod');
   // The game registers a new mod in the built-in group, and rebuilds that mod's
   // group membership on its next scan - so that is the group to write.
   check('registered in the built-in group', r.builtIn === 1, String(r.builtIn));
+  const profilesNow = raw('SELECT count(*) AS n FROM ModGroups')[0].n;
+  check('reports how many profiles exist', r.profiles === profilesNow, `${r.profiles} vs ${profilesNow}`);
   const builtIn = raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
     WHERE i.ModGroupRowId = 1 AND lower(m.ModId) = '11111111-2222-3333-4444-555555555555'`)[0].n;
   check('it has a row there', builtIn === 1);
   check('and it is enabled there', raw(`SELECT i.Disabled d FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
     WHERE i.ModGroupRowId = 1 AND lower(m.ModId) = '11111111-2222-3333-4444-555555555555'`)[0].d === 0);
-  check('no row written to other groups by default', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
-    WHERE i.ModGroupRowId != 1 AND lower(m.ModId) = '11111111-2222-3333-4444-555555555555'`)[0].n === 0);
+  // Every profile gets a row, so the mod stays switchable wherever you are.
+  const rowsEverywhere = raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE lower(m.ModId) = '11111111-2222-3333-4444-555555555555'`)[0].n;
+  check('a row in every profile', rowsEverywhere === profilesNow, `rows=${rowsEverywhere} profiles=${profilesNow}`);
+  // No profile was named here, so only the built-in group is switched on.
+  check('reports how many profiles have it off', r.registered[0].offElsewhere === profilesNow - 1, String(r.registered[0].offElsewhere));
 
   const after = raw('SELECT (SELECT count(*) FROM Mods) m, (SELECT count(*) FROM ScannedFiles) f, (SELECT count(*) FROM ModGroupItems) g')[0];
   check('one mod row added', after.m === before.m + 1, `${before.m} -> ${after.m}`);
   check('one scanned file added', after.f === before.f + 1, `${before.f} -> ${after.f}`);
-  check('one group item added', after.g === before.g + 1, `${before.g} -> ${after.g}`);
+  // One row per profile, so the mod is switchable wherever the user is.
+  const profilesAtReg = raw('SELECT count(*) AS n FROM ModGroups')[0].n;
+  check('one group item added per profile', after.g === before.g + profilesAtReg, `${before.g} -> ${after.g} (${profilesAtReg} profiles)`);
 
   const row = raw(`SELECT s.Path AS path, CAST(s.LastWriteTime AS TEXT) AS lwt, m.ModId AS modId, m.Version AS version
     FROM Mods m JOIN ScannedFiles s ON s.ScannedFileRowId = m.ScannedFileRowId
@@ -350,13 +359,14 @@ console.log('\nTest 12: register an unscanned mod');
   check('a Name property was written', raw(`SELECT Value FROM ModProperties WHERE Name='Name' AND ModRowId =
     (SELECT ModRowId FROM Mods WHERE lower(ModId)='11111111-2222-3333-4444-555555555555')`)[0].Value === 'Test Mod');
 
-  // The toolkit now treats it as a normal mod. It has no row in the active
-  // profile (that is Test 13's job), so here it reads as "not available" there.
+  // The toolkit now treats it as a normal mod. Registration gives it a row in
+  // every profile, so it reads as a normal switchable mod here, off because
+  // this call did not name a profile to switch it on in.
   const st = db.readModState(DB_PATH);
   const seen = st.mods.find((m) => m.idNorm === '11111111-2222-3333-4444-555555555555');
   check('the toolkit sees it', !!seen);
   check('with its real name', seen && seen.name === 'Test Mod', seen && seen.name);
-  check('not in the active profile unless asked', seen && seen.disabled === null, String(seen && seen.disabled));
+  check('it is in the active profile, switched off', seen && seen.disabled === true, String(seen && seen.disabled));
   check('it is on in the built-in group', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
     WHERE i.ModGroupRowId=1 AND i.Disabled=0 AND lower(m.ModId)='11111111-2222-3333-4444-555555555555'`)[0].n === 1);
 
@@ -365,6 +375,13 @@ console.log('\nTest 12: register an unscanned mod');
   const after2 = raw('SELECT (SELECT count(*) FROM Mods) m, (SELECT count(*) FROM ModGroupItems) g')[0];
   check('re-registering adds nothing', after2.m === after.m && after2.g === after.g, `mods ${after.m}->${after2.m}, items ${after.g}->${after2.g}`);
   check('and reports it as not new', again.registered[0].isNew === false);
+  // Repeating must not switch a mod on in profiles the user never asked for.
+  check('re-registering leaves the other profiles off', (() => {
+    const onElsewhere = raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+      WHERE i.Disabled = 0 AND i.ModGroupRowId NOT IN (1, ?) AND lower(m.ModId) = '11111111-2222-3333-4444-555555555555'`,
+      raw('SELECT ModGroupRowId AS id FROM ModGroups WHERE Selected = 1')[0].id)[0].n;
+    return onElsewhere === 0;
+  })(), 'on elsewhere');
 
   check('registering nothing is a no-op', db.registerMods(DB_PATH, []).registered.length === 0);
   check('a modinfo with no id is reported, not thrown', (() => {

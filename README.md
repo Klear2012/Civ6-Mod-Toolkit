@@ -107,13 +107,23 @@ the game hasn't picked it up yet — the mod manager can **register** it for you
    applying is blocked while Civ6 runs. Changes take effect the next time you
    start the game.
 
-Mods you've only just subscribed to are not in the game's database yet, so they
-show **not registered yet** and can't be ticked. Click **Register** on the mod —
-or **Register them all** in the banner — and the toolkit writes the same
-registration the game would, and switches the mod on in the profile you are
-editing. Nothing to do afterwards except start Civ6 to play. The game must be
-**closed** to register, like it must be to apply changes. The toolkit edits the
-game's currently selected mod group (normally *Default*).
+Some mods can't be ticked, and one button fixes both reasons:
+
+| You see | It means | Button |
+|---|---|---|
+| **not registered yet** | the game has never scanned it | **Register** |
+| **not available** | the game knows it, but it has no row in the profile you are editing | **Add to profile** |
+
+Click the button on the mod, or **Add them all** in the banner, and the toolkit
+writes the same registration the game would have written. The mod is switched
+**on in the profile you are editing** and made available — but off — in your
+other profiles, so it stays switchable wherever you are. Nothing to do afterwards
+except start Civ6 to play. The game must be **closed** to register, like it must
+be to apply changes. Registering many mods at once is all-or-nothing, and your
+database is backed up first.
+
+A mod already in the profile you're editing has no such button — it's an
+ordinary checkbox, like always.
 
 ### Profiles (mod groups)
 
