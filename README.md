@@ -12,10 +12,36 @@ A mod toolkit for Sid Meier's Civilization VI that runs outside the game:
   the game, with warnings for missing dependencies and conflicts. Handy when a
   broken mod stops the game from starting, or when the in-game mod screen is
   slow. A mod you have just subscribed to can be registered and switched on
-  here too, instead of starting the game once so it notices the mod.
+  here, without starting the game once so it notices the mod.
 - **Profiles** — Civ6 calls them *mod groups*. Create, duplicate, rename, delete
   and switch between them here, and export/import a profile as a `.json` file,
   so a set-up can be moved to another computer or shared.
+
+> **This is a fork.** The original was written by
+> [cru121](https://github.com/cru121/Civ6-Mod-Toolkit) (Steam:
+> *evzenhouzvicka*). It is now maintained by **Klear2012**, with the original
+> MIT licence and copyright left intact. Upstream has not been updated since
+> 25 September 2026, so **releases and fixes happen here** —
+> [download from this repo](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest)
+> and [report problems here](https://github.com/Klear2012/Civ6-Mod-Toolkit/issues).
+
+### What's new here
+
+Since the last upstream commit:
+
+- **Player profiles** (v1.1.0) — Civ6's *mod groups* are manageable from the
+  toolkit: create, duplicate, rename, delete and switch, plus export/import as
+  `.json`. Upstream could list the groups and show which one was in use, but
+  could not change any of them.
+- **Register a mod without launching Civ6** (v1.2.0) — a mod you have just
+  subscribed to gets the same database registration the game would have
+  written, so you can switch it on without starting the game once just to make
+  it notice the mod. Replaces the old "start Civ6 and wait" advice.
+- **Add a mod to the current profile** (v1.3.0) — a mod the game already knows
+  but that has no row in the profile you are editing showed as *not available*
+  and could not be ticked at all. It now gets a **Add to profile** button, and
+  registering a mod gives it a row in *every* profile, so it stays switchable
+  wherever you are.
 
 Website: <https://klear2012.github.io/Civ6-Mod-Toolkit/>
 
@@ -177,9 +203,12 @@ configuration).
 ## Authors & feedback
 
 Originally by **cru121** (Steam: *evzenhouzvicka*), maintained by
-**Klear2012**, together with Claude, Anthropic's AI assistant. Questions, bugs
-or ideas? Please
-[open an issue](https://github.com/Klear2012/Civ6-Mod-Toolkit/issues).
+**Klear2012**, together with Claude, Anthropic's AI assistant. The MIT licence
+and original copyright are unchanged — see [LICENSE](LICENSE).
+
+Questions, bugs or ideas? Please
+[open an issue on this repo](https://github.com/Klear2012/Civ6-Mod-Toolkit/issues).
+Upstream is not being worked on, so issues filed there will not be seen.
 
 ## What's under the hood
 
