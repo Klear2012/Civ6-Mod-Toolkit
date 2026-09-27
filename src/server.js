@@ -16,7 +16,10 @@ const cfg = require('./civ6cfg');
 const { scanMods, normId } = require('./modinfo');
 const inventory = require('./inventory');
 const editor = require('./editor');
-const { readModState, readModDetails, applyChanges } = require('./modsdb');
+const {
+  readModState, readModDetails, applyChanges,
+  listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
+} = require('./modsdb');
 const { gameStatus } = require('./game');
 
 const { version: VERSION } = require('../package.json');
@@ -45,6 +48,12 @@ function readBody(req) {
 
 function isConfigPath(p) {
   return typeof p === 'string' && /\.Civ6Cfg$/i.test(p);
+}
+
+// Mod group ids are the integer primary key. Anything else is no group.
+function groupId(v) {
+  const n = Number(v);
+  return Number.isInteger(n) && n > 0 ? n : null;
 }
 
 function listConfigs() {
@@ -227,6 +236,46 @@ async function handleApi(req, res, url) {
     try {
       const r = applyChanges(list.modsDb.path, clean);
       return send(res, 200, { ok: true, ...r });
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
+  }
+
+  // ---- mod groups (player profiles) ---------------------------------------
+  // Every write here changes Mods.sqlite, so it is refused while the game runs
+  // and each one returns the refreshed group list for the UI.
+
+  if (req.method === 'GET' && url.pathname === '/api/modgroups') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    const list = listGroups(modsDb.path);
+    if (!list.ok) return send(res, 500, { error: list.error });
+    return send(res, 200, { ...list, game: await gameStatus() });
+  }
+
+  if (req.method === 'POST' && url.pathname.startsWith('/api/modgroups/')) {
+    const action = url.pathname.slice('/api/modgroups/'.length);
+    const body = await readBody(req);
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+
+    // A mod group can't be changed while the game has the database open.
+    const game = await gameStatus();
+    if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then try again.' });
+
+    const id = groupId(body.id);
+    if (id === null && action !== 'create') return send(res, 400, { error: 'which profile?' });
+    try {
+      let r;
+      if (action === 'create') r = createGroup(modsDb.path, body.name);
+      else if (action === 'duplicate') r = duplicateGroup(modsDb.path, id, body.name);
+      else if (action === 'rename') r = renameGroup(modsDb.path, id, body.name);
+      else if (action === 'delete') r = deleteGroup(modsDb.path, id, body.fallbackId);
+      else if (action === 'activate') r = activateGroup(modsDb.path, id);
+      else return send(res, 404, { error: 'not found' });
+      // Re-read so the UI always gets the state that is really on disk.
+      const list = listGroups(modsDb.path);
+      return send(res, 200, { ok: true, ...r, groups: list.groups, active: list.active, game });
     } catch (e) {
       return send(res, 500, { error: e.message });
     }
