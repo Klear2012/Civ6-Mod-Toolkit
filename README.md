@@ -17,33 +17,12 @@ A mod toolkit for Sid Meier's Civilization VI that runs outside the game:
   and switch between them here, and export/import a profile as a `.json` file,
   so a set-up can be moved to another computer or shared.
 
-> **This is a fork.** The original was written by
+> **This is a maintained fork** of
 > [cru121](https://github.com/cru121/Civ6-Mod-Toolkit) (Steam:
-> *evzenhouzvicka*). It is now maintained by **Klear2012**, with the original
-> MIT licence and copyright left intact. Upstream has not been updated since
-> 25 September 2026, so **releases and fixes happen here** —
-> [download from this repo](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest)
-> and [report problems here](https://github.com/Klear2012/Civ6-Mod-Toolkit/issues).
-
-### What's new here
-
-Since the last upstream commit:
-
-- **Player profiles** (v1.1.0) — Civ6's *mod groups* are manageable from the
-  toolkit: create, duplicate, rename, delete and switch, plus export/import as
-  `.json`. Upstream could list the groups and show which one was in use, but
-  could not change any of them.
-- **Register a mod without launching Civ6** (v1.2.0) — a mod you have just
-  subscribed to gets the same database registration the game would have
-  written, so you can switch it on without starting the game once just to make
-  it notice the mod. Replaces the old "start Civ6 and wait" advice.
-- **Add a mod to the current profile** (v1.3.0) — a mod the game already knows
-  but that has no row in the profile you are editing showed as *not available*
-  and could not be ticked at all. It now gets a **Add to profile** button, and
-  registering a mod gives it a row in *every* profile, so it stays switchable
-  wherever you are.
-
-Full detail in [CHANGELOG.md](CHANGELOG.md).
+> *evzenhouzvicka*), last updated 25 September 2026. Releases and fixes happen
+> here — [CHANGELOG.md](CHANGELOG.md) has what this fork adds, and please
+> [report problems here](https://github.com/Klear2012/Civ6-Mod-Toolkit/issues).
+> The MIT licence and original copyright are unchanged.
 
 Website: <https://klear2012.github.io/Civ6-Mod-Toolkit/>
 
@@ -57,33 +36,27 @@ Windows 10 or 11.
    [latest release](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 2. **Unblock it** (recommended): right-click the zip → *Properties* → tick
    **Unblock** → *OK*. Otherwise Windows may show a blue *"Windows protected
-   your PC"* warning when you start the launcher — if it does, click
-   *More info* → *Run anyway*.
+   your PC"* warning — if it does, click *More info* → *Run anyway*.
 3. **Extract** the zip anywhere (e.g. your Documents folder).
 4. **Double-click `Civ6 Mod Toolkit.cmd`.** Your browser opens to the toolkit.
 
 The toolkit needs [Node.js](https://nodejs.org) **22.5 or newer**. If it's
-missing or too old, the launcher tells you and offers to install it for you
-(using Windows' built-in `winget`) or to open the download page.
+missing or too old, the launcher offers to install it for you (using Windows'
+built-in `winget`) or to open the download page.
 
-A small window stays open while the toolkit runs, with a menu — just press a
-key:
+A small window stays open while the toolkit runs — press a key to pick:
 
-- **O** — open the toolkit in your browser (e.g. if you closed the tab)
-- **R** — restart the toolkit
+- **O** — open it in your browser again, if you closed the tab
+- **R** — restart it
 - **S** — stop it and close the window
 
-Closing the window also stops the toolkit. (The launcher uses `curl`, which is
-built into Windows 10 and newer.)
+Closing the window also stops it. Tip: right-click the `.cmd` → *Send to* →
+*Desktop (create shortcut)* to launch it from your desktop.
 
-Tip: right-click `Civ6 Mod Toolkit.cmd` → *Send to* → *Desktop (create
-shortcut)* to launch it from your desktop. You can rename the shortcut and change
-its icon.
+### From the source code
 
-### From the source code / a terminal
-
-If you cloned the repository or downloaded the *Source code* zip instead, the
-launcher installs the dependencies on first run (needs internet once). Or:
+If you cloned the repository instead, the launcher installs the dependencies on
+first run (needs internet once). Or:
 
 ```bash
 npm install
@@ -91,8 +64,6 @@ npm start
 ```
 
 Both open `http://127.0.0.1:8673` (from a terminal, stop it with Ctrl+C).
-Double-clicking the launcher again while it's already running just reopens the
-browser tab.
 
 ## Using it
 
@@ -108,9 +79,9 @@ the configurations folder, and the game's mod database (`Mods.sqlite`, under
 auto-detected; if one shows **not found**, click **Edit paths**, fix it, and
 **Save paths**.
 
-If you've just installed or subscribed to a mod, the dashboard tells you when
-the game hasn't picked it up yet — the mod manager can **register** it for you
-(see below), so you don't have to start the game just for that.
+If you've just subscribed to a mod, the dashboard says the game hasn't picked it
+up yet. You don't have to start the game for that — the mod manager can
+**register** it for you (see below).
 
 ### Mod manager
 
@@ -120,14 +91,12 @@ the game hasn't picked it up yet — the mod manager can **register** it for you
 2. Tick or untick mods. **Enable all shown** / **Disable all shown** work on
    whatever the current filter shows. Changed rows are highlighted.
 
-   Prefer moving mods between lists? Switch to **Two panes**: *Available* on
-   the left, *Enabled* on the right — click a mod to move it across, or use
-   **Enable all →** / **← Disable all**. The toolkit remembers which view you
-   picked.
-3. Click **i** on any mod for its details: description, authors, version,
-   whether it affects saved games, what it changes (gameplay, UI, art, maps…),
-   what it needs, what needs it, what it's incompatible with, which of your
-   `.Civ6Cfg` configurations use it, and its folder, size and Workshop page.
+   Prefer moving mods between lists? Switch to **Two panes** and click a mod to
+   move it across. The toolkit remembers which view you picked.
+3. Click **i** on any mod for its details: description, authors, version, what
+   it changes, what it needs, what needs it, what it's incompatible with, which
+   of your `.Civ6Cfg` configurations use it, and its folder, size and Workshop
+   page.
 4. Warnings appear under a mod that is turned on but needs something that's off
    or missing (**Turn it on** fixes it), or that conflicts with another mod
    that's on.
@@ -150,9 +119,6 @@ except start Civ6 to play. The game must be **closed** to register, like it must
 be to apply changes. Registering many mods at once is all-or-nothing, and your
 database is backed up first.
 
-A mod already in the profile you're editing has no such button — it's an
-ordinary checkbox, like always.
-
 ### Profiles (mod groups)
 
 The **Profile** bar above the filters picks which group of mods you are
@@ -168,8 +134,8 @@ shows how many mods it has on. The game must be **closed** to change them.
   new profile from such a file. Mods in the file that you don't have installed
   are reported and left out.
 
-Exporting is also the way to keep a copy of a profile: a game patch that
-changes the database format re-enables every mod (see below).
+Worth exporting a profile as a backup now and then: a game patch that changes
+the mod database format can switch every mod back on.
 
 ### Config editor
 
@@ -204,9 +170,9 @@ configuration).
 
 ## Authors & feedback
 
-Originally by **cru121** (Steam: *evzenhouzvicka*), maintained by
-**Klear2012**, together with Claude, Anthropic's AI assistant. The MIT licence
-and original copyright are unchanged — see [LICENSE](LICENSE).
+Originally by **cru121** (Steam: *evzenhouzvicka*), now maintained by
+**Klear2012**. The MIT licence and original copyright are unchanged — see
+[LICENSE](LICENSE).
 
 Questions, bugs or ideas? Please
 [open an issue on this repo](https://github.com/Klear2012/Civ6-Mod-Toolkit/issues).
@@ -215,13 +181,11 @@ Upstream is not being worked on, so issues filed there will not be seen.
 ## What's under the hood
 
 A small Node server (`src/server.js`) exposes a JSON API used by the browser UI
-in `public/`. The format engine is `src/civ6cfg.js`; mod discovery is
-`src/modinfo.js` + `src/paths.js`; the safe-save logic is `src/editor.js`; the
-game's mod database, mod groups and mod registration are read and updated by
-`src/modsdb.js`, and `src/game.js` detects whether Civ6 is running. The profile
-UI is `public/profiles.js`. There
-is also a CLI, `src/edit-config.js` (`npm run edit -- --help`-style flags), which
-the server reuses. `npm run phase4` checks the profile and registration
-operations against a throwaway database. See [CHANGELOG.md](CHANGELOG.md) for
-what changed in each release, and `FINDINGS.md` for the reverse-engineered file
-format and the mod database schema.
+in `public/`. The `.Civ6Cfg` format engine is `src/civ6cfg.js`, mod discovery is
+`src/modinfo.js` + `src/paths.js`, safe saving is `src/editor.js`, and the game's
+mod database, mod groups and registration are read and updated by
+`src/modsdb.js`. `npm run phase4` checks the profile and registration operations
+against a throwaway database.
+
+See [CHANGELOG.md](CHANGELOG.md) for what changed in each release, and
+`FINDINGS.md` for the reverse-engineered file format and mod database schema.

@@ -10,6 +10,32 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
+## v1.3.1 — 28 September 2026
+
+No code changes — this fixes what v1.3.0 shipped with.
+
+### Fixed
+
+- The `docs/` copy inside the v1.3.0 zip was the pre-fork one: its download
+  button and release links still pointed at cru121, and its release-lookup
+  script fetched cru121's newest release. The live site was already correct;
+  this corrects the copy in the zip.
+- The app footer credited Claude and sent **Open an issue** to
+  `cru121/Civ6-Mod-Toolkit`, where nothing is being worked on. Both now point
+  here.
+- `package.json`'s `author` and `repository` fields also still named cru121 and
+  Claude.
+
+### Changed
+
+- README trimmed by about a sixth, mostly by dropping the "what's new here"
+  section that now duplicates this file, and fixing a "(see below)" that pointed
+  at nothing.
+- Claude removed from the README, the app footer, the docs site and
+  `package.json`. cru121's original authorship, Steam name and MIT copyright
+  are kept — that attribution is not optional under the licence, and it was
+  never mine to remove.
+
 ## v1.3.0 — 27 September 2026
 
 Two ways a mod could be unusable in the mod manager, one button for both.
