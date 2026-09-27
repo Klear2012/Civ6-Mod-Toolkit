@@ -43,6 +43,8 @@ Since the last upstream commit:
   registering a mod gives it a row in *every* profile, so it stays switchable
   wherever you are.
 
+Full detail in [CHANGELOG.md](CHANGELOG.md).
+
 Website: <https://klear2012.github.io/Civ6-Mod-Toolkit/>
 
 Not affiliated with or endorsed by Firaxis Games or 2K.
@@ -220,5 +222,6 @@ game's mod database, mod groups and mod registration are read and updated by
 UI is `public/profiles.js`. There
 is also a CLI, `src/edit-config.js` (`npm run edit -- --help`-style flags), which
 the server reuses. `npm run phase4` checks the profile and registration
-operations against a throwaway database. See `FINDINGS.md` for the
-reverse-engineered file format and the mod database schema.
+operations against a throwaway database. See [CHANGELOG.md](CHANGELOG.md) for
+what changed in each release, and `FINDINGS.md` for the reverse-engineered file
+format and the mod database schema.

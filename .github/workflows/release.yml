@@ -65,8 +65,8 @@ jobs:
           # personal. The launcher runs `npm install` itself on first start.
           $include = @(
             'Civ6 Mod Toolkit.cmd', 'src', 'public', 'docs', 'fixtures',
-            'package.json', 'package-lock.json', 'README.md', 'FINDINGS.md',
-            'LICENSE', 'civ6-paths.example.json'
+            'package.json', 'package-lock.json', 'README.md', 'CHANGELOG.md',
+            'FINDINGS.md', 'LICENSE', 'civ6-paths.example.json'
           )
           foreach ($item in $include) {
             $path = Join-Path $env:GITHUB_WORKSPACE $item
@@ -95,8 +95,37 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
           ZIP: ${{ steps.build.outputs.zip }}
         run: |
-          gh release create $env:TAG $env:ZIP `
-            --title $env:TAG `
-            --generate-notes `
-            --latest `
-            --verify-tag
+          # Prefer the CHANGELOG entry for this tag over GitHub's auto-generated
+          # commit list, which is a wall of "Add ... to ..." lines. Fall back to
+          # the generated notes if the entry is missing, so a release is never
+          # published without any notes at all.
+          $notes = $null
+          $changelog = Join-Path $env:GITHUB_WORKSPACE 'CHANGELOG.md'
+          if (Test-Path $changelog) {
+            $lines = Get-Content $changelog
+            $start = -1
+            for ($i = 0; $i -lt $lines.Count; $i++) {
+              if ($lines[$i] -match "^##\s+$([regex]::Escape($env:TAG))\b") { $start = $i; break }
+            }
+            if ($start -ge 0) {
+              $end = $lines.Count
+              for ($i = $start + 1; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match '^##\s') { $end = $i; break }
+              }
+              # Drop the "## v1.2.0 - date" heading itself; the tag is the title.
+              $body = $lines[($start + 1)..($end - 1)]
+              while ($body.Count -and [string]::IsNullOrWhiteSpace($body[0])) { $body = $body[1..($body.Count - 1)] }
+              while ($body.Count -and [string]::IsNullOrWhiteSpace($body[-1])) { $body = $body[0..($body.Count - 2)] }
+              if ($body.Count) {
+                $notes = Join-Path $env:RUNNER_TEMP 'notes.md'
+                Set-Content -Path $notes -Value ($body -join "`n") -Encoding utf8
+                Write-Host "using the CHANGELOG entry for $env:TAG ($($body.Count) lines)"
+              }
+            }
+          }
+          if ($notes) {
+            gh release create $env:TAG $env:ZIP --title $env:TAG --notes-file $notes --latest --verify-tag
+          } else {
+            Write-Warning "no CHANGELOG entry for $env:TAG; using generated notes"
+            gh release create $env:TAG $env:ZIP --title $env:TAG --generate-notes --latest --verify-tag
+          }
