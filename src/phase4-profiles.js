@@ -49,9 +49,15 @@ function seed() {
     CREATE TABLE LocalizedText(ModRowId INTEGER NOT NULL, Tag TEXT NOT NULL, Locale TEXT NOT NULL, Text TEXT NOT NULL,
       PRIMARY KEY(ModRowId, Tag, Locale));
     CREATE TABLE ModRelationships(ModRowId INTEGER NOT NULL, OtherModId TEXT NOT NULL, Relationship TEXT NOT NULL, OtherModTitle TEXT);
-    CREATE TABLE Components(ModRowId INTEGER NOT NULL, ComponentType TEXT NOT NULL);
-    CREATE TABLE Settings(ModRowId INTEGER NOT NULL, SettingType TEXT NOT NULL);
-    CREATE TABLE ModFiles(ModRowId INTEGER NOT NULL);`);
+    CREATE TABLE ModFiles(FileRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, ModRowId INTEGER NOT NULL, Path TEXT NOT NULL);
+    CREATE TABLE Components(ComponentRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, ModRowId INTEGER NOT NULL, ComponentId TEXT, ComponentType TEXT NOT NULL);
+    CREATE TABLE ComponentProperties(ComponentRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ComponentRowId, Name));
+    CREATE TABLE ComponentFiles(ComponentRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, Priority INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, FileRowId));
+    CREATE TABLE Settings(SettingRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, ModRowId INTEGER NOT NULL, SettingId TEXT, SettingType TEXT NOT NULL);
+    CREATE TABLE SettingFiles(SettingRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, Priority INTEGER NOT NULL, PRIMARY KEY(SettingRowId, FileRowId));
+    CREATE TABLE Criteria(CriteriaRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, ModRowId INTEGER NOT NULL, CriteriaId TEXT NOT NULL, Any BOOLEAN NOT NULL DEFAULT 0);
+    CREATE TABLE Criterion(CriterionRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, CriteriaRowId INTEGER NOT NULL, CriterionType TEXT NOT NULL, Inverse BOOLEAN NOT NULL DEFAULT 0);
+    CREATE TABLE CriterionProperties(CriterionRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(CriterionRowId, Name));`);
   d.exec(`INSERT INTO ScannedFiles (Path) VALUES ('a'), ('b'), ('c'), ('d')`);
   const ids = ['mod-a', 'mod-b', 'mod-c', 'mod-d'];
   ids.forEach((id, i) => {
@@ -338,9 +344,9 @@ console.log('\nTest 12: register an unscanned mod');
   check('path uses forward slashes', !row.path.includes('\\'), row.path);
   check('path points at the .modinfo', row.path.toLowerCase().endsWith('test mod.modinfo'));
   check('version comes from the .modinfo', row.version === 7, String(row.version));
-  const fileMs = Math.floor(fs.statSync(modinfo).mtimeMs);
-  const lwtMs = Number(BigInt(row.lwt) / 10000n - 11644473600000n);
-  check('LastWriteTime is the file mtime', Math.abs(lwtMs - fileMs) < 1, `${lwtMs} vs ${fileMs}`);
+  const fileTime = require('fs').statSync(modinfo, { bigint: true }).mtimeNs / 100n + 116444736000000000n;
+  check('LastWriteTime is the file mtime, at full precision', row.lwt === fileTime.toString(), `${row.lwt} vs ${fileTime}`);
+  check('and is not rounded to milliseconds', row.lwt !== (BigInt(fileTime / 10000n) * 10000n).toString());
   check('a Name property was written', raw(`SELECT Value FROM ModProperties WHERE Name='Name' AND ModRowId =
     (SELECT ModRowId FROM Mods WHERE lower(ModId)='11111111-2222-3333-4444-555555555555')`)[0].Value === 'Test Mod');
 
@@ -396,6 +402,105 @@ console.log('\nTest 13: registering into a chosen profile as well');
     inExisting ? String(inExisting.disabled) : '(not found)');
   check('an unknown profile is rejected', fails(() => db.registerMods(DB_PATH, [file], true, 9999)));
   check('a profile id of the built-in group is fine', db.registerMods(DB_PATH, [file], true, 1).registered.length === 1);
+}
+
+console.log('\nTest 14: the full registration (files, actions, criteria)');
+{
+  const dir = path.join(TMP, 'mods', 'Full Mod');
+  fs.mkdirSync(path.join(dir, 'Core'), { recursive: true });
+  fs.writeFileSync(path.join(dir, 'Core', 'Data.sql'), 'x');
+  fs.writeFileSync(path.join(dir, 'Core', 'Text.xml'), 'x');
+  const file = path.join(dir, 'Full Mod.modinfo');
+  fs.writeFileSync(file, `<?xml version="1.0" encoding="utf-8"?>
+<Mod id="55555555-4444-3333-2222-111111111111" version="3">
+  <Properties><Name>Full Mod</Name><Description>d</Description></Properties>
+  <ActionCriteria>
+    <Criteria id="Expansion1"><GameCoreInUse>Expansion1</GameCoreInUse></Criteria>
+  </ActionCriteria>
+  <InGameActions>
+    <UpdateDatabase id="Main">
+      <Properties><LoadOrder>200</LoadOrder></Properties>
+      <File>Core/Data.sql</File>
+    </UpdateDatabase>
+    <UpdateText id="Text" criteria="Expansion1"><File>Core/Text.xml</File></UpdateText>
+    <ReplaceUIScript id="NoFiles"><Properties><LuaContext>Screen</LuaContext></Properties></ReplaceUIScript>
+  </InGameActions>
+  <FrontEndActions>
+    <UpdateIcons id="Icons"><File>Core/Text.xml</File></UpdateIcons>
+  </FrontEndActions>
+  <Files><File>Core/Data.sql</File><File>Core/Text.xml</File></Files>
+</Mod>
+`);
+  const r = db.registerMods(DB_PATH, [file]);
+  check('registered', r.registered.length === 1 && r.failed.length === 0, JSON.stringify(r.failed));
+  const row = raw('SELECT ModRowId FROM Mods WHERE lower(ModId)=?', '55555555-4444-3333-2222-111111111111')[0];
+  const mid = row.ModRowId;
+  const n = (sql, ...a) => raw(sql, ...a)[0].n;
+
+  check('a ModFiles row per <Files> entry', n('SELECT count(*) n FROM ModFiles WHERE ModRowId=?', mid) === 2);
+  check('paths kept relative with forward slashes', raw('SELECT Path FROM ModFiles WHERE ModRowId=?', mid).every((f) => !f.Path.includes('\\') && !/^[A-Za-z]:/.test(f.Path)));
+  check('one Component per InGameActions action', n('SELECT count(*) n FROM Components WHERE ModRowId=?', mid) === 3, String(n('SELECT count(*) n FROM Components WHERE ModRowId=?', mid)));
+  check('components keep document order', JSON.stringify(raw('SELECT ComponentType t FROM Components WHERE ModRowId=? ORDER BY ComponentRowId', mid).map((r) => r.t))
+    === JSON.stringify(['UpdateDatabase', 'UpdateText', 'ReplaceUIScript']));
+  check('one Setting per FrontEndActions action', n('SELECT count(*) n FROM Settings WHERE ModRowId=?', mid) === 1);
+  check('an action with no id is still recorded', raw('SELECT count(*) n FROM Components WHERE ModRowId=? AND ComponentId IS NULL', mid)[0].n === 0);
+  check('the action Properties become ComponentProperties', n('SELECT count(*) n FROM ComponentProperties p JOIN Components c ON c.ComponentRowId=p.ComponentRowId WHERE c.ModRowId=?', mid) === 2,
+    String(n('SELECT count(*) n FROM ComponentProperties p JOIN Components c ON c.ComponentRowId=p.ComponentRowId WHERE c.ModRowId=?', mid)));
+  check('LoadOrder stored as a property', raw(`SELECT Value FROM ComponentProperties p JOIN Components c ON c.ComponentRowId=p.ComponentRowId
+    WHERE c.ModRowId=? AND p.Name='LoadOrder'`, mid)[0].Value === '200');
+  check('a Criteria row per ActionCriteria', n('SELECT count(*) n FROM Criteria WHERE ModRowId=?', mid) === 1);
+  check('a Criterion row per condition', n('SELECT count(*) n FROM Criterion c JOIN Criteria k ON k.CriteriaRowId=c.CriteriaRowId WHERE k.ModRowId=?', mid) === 1);
+  check('the condition value is a property', n(`SELECT count(*) n FROM CriterionProperties p JOIN Criterion c ON c.CriterionRowId=p.CriterionRowId
+    JOIN Criteria k ON k.CriteriaRowId=c.CriteriaRowId WHERE k.ModRowId=? AND p.Name='Value' AND p.Value='Expansion1'`, mid) === 1);
+
+  // Links: only the action's own <File> children, at priority 0.
+  const links = raw(`SELECT c.ComponentType t, mf.Path p, cf.Priority pr FROM ComponentFiles cf
+    JOIN Components c ON c.ComponentRowId=cf.ComponentRowId JOIN ModFiles mf ON mf.FileRowId=cf.FileRowId WHERE c.ModRowId=?`, mid);
+  check('one link per <File> child', links.length === 2, String(links.length));
+  check('links resolve to ModFiles rows', links.every((l) => l.p === 'Core/Data.sql' || l.p === 'Core/Text.xml'));
+  check('all at priority 0', links.every((l) => l.pr === 0));
+  check('the action with no <File> gets no link', !links.some((l) => l.t === 'ReplaceUIScript'));
+  check('SettingFiles linked too', n('SELECT count(*) n FROM SettingFiles sf JOIN Settings s ON s.SettingRowId=sf.SettingRowId WHERE s.ModRowId=?', mid) === 1);
+
+  check('database still intact', raw('PRAGMA quick_check')[0].quick_check === 'ok');
+  check('no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
+}
+
+console.log('\nTest 15: every .modinfo property and <Dependencies> are recorded');
+{
+  const dir = path.join(TMP, 'mods', 'Deps Mod');
+  fs.mkdirSync(dir, { recursive: true });
+  const file = path.join(dir, 'Deps.modinfo');
+  fs.writeFileSync(file, `<?xml version="1.0" encoding="utf-8"?>
+<Mod id="77777777-6666-5555-4444-333333333333" version="1">
+  <Properties>
+    <Name>Deps Mod</Name>
+    <Created>1726575064</Created>
+    <AffectsSavedGames>0</AffectsSavedGames>
+    <SubscriptionID>12345</SubscriptionID>
+  </Properties>
+  <Dependencies>
+    <Mod id="4873eb62-8ccc-4574-b784-dda455e74e68" title="Expansion: Gathering Storm" />
+  </Dependencies>
+  <InGameActions><UpdateDatabase id="A"><File>x.sql</File></UpdateDatabase></InGameActions>
+  <Files><File>x.sql</File></Files>
+</Mod>
+`);
+  fs.writeFileSync(path.join(dir, 'x.sql'), 'x');
+  const r = db.registerMods(DB_PATH, [file]);
+  check('registered', r.registered.length === 1 && r.failed.length === 0, JSON.stringify(r.failed));
+  const mid = raw('SELECT ModRowId FROM Mods WHERE lower(ModId)=?', '77777777-6666-5555-4444-333333333333')[0].ModRowId;
+  const props = raw('SELECT Name,Value FROM ModProperties WHERE ModRowId=? ORDER BY Name', mid);
+  const names = props.map((p) => p.Name);
+  check('every <Properties> child is kept, not just a known few',
+    ['Name', 'Created', 'AffectsSavedGames', 'SubscriptionID'].every((n) => names.includes(n)), JSON.stringify(names));
+  check('Created stored verbatim', props.find((p) => p.Name === 'Created').Value === '1726575064');
+  const rel = raw('SELECT OtherModId,Relationship,OtherModTitle FROM ModRelationships WHERE ModRowId=?', mid);
+  check('a self-closing <Dependencies> entry becomes a relationship', rel.length === 1, JSON.stringify(rel));
+  check('with type Dependency and the title', rel[0].Relationship === 'Dependency' && rel[0].OtherModTitle === 'Expansion: Gathering Storm');
+  check('the path is stored with forward slashes', raw('SELECT Path FROM ScannedFiles WHERE ScannedFileRowId=(SELECT ScannedFileRowId FROM Mods WHERE ModRowId=?)', mid)[0].Path.includes('/'));
+  check('database still intact', raw('PRAGMA quick_check')[0].quick_check === 'ok');
+  check('no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });

@@ -528,11 +528,13 @@ function importGroup(dbPath, data) {
 // say which files the mod contributes. See FINDINGS.md for what that means.
 // ---------------------------------------------------------------------------
 
-const FILETIME_EPOCH_MS = 11644473600000n; // 1601-01-01 to 1970-01-01, in ms
 const MAX_REGISTER_MODS = 2000;
 
-// .modinfo -> { id, version, properties }. The same fields modinfo.js already
-// reads, plus the ones the game copies into ModProperties.
+// .modinfo -> { id, version, properties }. Every <Properties> child becomes a
+// ModProperties row, which is what the game does - a hardcoded list of known
+// fields would silently drop the rest (Created, AffectsSavedGames,
+// SubscriptionID, ...). Name matters most: without it the mod manager shows
+// the mod by its raw GUID.
 function readModinfoMeta(file) {
   const fs = require('fs');
   let text;
@@ -541,38 +543,178 @@ function readModinfoMeta(file) {
   } catch (e) {
     return null;
   }
-  const tag = (text.match(/<Mod\b[^>]*>/i) || [''])[0];
+  const tag = (text.match(/<Mod\b[^>]*>/) || [''])[0];
   const id = (tag.match(/\bid\s*=\s*"([^"]+)"/i) || [])[1];
   if (!id) return null;
   const version = Number((tag.match(/\bversion\s*=\s*"?(\d+)"?/i) || [])[1] || 1);
-  const field = (name) => {
-    const m = text.match(new RegExp(`<${name}>\\s*([^<]*?)\\s*<\\/${name}>`, 'i'));
-    return m ? m[1].trim() : '';
-  };
-  return {
-    id,
-    version: Number.isFinite(version) && version > 0 ? version : 1,
-    properties: {
-      Name: field('Name'),
-      Description: field('Description'),
-      Teaser: field('Teaser'),
-      Authors: field('Authors'),
-      CompatibleVersions: field('CompatibleVersions'),
-    },
-  };
+  // The mod's own <Properties> block, not any nested action properties.
+  const own = xmlSections(text, 'Properties')[0] || '';
+  const properties = {};
+  for (const m of own.matchAll(/<([A-Za-z][A-Za-z0-9]*)>([\s\S]*?)<\/\1>/g)) {
+    properties[m[1]] = m[2].trim();
+  }
+  return { id, version: Number.isFinite(version) && version > 0 ? version : 1, properties };
 }
 
-function toFileTime(mtimeMs) {
-  return (BigInt(Math.floor(mtimeMs)) + FILETIME_EPOCH_MS) * 10000n;
+// The game's ScannedFiles.LastWriteTime is a Windows FILETIME - 100-nanosecond
+// ticks since 1601-01-01 - and it holds the file's *full* mtime precision.
+// A value rounded to milliseconds reads as a changed file, which makes the game
+// rescan the mod and rebuild its profile membership, undoing a profile toggle
+// written before the first launch. So take the nanosecond mtime: Node exposes it
+// through statSync(..., { bigint: true }).
+const FILETIME_EPOCH_TICKS = 116444736000000000n; // 1601-01-01 to 1970-01-01
+function fileTimeOf(file) {
+  const st = require('fs').statSync(file, { bigint: true });
+  return st.mtimeNs / 100n + FILETIME_EPOCH_TICKS;
+}
+
+// Forward slashes, and the casing Windows actually has on disk. A Steam
+// library path read from the registry can be all lower case.
+function canonicalPath(file) {
+  const fs = require('fs');
+  try {
+    return fs.realpathSync.native(file).split('\\').join('/');
+  } catch (_) {
+    return file.split('\\').join('/');
+  }
+}
+
+// ---- .modinfo parsing ------------------------------------------------------
+//
+// Everything the game records about a mod comes out of the .modinfo, so a mod
+// can be registered without the game scanning it. Verified against 380 real
+// mods (2026-09-27):
+//   ModFiles          <- <Files>/<File>, in order. Not a folder listing: 69 mods
+//                        have files on disk that the game does not record.
+//   Components        <- one per action element in <InGameActions>, in order,
+//                        and Settings likewise from <FrontEndActions>. Actions
+//                        may carry criteria="..." and some carry no id at all.
+//   ComponentProperties <- the action's own <Properties> children (LoadOrder,
+//                        LuaContext, LuaReplace, ...)
+//   ComponentFiles    <- the action's <File> children only, Priority 0. An
+//                        action with no <File> (e.g. ReplaceUIScript) gets none,
+//                        even though it names a Lua file to replace.
+//   Criteria          <- <ActionCriteria>/<Criteria id>, one Criterion row per
+//                        condition element, its text stored as a 'Value'
+//     property.
+// These are deliberately simple regexes over consistent, machine-written XML,
+// the same approach modinfo.js already takes.
+
+// Every <name>...</name> block, in document order.
+function xmlSections(text, name) {
+  const out = [];
+  const re = new RegExp(`<${name}\\b[^>]*>([\\s\\S]*?)</${name}>`, 'gi');
+  let m;
+  while ((m = re.exec(text))) out.push(m[1]);
+  return out;
+}
+
+// Direct <Tag>value</Tag> children of a block.
+function xmlFields(block, ...names) {
+  const out = {};
+  for (const name of names) {
+    const m = block.match(new RegExp(`<${name}>([\\s\\S]*?)</${name}>`, 'i'));
+    if (m) out[name] = m[1].trim();
+  }
+  return out;
+}
+
+// The action elements inside <InGameActions>/<FrontEndActions>. An element may
+// carry extra attributes (criteria="Expansion1") and may have no id.
+function xmlActions(blocks) {
+  const out = [];
+  for (const block of blocks) {
+    const re = /<([A-Za-z][A-Za-z0-9]*)\s+([^>]*?)>([\s\S]*?)<\/\1>/g;
+    let m;
+    while ((m = re.exec(block))) {
+      const attrs = m[2] || '';
+      const id = (attrs.match(/\bid\s*=\s*"([^"]*)"/i) || [])[1] || null;
+      const criteria = (attrs.match(/\bcriteria\s*=\s*"([^"]*)"/i) || [])[1] || null;
+      const body = m[3] || '';
+      out.push({
+        type: m[1],
+        id,
+        criteria,
+        // An action's own <Properties> block holds LoadOrder and friends; the
+        // <File> children are what it contributes.
+        properties: xmlSections(body, 'Properties').flatMap((b) => [
+          ...b.matchAll(/<([A-Za-z][A-Za-z0-9]*)>([\s\S]*?)<\/\1>/g),
+        ]).map((x) => ({ name: x[1], value: x[2].trim() })),
+        files: [...body.matchAll(/<File>([\s\S]*?)<\/File>/g)].map((x) => x[1].trim()).filter(Boolean),
+      });
+    }
+  }
+  return out;
+}
+
+// <ActionCriteria>/<Criteria id="X"> each holding condition elements. The
+// condition's text is stored as a 'Value' property on the Criterion row.
+function xmlCriteria(text) {
+  const out = [];
+  for (const block of xmlSections(text, 'ActionCriteria')) {
+    const re = /<Criteria\b([^>]*)>([\s\S]*?)<\/Criteria>/g;
+    let m;
+    while ((m = re.exec(block))) {
+      const attrs = m[1] || '';
+      out.push({
+        id: (attrs.match(/\bid\s*=\s*"([^"]*)"/i) || [])[1] || null,
+        any: /(^|\s)any\s*=\s*"(1|true)"/i.test(attrs) ? 1 : 0,
+        conditions: [...m[2].matchAll(/<([A-Za-z][A-Za-z0-9]*)([^>]*)>([\s\S]*?)<\/\1>/g)].map((c) => ({
+          type: c[1],
+          inverse: /(^|\s)inverse\s*=\s*"(1|true)"/i.test(c[2] || '') ? 1 : 0,
+          value: c[3].trim(),
+        })),
+      });
+    }
+  }
+  return out;
+}
+
+// <Dependencies><Mod id="..." title="..." /></Dependencies> - the mod's own
+// requirement, stored as a ModRelationships row of type 'Dependency'. The
+// element is self-closing, so it has to be matched without a closing tag.
+function xmlDependencies(text) {
+  return xmlSections(text, 'Dependencies').flatMap((block) =>
+    [...block.matchAll(/<Mod\b([^>]*?)\/?>/g)].map((m) => {
+      const attrs = m[1] || '';
+      return {
+        id: (attrs.match(/\bid\s*=\s*"([^"]+)"/i) || [])[1] || null,
+        title: (attrs.match(/\btitle\s*=\s*"([^"]*)"/i) || [])[1] || null,
+      };
+    })).filter((d) => d.id);
+}
+
+// A .modinfo read in full: everything the game's registration is derived from.
+function parseModinfo(file) {
+  const fs = require('fs');
+  let text;
+  try {
+    text = fs.readFileSync(file, 'utf8').replace(/^\uFEFF/, '');
+  } catch (e) {
+    return null;
+  }
+  const meta = readModinfoMeta(file);
+  if (!meta) return null;
+  return {
+    ...meta,
+    files: xmlSections(text, 'Files').flatMap((b) => [...b.matchAll(/<File>([\s\S]*?)<\/File>/g)].map((x) => x[1].trim()))
+      .filter(Boolean),
+    inGame: xmlActions(xmlSections(text, 'InGameActions')),
+    frontEnd: xmlActions(xmlSections(text, 'FrontEndActions')),
+    criteria: xmlCriteria(text),
+    dependencies: xmlDependencies(text),
+  };
 }
 
 function registerMod(db, file, activeGroupId, enabled = true) {
   const fs = require('fs');
   const meta = readModinfoMeta(file);
   if (!meta) throw new Error('no mod id in the .modinfo');
-  // The game stores forward slashes even on Windows.
-  const rel = file.replace(/\\/g, '/');
-  const mtime = toFileTime(fs.statSync(file).mtimeMs);
+  // The game stores forward slashes even on Windows, and the path with the
+  // casing the filesystem really has - a Steam library found via the registry
+  // can come out as "d:\steam", which is not what the game records.
+  const rel = canonicalPath(file);
+  const mtime = fileTimeOf(file);
 
   const seen = db.prepare('SELECT ScannedFileRowId FROM ScannedFiles WHERE Path = ?').get(rel);
   let fileRowId = seen && seen.ScannedFileRowId;
@@ -594,6 +736,7 @@ function registerMod(db, file, activeGroupId, enabled = true) {
     for (const [name, value] of Object.entries(meta.properties)) {
       if (value) put.run(modRowId, name, value);
     }
+    writeModContent(db, modRowId, parseModinfo(file));
   }
 
   // The game rescans on every launch, so this has to be safe to repeat.
@@ -601,6 +744,79 @@ function registerMod(db, file, activeGroupId, enabled = true) {
     ON CONFLICT (ModGroupRowId, ModRowId) DO UPDATE SET Disabled = excluded.Disabled`)
     .run(activeGroupId, modRowId, enabled ? 0 : 1);
   return { modId: meta.id, name: meta.properties.Name || meta.id, file, isNew, modRowId };
+}
+
+// Writes the parts of a registration that describe what the mod contributes:
+// its files, the actions that use them, and the criteria that gate those
+// actions. Everything is derived from the .modinfo (see parseModinfo).
+function writeModContent(db, modRowId, info) {
+  if (!info) return { files: 0, components: 0, settings: 0, criteria: 0 };
+
+  // ModFiles, keyed by path so the links below can resolve them.
+  const addFile = db.prepare('INSERT INTO ModFiles (ModRowId, Path) VALUES (?, ?)');
+  const findFile = db.prepare('SELECT FileRowId FROM ModFiles WHERE ModRowId = ? AND Path = ?');
+  const fileRowId = new Map();
+  for (const rel of info.files) {
+    const norm = rel.split('\\').join('/');
+    if (fileRowId.has(norm)) continue;
+    let row = findFile.get(modRowId, norm);
+    if (!row) row = { FileRowId: addFile.run(modRowId, norm).lastInsertRowid };
+    fileRowId.set(norm, row.FileRowId);
+  }
+
+  // Criteria first, so an action's criteria="..." can point at one.
+  const criteriaRowId = new Map();
+  const addCriteria = db.prepare('INSERT INTO Criteria (ModRowId, CriteriaId, Any) VALUES (?, ?, ?)');
+  const addCriterion = db.prepare('INSERT INTO Criterion (CriteriaRowId, CriterionType, Inverse) VALUES (?, ?, ?)');
+  const addCriterionProp = db.prepare('INSERT INTO CriterionProperties (CriterionRowId, Name, Value) VALUES (?, ?, ?)');
+  for (const c of info.criteria) {
+    if (!c.id) continue;
+    const id = addCriteria.run(modRowId, c.id, c.any).lastInsertRowid;
+    criteriaRowId.set(c.id, id);
+    for (const cond of c.conditions) {
+      const condId = addCriterion.run(id, cond.type, cond.inverse).lastInsertRowid;
+      if (cond.value) addCriterionProp.run(condId, 'Value', cond.value);
+    }
+  }
+
+  // Actions -> Components/Settings, then their <File> children as links.
+  const writeActions = (actions, kind) => {
+    const addAction = kind === 'component'
+      ? db.prepare('INSERT INTO Components (ModRowId, ComponentId, ComponentType) VALUES (?, ?, ?)')
+      : db.prepare('INSERT INTO Settings (ModRowId, SettingId, SettingType) VALUES (?, ?, ?)');
+    const addProp = db.prepare('INSERT INTO ComponentProperties (ComponentRowId, Name, Value) VALUES (?, ?, ?)');
+    const link = kind === 'component'
+      ? db.prepare('INSERT INTO ComponentFiles (ComponentRowId, FileRowId, Priority) VALUES (?, ?, 0)')
+      : db.prepare('INSERT INTO SettingFiles (SettingRowId, FileRowId, Priority) VALUES (?, ?, 0)');
+    let count = 0;
+    for (const a of actions) {
+      const actionId = addAction.run(modRowId, a.id, a.type).lastInsertRowid;
+      count++;
+      if (kind === 'component') {
+        for (const prop of a.properties) addProp.run(actionId, prop.name, prop.value);
+      }
+      for (const rel of a.files) {
+        const target = fileRowId.get(rel.split('\\').join('/'));
+        // A file the modinfo references but never lists is not loadable; skip
+        // it rather than link a row that points at nothing.
+        if (target != null) link.run(actionId, target);
+      }
+    }
+    return count;
+  };
+
+  const components = writeActions(info.inGame, 'component');
+  const settings = writeActions(info.frontEnd, 'setting');
+
+  // <Dependencies> - the mod's own requirement on another mod (usually DLC).
+  const addRel = db.prepare('INSERT INTO ModRelationships (ModRowId, OtherModId, Relationship, OtherModTitle) VALUES (?, ?, ?, ?)');
+  let dependencies = 0;
+  for (const d of info.dependencies) {
+    addRel.run(modRowId, d.id, 'Dependency', d.title);
+    dependencies++;
+  }
+
+  return { files: fileRowId.size, components, settings, criteria: criteriaRowId.size, dependencies };
 }
 
 // The built-in group. Every mod the game knows has a row here - verified on a
@@ -667,5 +883,5 @@ module.exports = {
   readModState, readModDetails, applyChanges, classifyPath,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
   exportGroup, importGroup, EXPORT_TOOLKIT, EXPORT_VERSION,
-  registerMod, registerMods, readModinfoMeta, toFileTime,
+  registerMod, registerMods, readModinfoMeta, parseModinfo, fileTimeOf,
 };
