@@ -202,6 +202,48 @@ fill in the file list, then set the profile toggle. `registerMods()` writes the
 built-in row always, and the active profile's row only when asked — which is
 correct only for a mod the game has already scanned.
 
+### The complete registration, and the two details that make it stick
+
+Everything the game records about a mod comes out of the `.modinfo`, so the
+game's own scan is not needed at all. Rules established by comparing 380 real
+mods against the game's rows, then confirmed by replaying a registration and
+diffing it against the output the game had actually produced — an exact match
+on all eleven tables.
+
+| Table | Derived from |
+|---|---|
+| `ModFiles` | `<Files>/<File>`, in order. **Not** a folder listing: 69 of 380 mods have files on disk that the game does not record, and none matched a walk instead. |
+| `Components` | one per action element in `<InGameActions>`, document order. Actions may carry `criteria="..."` and some carry no `id` at all. |
+| `ComponentProperties` | that action's own `<Properties>` children (`LoadOrder`, `LuaContext`, `LuaReplace`) |
+| `ComponentFiles` | the action's `<File>` children only, `Priority=0`. An action with no `<File>` gets none, even when it names a Lua file to replace. |
+| `Settings` / `SettingFiles` | the same, from `<FrontEndActions>` |
+| `Criteria` / `Criterion` / `CriterionProperties` | `<ActionCriteria>/<Criteria id>`, one `Criterion` per condition element, its text stored as a `Value` property |
+| `ModRelationships` | `<Dependencies>/<Mod id title/>` — **self-closing** elements, so a regex expecting a closing tag silently misses them |
+| `ModProperties` | every child of the mod's own `<Properties>`, not a fixed list of known names (`Created`, `AffectsSavedGames`, `SubscriptionID`… are real) |
+
+Two details decide whether the game treats the mod as already scanned, and both
+cost a launch to discover:
+
+- **`ScannedFiles.LastWriteTime` must carry the full mtime precision.** The
+  value is 100-nanosecond ticks, but JavaScript only exposes milliseconds, and
+  a millisecond-rounded value differs from the real one by a few hundred ticks
+  (2089 for one mod). The game reads that as a changed file, rescans, and
+  *rebuilds the mod's profile membership* — silently undoing a profile toggle
+  written beforehand. This, not the game policing us, is what caused that reset.
+  Node's `statSync(file, { bigint: true }).mtimeNs` gives the exact value.
+- **The path must be the canonical on-disk casing.** A Steam library path read
+  from the registry can be all lower case (`d:\steam\…`); the game records
+  `D:\Steam\…`. `fs.realpathSync.native` normalises it.
+
+A file referenced by an action but absent from `<Files>` is skipped by both the
+game and the toolkit (verified: the game created no `ModFiles` row for it), so a
+broken reference in a mod stays broken rather than becoming a dangling link.
+
+Verified end to end (2026-09-27): a newly subscribed mod registered by the
+toolkit was launched in Civ6 once, and the game added **no rows at all** to any
+table and left the profile toggle in place. The flow is now: subscribe →
+register → launch and play, already enabled.
+
 ## Mod manager (done)
 
 `POST /api/mods/apply` refuses while the game runs (process check), backs up
