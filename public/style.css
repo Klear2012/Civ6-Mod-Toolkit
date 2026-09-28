@@ -217,6 +217,15 @@ button:disabled { opacity: .45; cursor: default; }
   background: transparent; color: var(--muted); border: 1px solid var(--border); font-size: 13px; font-weight: 700;
 }
 .row .info:hover { color: var(--accent); border-color: var(--accent); }
+/* The folder button is a square icon beside the round "i", so it does not take
+   the shared border treatment - the icon is the point, not a box around it. */
+.row .folder-btn {
+  flex: none; width: 22px; height: 26px; padding: 0; background: transparent;
+  color: var(--muted); border: 1px solid transparent; border-radius: 6px;
+  display: inline-flex; align-items: center; justify-content: center;
+}
+.row .folder-btn:hover:not(:disabled) { color: var(--accent); }
+.row .folder-btn:disabled { opacity: .35; cursor: default; }
 .pane-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 button.small { padding: 5px 10px; font-size: 12.5px; }
 .pane .list.tall { max-height: calc(100vh - 340px); }

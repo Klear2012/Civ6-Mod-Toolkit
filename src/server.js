@@ -20,7 +20,7 @@ const {
   readModState, readModDetails, applyChanges,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
   exportGroup, importGroup, registerMods, findUnregistered,
-  findRemoved, removeMods, classifyPath,
+  findRemoved, removeMods, classifyPath, modFolderFault,
 } = require('./modsdb');
 const { gameStatus } = require('./game');
 
@@ -338,6 +338,44 @@ async function handleApi(req, res, url) {
     return send(res, 200, { ok: !run.error, ...run });
   }
 
+  // POST /api/mods/open-folder { ids: [id] } -> show a mod's folder in Explorer.
+  //
+  // A page cannot open Explorer by itself - file:// links are blocked from an
+  // http:// page - so the server does it. It cannot delete anything, but it does
+  // hand a path to another program, so it takes the same care as removal: ids
+  // only from the request, the folder re-derived from the database, and the same
+  // modFolderFault() rules. Not blocked while Civ6 runs - this reads nothing.
+  if (req.method === 'POST' && url.pathname === '/api/mods/open-folder') {
+    const { ids } = await readBody(req);
+    const list = Array.isArray(ids) ? ids.map(normId) : [];
+    if (!list.length) return send(res, 400, { error: 'no mods were named' });
+    if (list.length > 1) return send(res, 400, { error: 'one mod at a time' });
+
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    const sources = paths.getSources();
+    const roots = sources.filter((s) => s.exists)
+      .map((s) => String(s.root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase());
+
+    const st = readModState(modsDb.path);
+    if (!st.ok) return send(res, 400, { error: st.error });
+    const rec = st.mods.find((m) => m.idNorm === list[0]);
+    if (!rec) return send(res, 400, { error: 'that mod is not in the database' });
+
+    const folder = path.dirname(String(rec.path || '').replace(/\\/g, '/'));
+    const fault = modFolderFault(folder, rec.path, roots);
+    if (fault) return send(res, 400, { error: fault });
+    try {
+      if (!fs.statSync(folder).isDirectory()) return send(res, 400, { error: 'that path is not a folder' });
+    } catch (e) {
+      return send(res, 400, { error: e.code === 'ENOENT' ? 'folder not found' : e.message });
+    }
+    execFile('explorer.exe', [folder], { windowsHide: true }, (err) => {
+      if (err) console.error(`Could not open ${folder}: ${err.message}`);
+    });
+    return send(res, 200, { ok: true, folder });
+  }
+
   // POST /api/mods/remove { ids: [...] } -> take mods out of the game and
   // delete their folders.
   //
@@ -359,11 +397,6 @@ async function handleApi(req, res, url) {
     const sources = paths.getSources();
     const roots = sources.filter((s) => s.exists)
       .map((s) => String(s.root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase());
-    const inAModFolder = (p) => {
-      const key = String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
-      return roots.some((r) => key.startsWith(r + '/'));
-    };
-
     // Folders come from the database, never from the request.
     const st = readModState(modsDb.path);
     if (!st.ok) return send(res, 400, { error: st.error });
@@ -374,9 +407,8 @@ async function handleApi(req, res, url) {
       const rec = byId.get(id);
       if (!rec) { rejected.push({ modId: id, reason: 'not in the database' }); continue; }
       const folder = path.dirname(String(rec.path || '').replace(/\\/g, '/'));
-      const kind = classifyPath(rec.path);
-      if (!inAModFolder(folder)) { rejected.push({ modId: id, name: rec.name, reason: 'not inside a mod folder' }); continue; }
-      if (kind !== 'workshop' && kind !== 'local') { rejected.push({ modId: id, name: rec.name, reason: `refusing to remove ${kind} content` }); continue; }
+      const fault = modFolderFault(folder, rec.path, roots);
+      if (fault) { rejected.push({ modId: id, name: rec.name, reason: fault }); continue; }
       expected[id] = folder;
     }
     if (!Object.keys(expected).length) return send(res, 400, { error: 'none of those could be removed', refused: rejected });
@@ -396,8 +428,12 @@ async function handleApi(req, res, url) {
     // are re-registered by the game on its next scan.
     const kept = [];
     for (const m of r.removed) {
-      // Checked again immediately before deleting, not just earlier.
-      if (!inAModFolder(m.folder)) { kept.push({ ...m, error: 'outside the mod folders' }); continue; }
+      // Checked again immediately before deleting, not just earlier. Passing the
+      // folder where the .modinfo path would go is deliberate: classifyPath keys
+      // off the same root markers, and "workshop/.../12345" and the folder
+      // ".../12345" classify the same way.
+      const fault = modFolderFault(m.folder, m.folder, roots);
+      if (fault) { kept.push({ ...m, error: fault }); continue; }
       try {
         if (!fs.lstatSync(m.folder).isDirectory()) { kept.push({ ...m, error: 'that path is not a folder' }); continue; }
         fs.rmSync(m.folder, { recursive: true, force: true });

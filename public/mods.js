@@ -91,8 +91,24 @@ function rowClass(m, extra) {
     .filter(Boolean).join(' ');
 }
 
-// Name, teaser, warnings, source tag and the details button. The source tag is
-// the Workshop link for Workshop mods, so there is no separate one.
+// The mod's own folder. Only Workshop and local mods have one - DLC and
+// base-game content lives in the game's install folder, not a mod folder.
+// m.folder comes from the on-disk scan, so it is null exactly when the mod is
+// not there, and a disabled button dispatches no click at all: the broken state
+// is unreachable rather than guarded against.
+const FOLDER_ICON = '<svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/></svg>';
+
+function folderButton(m) {
+  if (m.source !== 'workshop' && m.source !== 'local') return '';
+  if (m.folder) {
+    return `<button type="button" class="folder-btn" data-open-folder="${esc(m.idNorm)}"`
+      + ` title="Open this mod&#39;s folder">${FOLDER_ICON}</button>`;
+  }
+  return `<button type="button" class="folder-btn" disabled title="Folder not found — it has been unsubscribed or deleted">${FOLDER_ICON}</button>`;
+}
+
+// Name, teaser, warnings, source tag, folder button and the details button. The
+// source tag is the Workshop link for Workshop mods, so there is no separate one.
 function rowBody(m, all) {
   const probs = problemsOf(m, all).map((p) => `<span class="warn-line">⚠ ${renderCivText(p.text)}${
     p.fix ? `<button type="button" data-fix="${esc(p.fix)}">Turn it on</button>` : ''}</span>`).join('');
@@ -104,7 +120,7 @@ function rowBody(m, all) {
     ? `<span class="tag unscanned" title="Not switched on yet. Use “Rescan &amp; add new mods” on the dashboard.">not added</span>`
     : sourceTag(m);
   return `<span class="name"><b>${renderCivText(m.name)}</b>${sub}${probs}</span>
-    ${tag}
+    ${tag}${folderButton(m)}
     <button type="button" class="info" data-info="${esc(m.idNorm)}" title="Details">i</button>`;
 }
 
@@ -258,12 +274,34 @@ function rowButtonClick(e) {
     renderMods();
     return true;
   }
+  // MUST return true. A button with a data-* attribute nobody claims returns
+  // false, and paneClick() then treats the click as one on the row - which
+  // toggles the mod. That is the exact bug the source-label link was fixed for,
+  // reappearing in a new place.
+  if (b.dataset.openFolder !== undefined) {
+    e.preventDefault();
+    e.stopPropagation();
+    openModFolder(b.dataset.openFolder, b);
+    return true;
+  }
   if (b.dataset.info) {
     e.preventDefault();
     showDetails(b.dataset.info);
     return true;
   }
   return false;
+}
+
+// Opening the folder is the server's job - a page cannot start Explorer itself.
+// The id goes out; the folder comes back resolved from the database, never from
+// anything the page chose.
+async function openModFolder(idNorm, btn) {
+  try {
+    await postJson('/api/mods/open-folder', { ids: [idNorm] });
+  } catch (err) {
+    toast(esc(err.message), 'err');
+    if (btn) btn.disabled = true;
+  }
 }
 
 $('modsList').addEventListener('click', rowButtonClick);
@@ -285,7 +323,14 @@ function paneClick(e) {
 for (const id of ['paneOff', 'paneOn']) {
   $(id).addEventListener('click', paneClick);
   $(id).addEventListener('keydown', (e) => {
-    if ((e.key === 'Enter' || e.key === ' ') && e.target.dataset.move) { e.preventDefault(); paneClick(e); }
+    if (e.key !== 'Enter' && e.key !== ' ') return;
+    // The row itself is the switch, so Enter on a focused control inside it must
+    // do that control's job, not the row's. This was already true by accident -
+    // a button has no dataset.move - and is now true on purpose.
+    if (e.target.closest('button, a')) return;
+    if (!e.target.dataset.move) return;
+    e.preventDefault();
+    paneClick(e);
   });
 }
 

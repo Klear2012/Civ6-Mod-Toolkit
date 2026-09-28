@@ -649,17 +649,25 @@ console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing')
   const before = countRows();
 
   // --- refusals. Each must leave the database exactly as it was.
-  const noFolder = db.removeMods(DB_PATH, [ID], {});
+  const noFolder = db.removeMods(DB_PATH, [ID], {}, [modRoot]);
   check('refuses when no folder was confirmed', noFolder.removed.length === 0 && noFolder.refused.length === 1, JSON.stringify(noFolder.refused));
 
-  const wrongFolder = db.removeMods(DB_PATH, [ID], { [ID]: path.join(modRoot, 'Some Other Mod') });
+  const wrongFolder = db.removeMods(DB_PATH, [ID], { [ID]: path.join(modRoot, 'Some Other Mod') }, [modRoot]);
   check('refuses a folder that does not match the database', wrongFolder.removed.length === 0 && wrongFolder.refused.length === 1,
     JSON.stringify(wrongFolder.refused));
 
-  const baseGame = db.removeMods(DB_PATH, [ID], { [ID]: 'C:/Program Files/Sid Meier/Civilization VI/Base/Scenarios' });
+  // With no source folders to check against there is no way to tell a mod folder
+  // from, say, the game's install directory - so a destructive call that cannot
+  // prove safety refuses rather than assumes.
+  const noRoots = db.removeMods(DB_PATH, [ID], { [ID]: folder });
+  check('refuses when given no mod source folders at all', noRoots.removed.length === 0 && noRoots.refused.length === 1,
+    JSON.stringify(noRoots.refused));
+  check('  and the mod is still there', raw('SELECT count(*) n FROM Mods WHERE lower(ModId)=?', ID)[0].n === 1);
+
+  const baseGame = db.removeMods(DB_PATH, [ID], { [ID]: 'C:/Program Files/Sid Meier/Civilization VI/Base/Scenarios' }, [modRoot]);
   check('refuses a base-game folder', baseGame.removed.length === 0 && baseGame.refused.length === 1, JSON.stringify(baseGame.refused));
 
-  const theRoot = db.removeMods(DB_PATH, [ID], { [ID]: modRoot });
+  const theRoot = db.removeMods(DB_PATH, [ID], { [ID]: modRoot }, [modRoot]);
   check('refuses a mod source folder itself', theRoot.removed.length === 0 && theRoot.refused.length === 1, JSON.stringify(theRoot.refused));
 
   // Both of the above were refused for "folder does not match", which never
@@ -728,7 +736,7 @@ console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing')
     `${listed.removed.length} listed, ${listed.removable} removable`);
 
   // --- case must not matter, or a Steam library recorded as "d:\steam" fails
-  const shouty = db.removeMods(DB_PATH, [ID], { [ID]: folder.toUpperCase() });
+  const shouty = db.removeMods(DB_PATH, [ID], { [ID]: folder.toUpperCase() }, [modRoot]);
   check('a case difference in the folder is accepted', shouty.removed.length === 1, JSON.stringify(shouty.refused));
   check('it really is gone from Mods', raw('SELECT count(*) n FROM Mods WHERE lower(ModId)=?', ID)[0].n === 0);
   check('no profile still lists it', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId WHERE lower(m.ModId)=?`, ID)[0].n === 0);
@@ -738,9 +746,37 @@ console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing')
   check('only its own rows went: one fewer mod, fewer group items',
     countRows().m === planted.m - 1 && countRows().g < planted.g,
     `mods ${planted.m}->${countRows().m}, items ${planted.g}->${countRows().g}`);
-  check('removing nothing is a no-op', db.removeMods(DB_PATH, [], {}).removed.length === 0);
+  check('removing nothing is a no-op', db.removeMods(DB_PATH, [], {}, [modRoot]).removed.length === 0);
   check('and the database is still intact', raw('PRAGMA quick_check')[0].quick_check === 'ok');
   check('with no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
+
+  // The rule set itself, on its own. Both the remove path and the open-folder
+  // path go through this, so a change here moves both - which is the point, and
+  // also why it needs checking directly rather than only through a caller.
+  console.log('\nTest 19: the shared folder rules');
+  {
+    const roots = [modRoot];
+    const F = db.modFolderFault;
+    const real = path.join(modRoot, 'Real Mod').replace(/\\/g, '/');
+    check('accepts a mod folder inside a source', F(real, `${real}/Real.modinfo`, roots) === null, String(F(real, `${real}/Real.modinfo`, roots)));
+    check('accepts it however it is capitalised', F(real.toUpperCase(), `${real}/Real.modinfo`, roots) === null);
+    check('accepts a workshop path', F(real, 'd:/steam/steamapps/workshop/content/289070/123/Real.modinfo', roots) === null);
+    check('refuses base game', /base/.test(F(real, '../../Base/Scenarios/X.modinfo', roots) || ''), String(F(real, '../../Base/Scenarios/X.modinfo', roots)));
+    check('refuses dlc', /dlc/.test(F(real, '../../DLC/Australia/X.modinfo', roots) || ''), String(F(real, '../../DLC/Australia/X.modinfo', roots)));
+    check('refuses the source folder itself', /source folder/.test(F(modRoot, `${modRoot}/X.modinfo`, roots) || ''), String(F(modRoot, `${modRoot}/X.modinfo`, roots)));
+    check('refuses a folder containing the source', /containing/.test(F(path.dirname(modRoot), `${path.dirname(modRoot)}/X.modinfo`, roots) || ''));
+    check('refuses a folder outside every source', /not inside/.test(F('C:/elsewhere/Mod', 'C:/elsewhere/Mod/X.modinfo', roots) || ''));
+    check('refuses an empty path', !!F('', 'X.modinfo', roots));
+    // With nothing to check against it cannot prove the folder is safe, so it
+    // must refuse rather than assume - this is what protects a caller that
+    // forgets to pass the roots.
+    check('refuses when given no roots at all', !!F(real, `${real}/Real.modinfo`, []), String(F(real, `${real}/Real.modinfo`, [])));
+    check('and the same when roots is undefined', !!F(real, `${real}/Real.modinfo`, undefined));
+    // The kind is reported before "not inside a mod folder", so a DLC path reads
+    // as DLC rather than as merely being somewhere unexpected.
+    check('the kind is reported ahead of the location', /^refusing to remove dlc/.test(F('C:/nowhere', '../../DLC/A/X.modinfo', roots) || ''),
+      String(F('C:/nowhere', '../../DLC/A/X.modinfo', roots)));
+  }
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });

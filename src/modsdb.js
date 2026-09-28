@@ -951,6 +951,33 @@ function findUnregistered(dbPath, sources, state) {
 
 const rootKey = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
 
+// Why this folder may not be acted on, or null if it may. THE rules for "is this
+// a mod folder the toolkit is allowed to touch" live here and nowhere else - the
+// remove path and the open-folder path both call it, because two copies of this
+// is how they drift, and a drifted guard is a guard that can delete somebody's
+// entire mod library.
+//
+// `recordedPath` is the path the game itself stored, because that is what says
+// whether this is a mod or something else: base-game scenarios and DLC civs sit
+// in the same database, with paths relative to the game's install folder.
+//
+// The reasons are kept apart because they are different mistakes and the caller
+// reports which happened. `roots` may already be normalised rootKeys.
+function modFolderFault(folder, recordedPath, roots) {
+  const key = rootKey(folder);
+  if (!key) return 'that mod has no folder';
+  const kind = classifyPath(recordedPath);
+  if (kind !== 'workshop' && kind !== 'local') return `refusing to remove ${kind} content`;
+  const rootKeys = (roots || []).map(rootKey).filter(Boolean);
+  // A mod source folder itself, or anything above one. A mod whose recorded
+  // path sat directly in the source folder would otherwise let the caller act on
+  // the whole library.
+  if (rootKeys.includes(key)) return 'refusing to remove a mod source folder';
+  if (rootKeys.some((r) => r.startsWith(key + '/'))) return 'refusing to remove a folder containing the mod folders';
+  if (!rootKeys.some((r) => key.startsWith(r + '/'))) return 'not inside a mod folder';
+  return null;
+}
+
 // Mods recorded in the database whose files are gone: unsubscribed from the
 // Workshop, or deleted by hand. Returns the folder each one lived in so the
 // caller can show it, and so removal can refuse to delete anything unexpected.
@@ -1041,21 +1068,12 @@ function removeMods(dbPath, ids, expected, roots) {
         refused.push({ modId: idNorm, reason: 'the folder does not match the one in the database' });
         continue;
       }
-      const kind = classifyPath(scanned.Path);
-      if (kind !== 'workshop' && kind !== 'local') {
-        refused.push({ modId: idNorm, reason: `refusing to remove ${kind} content` });
-        continue;
-      }
-      // Never a mod source folder, and never anything above one. A mod whose
-      // recorded path sat directly in the source folder would otherwise let the
-      // caller delete the whole mod library.
-      const key = rootKey(wanted);
-      const isRoot = rootKeys.some((r) => key === r);
-      const holdsRoot = rootKeys.some((r) => r.startsWith(key + '/'));
-      if (isRoot || holdsRoot || !key) {
-        refused.push({ modId: idNorm, reason: isRoot ? 'refusing to remove a mod source folder' : 'refusing to remove a folder containing the mod folders' });
-        continue;
-      }
+      // One implementation of the rules, shared with the server so the two
+      // cannot drift. Order matters: the kind is checked first, so a base-game
+      // or DLC path is reported as such rather than as merely sitting outside a
+      // mod folder.
+      const fault = modFolderFault(wanted, scanned.Path, rootKeys);
+      if (fault) { refused.push({ modId: idNorm, reason: fault }); continue; }
 
       // Children before parents, so nothing is left pointing at a missing mod.
       for (const r of db.prepare('SELECT ComponentRowId AS id FROM Components WHERE ModRowId = ?').all(row.ModRowId)) {
@@ -1072,7 +1090,7 @@ function removeMods(dbPath, ids, expected, roots) {
       }
       db.prepare('DELETE FROM Mods WHERE ModRowId = ?').run(row.ModRowId);
       if (row.ScannedFileRowId != null) db.prepare('DELETE FROM ScannedFiles WHERE ScannedFileRowId = ?').run(row.ScannedFileRowId);
-      removed.push({ modId: idNorm, name: row.ModId, folder: wanted, kind });
+      removed.push({ modId: idNorm, name: row.ModId, folder: wanted, kind: classifyPath(scanned.Path) });
     }
     if (!removed.length) return { removed, refused };
 
@@ -1091,7 +1109,7 @@ function removeMods(dbPath, ids, expected, roots) {
 module.exports = {
   readModState, readModDetails, applyChanges, classifyPath,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
-  findUnregistered, findRemoved, removeMods,
+  findUnregistered, findRemoved, removeMods, modFolderFault,
   exportGroup, importGroup, EXPORT_TOOLKIT, EXPORT_VERSION,
   registerMod, registerMods, readModinfoMeta, parseModinfo, fileTimeOf,
 };
