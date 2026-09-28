@@ -4,6 +4,13 @@ name: Release
 # and attaches it to a GitHub release. The checks below run first, so a broken
 # commit can never be published - the job simply fails and nothing is released.
 #
+# A tag with a pre-release suffix (-rc1, -beta2, ...) is published as a
+# GitHub *pre-release* and is deliberately not marked as the latest release, so
+# the download links in the README and the docs site keep pointing at the last
+# real version. It is a build to try before tagging the final, not a release in
+# its own right. An rc also borrows the release notes of the version it leads to,
+# so what you test and what you ship are described the same way.
+#
 # Re-running: "Run workflow" rebuilds the release for a tag that already exists,
 # so a failed publish never needs the tag deleted and pushed again.
 on:
@@ -95,6 +102,15 @@ jobs:
           TAG: ${{ inputs.tag || github.ref_name }}
           ZIP: ${{ steps.build.outputs.zip }}
         run: |
+          # A tag like v1.6.0-rc1 is a test build for the author to click, not a
+          # release. Left alone, gh publishes it as a full release and --latest
+          # hands it the "latest release" pointer, which is what the download
+          # links in the README and the docs site follow. So the two are decided
+          # together: pre-release, or latest - never both.
+          $isPre = $env:TAG -match '-(alpha|beta|rc|pre)\.?\d*$'
+          $roll = if ($isPre) { '--prerelease' } else { '--latest' }
+          if ($isPre) { Write-Host "$env:TAG is a pre-release: publishing as a draft candidate, not the latest release" }
+
           # Prefer the CHANGELOG entry for this tag over GitHub's auto-generated
           # commit list, which is a wall of "Add ... to ..." lines. Fall back to
           # the generated notes if the entry is missing, so a release is never
@@ -103,29 +119,38 @@ jobs:
           $changelog = Join-Path $env:GITHUB_WORKSPACE 'CHANGELOG.md'
           if (Test-Path $changelog) {
             $lines = Get-Content $changelog
-            $start = -1
-            for ($i = 0; $i -lt $lines.Count; $i++) {
-              if ($lines[$i] -match "^##\s+$([regex]::Escape($env:TAG))\b") { $start = $i; break }
-            }
-            if ($start -ge 0) {
+            # A pre-release tag has no heading of its own, so fall back to the
+            # version it leads to: v1.6.0-rc1 borrows the notes for v1.6.0. An
+            # author testing the build wants the same notes the real release will
+            # carry, not the commit list.
+            $candidates = @($env:TAG)
+            if ($isPre -and $env:TAG -match '^(.+?)-\w+$') { $candidates += $Matches[1] }
+            foreach ($cand in $candidates) {
+              $start = -1
+              for ($i = 0; $i -lt $lines.Count; $i++) {
+                if ($lines[$i] -match "^##\s+$([regex]::Escape($cand))(\s|$)") { $start = $i; break }
+              }
+              if ($start -lt 0) { continue }
               $end = $lines.Count
               for ($i = $start + 1; $i -lt $lines.Count; $i++) {
                 if ($lines[$i] -match '^##\s') { $end = $i; break }
               }
               # Drop the "## v1.2.0 - date" heading itself; the tag is the title.
-              $body = $lines[($start + 1)..($end - 1)]
+              $body = @()
+              if ($end -gt ($start + 1)) { $body = $lines[($start + 1)..($end - 1)] }
               while ($body.Count -and [string]::IsNullOrWhiteSpace($body[0])) { $body = $body[1..($body.Count - 1)] }
               while ($body.Count -and [string]::IsNullOrWhiteSpace($body[-1])) { $body = $body[0..($body.Count - 2)] }
               if ($body.Count) {
                 $notes = Join-Path $env:RUNNER_TEMP 'notes.md'
                 Set-Content -Path $notes -Value ($body -join "`n") -Encoding utf8
-                Write-Host "using the CHANGELOG entry for $env:TAG ($($body.Count) lines)"
+                Write-Host "using the CHANGELOG entry for $cand ($($body.Count) lines)"
               }
+              break
             }
           }
           if ($notes) {
-            gh release create $env:TAG $env:ZIP --title $env:TAG --notes-file $notes --latest --verify-tag
+            gh release create $env:TAG $env:ZIP --title $env:TAG --notes-file $notes $roll --verify-tag
           } else {
             Write-Warning "no CHANGELOG entry for $env:TAG; using generated notes"
-            gh release create $env:TAG $env:ZIP --title $env:TAG --generate-notes --latest --verify-tag
+            gh release create $env:TAG $env:ZIP --title $env:TAG --generate-notes $roll --verify-tag
           }
