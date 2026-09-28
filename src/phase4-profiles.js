@@ -554,6 +554,78 @@ console.log('\nTest 16: <File> elements that carry attributes are not dropped');
   check('no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
 }
 
+// --- Test 17: the sync that runs unattended ---------------------------------
+// A sync runs at server startup and from the dashboard's Rescan with nobody
+// watching, so the property that matters most is that it switches nothing on.
+// registerMods used to ignore its `enabled` argument and always came up on in
+// the built-in group and the profile in use; no test noticed, because the only
+// caller always passed true. This is the test that would have caught it.
+//
+// Last in the file on purpose: it changes the database, and the tests above
+// assert against shared state.
+console.log('\nTest 17: an unattended sync switches nothing on');
+{
+  const profiles = raw('SELECT count(*) AS n FROM ModGroups')[0].n;
+  // scanMods() takes { root, exists, type } entries, the shape paths.getSources() returns.
+  const sources = [{ root: path.join(TMP, 'mods'), exists: true, type: 'local' }];
+
+  // A real .modinfo on disk, so findUnregistered can see it. The id must not
+  // collide with an earlier test's, or it is already in the database by now.
+  const modDir = path.join(TMP, 'mods', 'Sync Mod');
+  fs.mkdirSync(modDir, { recursive: true });
+  const file = path.join(modDir, 'Sync.modinfo');
+  const ID = '44444444-1111-2222-3333-444444444444';
+  fs.writeFileSync(file, `<Mod id="${ID}" version="1"><Properties><Name>Sync Mod</Name></Properties></Mod>`);
+
+  const first = db.findUnregistered(DB_PATH, sources);
+  check('findUnregistered reads the database', first.ok === true, first.error || '');
+  check('it finds the mod that is only on disk', first.pending.some((p) => p.idNorm === ID && p.reason === 'never-scanned'),
+    first.pending.map((p) => p.reason).join(','));
+  check('every entry carries a reason, a name and a real .modinfo path',
+    first.pending.every((p) => p.reason && p.name && /\.modinfo$/i.test(p.path)));
+  check('and only the two known reasons',
+    first.pending.every((p) => p.reason === 'never-scanned' || p.reason === 'no-profile-row'));
+
+  const r = db.registerMods(DB_PATH, first.pending.map((p) => p.path), false, 2);
+  check('a sync registered it, and nothing failed', r.registered.length >= 1 && r.failed.length === 0, JSON.stringify(r.failed));
+  const onSomewhere = raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE i.Disabled = 0 AND lower(m.ModId)=?`, ID)[0].n;
+  check('NOTHING is switched on, in any profile', onSomewhere === 0, `on in ${onSomewhere}`);
+  const rowCount = raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE lower(m.ModId)=?`, ID)[0].n;
+  check('but it has a row in every profile, so it is tickable', rowCount === profiles, `${rowCount}/${profiles}`);
+  check('and reports itself as off everywhere', r.registered[0].offElsewhere === profiles, String(r.registered[0].offElsewhere));
+  const seen = db.readModState(DB_PATH).mods.find((m) => m.idNorm === ID);
+  check('the mod manager lists it', !!seen);
+  check('as off, and switchable rather than "not available"', seen && seen.disabled === true, String(seen && seen.disabled));
+  check('and a second sync would skip it',
+    !db.findUnregistered(DB_PATH, sources).pending.some((p) => p.idNorm === ID));
+
+  // The other reason a mod needs adding: the game knows it, but it has no row
+  // in the profile in use, so it cannot be ticked. Removing that row is exactly
+  // how a mod gets stuck - it is what happened to a real one here.
+  const activeId = raw('SELECT ModGroupRowId AS id FROM ModGroups WHERE Selected = 1')[0].id;
+  const w = new DatabaseSync(DB_PATH);
+  const rowId = w.prepare('SELECT ModRowId FROM Mods WHERE lower(ModId)=?').get(ID).ModRowId;
+  w.prepare('DELETE FROM ModGroupItems WHERE ModGroupRowId=? AND ModRowId=?').run(activeId, rowId);
+  w.close();
+  const gone = db.readModState(DB_PATH).mods.find((m) => m.idNorm === ID);
+  check('removing that row makes it untoggleable', gone && gone.disabled === null, String(gone && gone.disabled));
+  const todo = db.findUnregistered(DB_PATH, sources);
+  check('and a sync now wants to fix it, saying why',
+    todo.pending.some((p) => p.idNorm === ID && p.reason === 'no-profile-row'),
+    todo.pending.map((p) => p.reason).join(','));
+  const fix = db.registerMods(DB_PATH, todo.pending.map((p) => p.path), false, activeId);
+  check('fixing it works', fix.registered.length >= 1 && fix.failed.length === 0, JSON.stringify(fix.failed));
+  check('and still switches nothing on', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId
+    WHERE i.Disabled = 0 AND lower(m.ModId)=?`, ID)[0].n === 0);
+  check('and now it is tickable again', db.readModState(DB_PATH).mods.find((m) => m.idNorm === ID).disabled === true);
+  check('nothing left to do', db.findUnregistered(DB_PATH, sources).count === 0);
+
+  check('the database is still intact', raw('PRAGMA quick_check')[0].quick_check === 'ok');
+  check('and has no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log('\n============================================================');
 console.log(pass ? 'PROFILES: ALL CHECKS PASSED' : 'PROFILES: FAILURES PRESENT');

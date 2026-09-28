@@ -19,7 +19,7 @@ const editor = require('./editor');
 const {
   readModState, readModDetails, applyChanges,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
-  exportGroup, importGroup, registerMods,
+  exportGroup, importGroup, registerMods, findUnregistered,
 } = require('./modsdb');
 const { gameStatus } = require('./game');
 
@@ -81,6 +81,10 @@ function modList() {
   const modsDb = paths.getModsDb();
   const st = modsDb.exists ? readModState(modsDb.path) : { ok: false, error: 'Mod database not found.', mods: [] };
   const disk = new Map(installed.map((m) => [m.idNorm, m]));
+  // What a sync would add, from the one place that decides. Passing the state
+  // we already read avoids opening the database a second time per request.
+  const todo = st.ok ? findUnregistered(modsDb.path, paths.getSources(), st) : { pending: [] };
+  const needsSync = new Set(todo.pending.map((p) => p.idNorm));
   const out = [];
   const isLoc = (n) => !n || /^LOC_[A-Z0-9_]+$/i.test(n);
   for (const d of st.mods) {
@@ -94,10 +98,9 @@ function modList() {
       source: f ? f.type : d.source,
       enabled: d.disabled == null ? null : !d.disabled,
       scanned: true,
-      // The game knows this mod, but it has no row in the profile in use, so
-      // it cannot be switched on. If the files are here the toolkit can add
-      // that row, the same way it registers a brand-new mod.
-      canRegister: d.disabled == null && !!f,
+      // A sync would give this mod the row it is missing, so the mod manager
+      // can point at Rescan rather than offering its own button.
+      needsSync: needsSync.has(d.idNorm),
       teaser: d.teaser,
       workshopId: f ? f.workshopId || null : null,
       folder: f ? f.folder : null,
@@ -111,17 +114,78 @@ function modList() {
       if (inDb.has(f.idNorm)) continue;
       out.push({
         id: f.id, idNorm: f.idNorm, name: f.name, source: f.type, enabled: null, scanned: false, teaser: null,
-        canRegister: true,
+        needsSync: true,
         workshopId: f.workshopId || null, folder: f.folder, requires: [], blocks: [],
       });
     }
   }
   const plain = (n) => n.replace(/\[[^\]]*\]/g, '').trim(); // sort without Civ [COLOR_*] markup
   out.sort((a, b) => plain(a.name).localeCompare(plain(b.name), undefined, { sensitivity: 'base' }));
-  // Registering a mod writes a row in every profile, so the UI needs to know
-  // how many there are to describe what will happen.
-  const groups = st.ok ? listGroups(paths.getModsDb().path).groups.length : 0;
-  return { modsDb, ok: st.ok, error: st.error || null, activeGroup: st.activeGroup || null, profiles: groups, mods: out };
+  // A sync writes a row in every profile, so the UI needs to know how many
+  // there are to describe what will happen.
+  const groups = st.ok ? listGroups(modsDb.path).groups.length : 0;
+  return {
+    modsDb, ok: st.ok, error: st.error || null, activeGroup: st.activeGroup || null,
+    profiles: groups, needsSync: todo.pending.length, mods: out,
+  };
+}
+
+// What the last sync did, for the dashboard to report. Held in memory only -
+// it describes one run, and the next run overwrites it.
+let lastSync = null;
+
+// Bring the game's database up to date with the mod folders: register anything
+// the game has never scanned, and give anything it knows but that has no row in
+// the profile in use a row in every profile.
+//
+// NOTHING is ever switched on. A newly added mod comes up visible and tickable
+// but off, which is the state every mod is already in inside a profile the
+// toolkit created. That is the whole reason this is safe to run without asking:
+// it can put a mod in front of you, but it cannot change what the game loads.
+//
+// Runs at startup and whenever the dashboard's Rescan is used, so subscribing
+// to mods after the toolkit is already open is handled the same way. Every
+// write is refused while Civ6 runs, and the reason is returned rather than
+// attempted and failed.
+async function syncMods() {
+  const run = { at: new Date().toISOString(), added: [], failed: [], skipped: null, error: null, pending: 0, backupPath: null };
+  lastSync = run;
+
+  const game = await gameStatus();
+  if (game.running) {
+    run.skipped = 'civ6-running';
+    return run;
+  }
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) {
+    run.error = 'Mod database not found.';
+    return run;
+  }
+  const todo = findUnregistered(modsDb.path, paths.getSources());
+  if (!todo.ok) {
+    run.error = todo.error;
+    return run;
+  }
+  run.pending = todo.count;
+  // Nothing new: return before registerMods so no backup is made. Otherwise
+  // every Rescan click would spend one of the ten backups the app keeps.
+  if (!todo.count) return run;
+
+  const active = listGroups(modsDb.path).active;
+  if (!active) {
+    run.error = 'the mod database has no mod group';
+    return run;
+  }
+  try {
+    const r = registerMods(modsDb.path, todo.pending.map((p) => p.path), false, active.id);
+    run.added = r.registered.map((x) => ({ modId: x.modId, name: x.name, isNew: x.isNew }));
+    run.failed = r.failed.map((f) => ({ file: path.basename(f.file), error: f.error }));
+    run.backupPath = r.backupPath;
+  } catch (e) {
+    // registerMods restores its own backup and says so in the message.
+    run.error = e.message;
+  }
+  return run;
 }
 
 // Size, file count and newest modification time of a mod folder.
@@ -176,6 +240,12 @@ async function handleApi(req, res, url) {
     };
     const official = dbState.mods.filter((m) => m.source === 'dlc');
     const { configs } = listConfigs();
+    // Same list the mod manager and the sync use, so "needs adding" can never
+    // read differently in two places. This used to be worked out a third time,
+    // here, from the folders alone - which missed the mods the game knew but
+    // had no row for.
+    const todo = dbState.ok ? findUnregistered(modsDb.path, sources, dbState) : { pending: [] };
+    const types = new Map(installed.map((m) => [m.idNorm, m.type]));
     return send(res, 200, {
       version: VERSION,
       sources,
@@ -188,11 +258,12 @@ async function handleApi(req, res, url) {
         dlc: { total: official.length, enabled: official.filter((m) => m.disabled === false).length },
         configs: configs.length,
       },
-      // Installed on disk but not yet in the game's database (game hasn't
-      // rescanned since they were added) - can't be toggled until it has.
-      unscanned: dbState.ok
-        ? installed.filter((m) => !byNorm.has(m.idNorm)).map((m) => ({ id: m.id, name: m.name, type: m.type }))
-        : [],
+      // On disk but not yet switchable: never scanned by the game, or known to
+      // it but with no row in the profile in use. A sync adds them all.
+      needsSync: todo.pending.map((p) => ({ id: p.id, name: p.name, type: types.get(p.idNorm) || 'local', reason: p.reason })),
+      // What the last sync did, so the page can say so rather than the user
+      // having to remember.
+      sync: lastSync,
     });
   }
 
@@ -250,46 +321,16 @@ async function handleApi(req, res, url) {
     }
   }
 
-  // POST /api/mods/register { ids: [...] } -> register mods the game has never
-  // scanned, and switch them on in the profile in use. Without this a newly
-  // subscribed mod cannot be turned on until Civ6 has launched once. The client
-  // sends mod ids only; the .modinfo paths are resolved here, so the browser can
-  // never name a file. See FINDINGS.md for how the rows are derived.
-  if (req.method === 'POST' && url.pathname === '/api/mods/register') {
-    const { ids } = await readBody(req);
-    const game = await gameStatus();
-    if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then register new mods.' });
-
-    const list = modList();
-    if (!list.ok) return send(res, 400, { error: list.error });
-    const modsDb = paths.getModsDb();
-
-    // Two kinds of mod can be added here: one the game has never scanned, and
-    // one it knows but which has no row in the profile in use (so it shows as
-    // "not available"). modList() decides which, via canRegister.
-    const registrable = list.mods.filter((m) => m.canRegister);
-    const wanted = (Array.isArray(ids) && ids.length ? ids.map(normId) : registrable.map((m) => m.idNorm));
-    const onDisk = new Map(scanMods(paths.getSources()).map((m) => [m.idNorm, m]));
-
-    const files = [];
-    const known = new Set(registrable.map((m) => m.idNorm));
-    for (const id of wanted) {
-      if (!known.has(id)) return send(res, 400, { error: `that mod is already in this profile: ${id}` });
-      const f = onDisk.get(id);
-      if (!f) return send(res, 400, { error: `the .modinfo for ${id} is no longer on disk` });
-      files.push(f.path);
-    }
-    if (!files.length) return send(res, 400, { error: 'nothing to register' });
-
-    const groups = listGroups(modsDb.path);
-    const active = groups.active;
-    if (!active) return send(res, 400, { error: 'the mod database has no mod group' });
-    try {
-      const r = registerMods(modsDb.path, files, true, active.id);
-      return send(res, 200, { ok: true, ...r, profile: active });
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
+  // POST /api/sync -> add everything on disk that is not yet switchable, and
+  // switch on nothing. The dashboard's Rescan calls this; so does startup.
+  // Without it a newly subscribed mod cannot be turned on until Civ6 has
+  // launched once.
+  // No ids, no paths: the server works out for itself what is missing, from the
+  // mod folders and the database. The browser cannot name a file. Writes nothing
+  // if there is nothing to add. See syncMods() and FINDINGS.md.
+  if (req.method === 'POST' && url.pathname === '/api/sync') {
+    const run = await syncMods();
+    return send(res, 200, { ok: !run.error, ...run });
   }
 
   // ---- mod groups (player profiles) ---------------------------------------
@@ -513,4 +554,17 @@ server.listen(PORT, HOST, () => {
   console.log(`Civ6 Mod Toolkit running at ${addr}`);
   if (!process.env.CIV6_LAUNCHER) console.log('Press Ctrl+C to stop.'); // the launcher has its own menu
   openBrowser();
+
+  // Pick up anything subscribed to since last time, the way the game would on
+  // its own next launch - but without waiting for a launch, and without
+  // switching anything on. Not awaited: the browser is already open, and a
+  // first run over a large library can take a moment.
+  syncMods().then((run) => {
+    if (run.error) console.log(`Sync: ${run.error}`);
+    else if (run.skipped === 'civ6-running') console.log('Sync: skipped, Civ6 is running. Close it and rescan.');
+    else if (run.added.length) {
+      console.log(`Sync: added ${run.added.length} mod${run.added.length === 1 ? '' : 's'} (off in every profile)` +
+        (run.failed.length ? `, ${run.failed.length} could not be read` : ''));
+    } else if (run.pending) console.log(`Sync: ${run.pending} mod${run.pending === 1 ? '' : 's'} could not be read.`);
+  }).catch((e) => console.log(`Sync: ${e.message}`));
 });

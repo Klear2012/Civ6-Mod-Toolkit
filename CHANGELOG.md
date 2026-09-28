@@ -10,6 +10,53 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
+## v1.4.0 — 28 September 2026
+
+New mods are added automatically. The Register button is gone.
+
+### Changed
+
+- **The toolkit adds new mods itself, when it starts.** Anything on disk the
+  game has never scanned is registered, and anything the game knows but that has
+  no row in the profile in use gets one, so it can be ticked. No button, and no
+  game launch.
+- **Nothing is ever switched on.** Added mods come up off, with a row in every
+  profile. This is the whole reason the above can run unattended: the toolkit
+  can put a mod in front of you, but it cannot change what the game loads.
+- **Rescan & add new mods** (was *Rescan*) on the dashboard does the same thing
+  on demand, for mods subscribed to while the toolkit is already open — which is
+  how you normally subscribe, in batches. Renamed because it now writes to the
+  game's database; a button labelled *Rescan* that silently registered thirty
+  mods would be a nasty surprise.
+- The mod manager no longer has a Register button, an *Add to profile* button, or
+  the *Add them all* banner. Its only write is **Apply changes**. A mod that
+  needs adding is tagged **not added** and points at the dashboard.
+
+### Added
+
+- The dashboard says what the last sync did — how many mods were added, and by
+  name — and which could not be read, and why.
+- If Civ6 is running, a sync is skipped and the reason is shown, rather than
+  attempted and failed.
+
+### Fixed
+
+- `registerMods()` ignored its `enabled` argument and always switched a mod on in
+  the built-in group and the profile in use. Harmless while the only caller
+  always wanted it on; under automatic syncing it would have switched mods on
+  behind your back. Test 17 is the test that would have caught it.
+- "What needs adding" was worked out in three separate places, and the copies
+  had drifted: the dashboard's version looked only at the mod folders, so it
+  never noticed a mod the game knew but that had no row in the profile. There is
+  now one function, `findUnregistered()`, that all of them read.
+- A second sync with nothing new to do used to make a fresh backup, so every
+  Rescan click spent one of the ten backups kept. It now returns before writing.
+
+### Note for anyone on v1.3.x
+
+**Add to profile used to switch a mod on. It now leaves it off**, like everything
+else. Tick it in the mod manager as you would any other mod.
+
 ## v1.3.1 — 28 September 2026
 
 No code changes — this fixes what v1.3.0 shipped with.

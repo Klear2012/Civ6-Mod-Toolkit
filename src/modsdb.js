@@ -16,7 +16,7 @@
 
 const fs = require('fs');
 const path = require('path');
-const { normId } = require('./modinfo');
+const { normId, scanMods } = require('./modinfo');
 const { backupFile } = require('./editor');
 
 let DatabaseSync = null;
@@ -872,7 +872,12 @@ function registerMods(dbPath, files, enabled = true, groupId = null) {
     for (const file of files) {
       try {
         const entry = registerMod(db, file, builtIn, enabled);
-        const on = new Set(extra == null ? [builtIn] : [builtIn, extra]);
+        // `enabled` decides whether the mod comes up on. A sync passes false and
+        // must switch on nothing anywhere - that is what makes it safe to run
+        // unattended. Earlier this ignored the argument and always switched on
+        // in the built-in group and the profile in use, which was invisible
+        // while the only caller always wanted it on.
+        const on = enabled ? new Set(extra == null ? [builtIn] : [builtIn, extra]) : new Set();
         for (const gid of everyGroup) insert.run(gid, entry.modRowId, on.has(gid) ? 0 : 1);
         if (extra != null) entry.profileRow = true;
         entry.offElsewhere = everyGroup.length - on.size;
@@ -900,9 +905,53 @@ function registerMods(dbPath, files, enabled = true, groupId = null) {
   return { backupPath, ...result };
 }
 
+// Which mods a sync would add, and why. This is the ONLY place that decides
+// what "not added yet" means: the mod manager's list, the dashboard and the
+// startup sync all read it. An earlier version of this feature had the rule
+// written out twice - once for "the game has never scanned it" and once for
+// "no row in the profile in use" - and they drifted, so a mod in the second
+// state was untoggleable with no way to fix it from the app.
+//
+// Two reasons, both fixed by the same call to registerMods():
+//   never-scanned    - on disk, not in the database at all
+//   no-profile-row   - the game knows it, but it has no row in the profile in
+//                      use, so it cannot be switched on or off
+//
+// A mod that is off in the active profile is not pending: it is already
+// switchable, and whether the user wants it on is theirs to decide.
+//
+// `state` may be a readModState() result the caller already has, to avoid
+// reading the database twice per request.
+function findUnregistered(dbPath, sources, state) {
+  requireDb();
+  const installed = scanMods(sources);
+  const st = state || readModState(dbPath);
+  if (!st.ok) return { ok: false, error: st.error || 'the mod database could not be read', pending: [] };
+
+  const disk = new Map(installed.map((m) => [m.idNorm, m]));
+  const pending = [];
+  const inDb = new Set();
+  for (const d of st.mods) {
+    // Base-game scenarios/maps and entries the game hides aren't user-facing,
+    // and nothing on disk can make them so.
+    if (d.source === 'base' || d.hidden || !/\.modinfo$/i.test(d.path)) continue;
+    inDb.add(d.idNorm);
+    const f = disk.get(d.idNorm);
+    if (f && d.disabled == null) {
+      pending.push({ id: d.modId, idNorm: d.idNorm, name: f.name, path: f.path, reason: 'no-profile-row' });
+    }
+  }
+  for (const f of installed) {
+    if (inDb.has(f.idNorm)) continue;
+    pending.push({ id: f.id, idNorm: f.idNorm, name: f.name, path: f.path, reason: 'never-scanned' });
+  }
+  return { ok: true, error: null, pending, count: pending.length, total: inDb.size };
+}
+
 module.exports = {
   readModState, readModDetails, applyChanges, classifyPath,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
+  findUnregistered,
   exportGroup, importGroup, EXPORT_TOOLKIT, EXPORT_VERSION,
   registerMod, registerMods, readModinfoMeta, parseModinfo, fileTimeOf,
 };

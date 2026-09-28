@@ -79,9 +79,9 @@ the configurations folder, and the game's mod database (`Mods.sqlite`, under
 auto-detected; if one shows **not found**, click **Edit paths**, fix it, and
 **Save paths**.
 
-If you've just subscribed to a mod, the dashboard says the game hasn't picked it
-up yet. You don't have to start the game for that — the mod manager can
-**register** it for you (see below).
+**Rescan & add new mods** picks up anything you've subscribed to since last
+time. See below — you rarely need to click it, because the toolkit does this
+when it starts.
 
 ### Mod manager
 
@@ -104,20 +104,23 @@ up yet. You don't have to start the game for that — the mod manager can
    applying is blocked while Civ6 runs. Changes take effect the next time you
    start the game.
 
-Some mods can't be ticked, and one button fixes both reasons:
+### New mods
 
-| You see | It means | Button |
-|---|---|---|
-| **not registered yet** | the game has never scanned it | **Register** |
-| **not available** | the game knows it, but it has no row in the profile you are editing | **Add to profile** |
+A mod you've just subscribed to isn't in the game's database yet, so the game
+can't load it. The toolkit adds it for you:
 
-Click the button on the mod, or **Add them all** in the banner, and the toolkit
-writes the same registration the game would have written. The mod is switched
-**on in the profile you are editing** and made available — but off — in your
-other profiles, so it stays switchable wherever you are. Nothing to do afterwards
-except start Civ6 to play. The game must be **closed** to register, like it must
-be to apply changes. Registering many mods at once is all-or-nothing, and your
-database is backed up first.
+- **When the toolkit starts**, anything on disk the game hasn't got is added
+  straight away.
+- **If you subscribe while the toolkit is already open**, click **Rescan & add
+  new mods** on the dashboard. That covers subscribing to a batch at once, which
+  is the normal way.
+
+Added mods come up **switched off**, with a row in every profile so you can tick
+them from any of them. Nothing is ever switched on for you — that's your
+decision to make, and it's why this can run unattended. Civ6 must be **closed**,
+the database is backed up first, and the result is read back and checked.
+
+A mod tagged **not added** is one the game can't load yet. Same fix: rescan.
 
 ### Profiles (mod groups)
 
@@ -166,7 +169,11 @@ configuration).
 - The mod manager only writes to the game's mod database while Civ6 is closed,
   copies it to a timestamped `Mods.sqlite.bak-…` first (the newest 10 are kept),
   and checks the result — if anything looks wrong, the backup is put back. The
-  same applies to profile changes and to registering a mod.
+  same applies to profile changes and to adding new mods.
+- Adding new mods at startup is the one write that happens without you asking.
+  It **never switches anything on** — a new mod is registered and left off, and
+  only appears in the list. It is skipped entirely if Civ6 is running, and it
+  writes nothing at all when there is nothing new to add.
 
 ## Authors & feedback
 

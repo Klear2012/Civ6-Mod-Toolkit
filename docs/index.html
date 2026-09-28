@@ -115,19 +115,22 @@ npm start</code></pre>
 
   <h2 id="usage">Usage</h2>
   <h3>Dashboard</h3>
-  <p>The toolkit finds your mod folders, configurations folder and the game's <code>Mods.sqlite</code> database automatically. If one shows <strong>not found</strong>, click <strong>Edit paths</strong>. A mod you have just subscribed to does not need a game launch — the mod manager can register it for you.</p>
+  <p>The toolkit finds your mod folders, configurations folder and the game's <code>Mods.sqlite</code> database automatically. If one shows <strong>not found</strong>, click <strong>Edit paths</strong>. A mod you have just subscribed to does not need a game launch — the mod manager can add it for you.</p>
 
   <h3>Mod manager</h3>
   <ol>
     <li>Filter by <strong>Workshop</strong>, <strong>Local</strong> or <strong>Official DLC</strong>, by enabled or disabled, or by name.</li>
-    <li>A mod that cannot be ticked yet gets a button instead: <strong>Register</strong> if the game has never scanned it, <strong>Add to profile</strong> if the game knows it but it is not in the profile you are editing. Use <strong>Add them all</strong> in the banner for the lot. Civ6 must be <strong>closed</strong> first.</li>
+    <li>A mod the game has not got yet is tagged <strong>not added</strong> and cannot be ticked. Use <strong>Rescan &amp; add new mods</strong> on the dashboard to add it — see <a href="#usage">New mods</a> below. Civ6 must be <strong>closed</strong> first.</li>
     <li>Tick or untick mods, or switch to <strong>Two panes</strong> and click mods to move them between <em>Available</em> and <em>Enabled</em>.</li>
     <li>Click <strong>i</strong> on a mod to see its details, dependencies, conflicts, and which of your configurations use it.</li>
     <li>Click <strong>Apply changes</strong>. Civ6 must be <strong>closed</strong> first.</li>
   </ol>
 
+  <h3>New mods</h3>
+  <p>A mod you have just subscribed to is not in the game's database yet, so the game cannot load it. The toolkit adds it for you: <strong>when it starts</strong>, and whenever you click <strong>Rescan &amp; add new mods</strong> on the dashboard. Added mods come up <strong>switched off</strong> — nothing is ever switched on for you.</p>
+
   <h3>Profiles (mod groups)</h3>
-  <p>The <strong>Profile</strong> bar picks which group of mods you are editing — the same thing as Civ6's <em>Additional Content → Mod Groups</em>. <strong>Manage…</strong> creates, duplicates, renames and deletes profiles; <strong>Export</strong> and <strong>Import…</strong> move one between machines. Registering a mod switches it on in the profile you are editing and leaves it available but off in your others, so it stays switchable wherever you are.</p>
+  <p>The <strong>Profile</strong> bar picks which group of mods you are editing — the same thing as Civ6's <em>Additional Content → Mod Groups</em>. <strong>Manage…</strong> creates, duplicates, renames and deletes profiles; <strong>Export</strong> and <strong>Import…</strong> move one between machines. A newly added mod gets a row in every profile, switched off, so it stays tickable wherever you are.</p>
 
   <h3>Config editor</h3>
   <ol>
@@ -141,8 +144,9 @@ npm start</code></pre>
   <ul>
     <li>Before it overwrites a file, the toolkit saves a timestamped backup (<code>.bak-…</code>).</li>
     <li>It changes only the mod list in a configuration, and checks the result before writing. If the check fails, nothing is written.</li>
-    <li>It changes the mod database only while Civ6 is closed. Ticking a mod changes its enabled/disabled flag; registering a new one writes the same rows the game would have written, then reads them back and restores the backup if the result looks wrong.</li>
-    <li>Registering many mods at once is all-or-nothing, and the browser only ever sends mod ids — never a file path.</li>
+    <li>It changes the mod database only while Civ6 is closed. Ticking a mod changes its enabled/disabled flag; adding a new one writes the same rows the game would have written, then reads them back and restores the backup if the result looks wrong.</li>
+    <li>Adding new mods at startup is the one write that happens without you asking. It <strong>never switches anything on</strong> — a new mod is registered and left off — and it is skipped if Civ6 is running.</li>
+    <li>The browser only ever sends mod ids, never a file path.</li>
     <li>It listens only on <code>127.0.0.1</code>, and accepts requests only from its own page.</li>
   </ul>
 

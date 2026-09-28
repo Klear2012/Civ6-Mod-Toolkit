@@ -90,16 +90,14 @@ function rowBody(m, all) {
     ? `<a class="ext" href="${workshopUrl(m.workshopId)}" target="_blank" rel="noopener" title="Open the Steam Workshop page"><span class="ext-text">Workshop page </span>↗</a>`
     : '';
   const sub = m.teaser ? `<span class="teaser">${renderCivText(m.teaser)}</span>` : `<small>${esc(m.id)}</small>`;
-  // A mod with no row in the profile in use cannot be ticked, so offer the
-  // action that adds one: registering a mod the game has never seen, or adding
-  // one it knows to this profile.
-  const register = m.canRegister
-    ? `<button type="button" class="small" data-register="${esc(m.idNorm)}" ${game.running ? 'disabled' : ''}
-        title="${game.running ? 'Close Civ6 to add mods' : 'Add this mod to the profile in use, switched on'}">
-        ${m.scanned ? 'Add to profile' : 'Register'}</button>`
-    : '';
+  // The mod manager does not write to the database itself - Apply changes and
+  // the profile buttons are the only things that do. A mod that needs adding
+  // gets a tag saying so, and the dashboard's "Rescan & add new mods" does it.
+  const tag = m.needsSync
+    ? `<span class="tag unscanned" title="Not switched on yet. Use “Rescan &amp; add new mods” on the dashboard.">not added</span>`
+    : sourceTag(m);
   return `<span class="name"><b>${renderCivText(m.name)}</b>${sub}${probs}</span>
-    ${link}${sourceTag(m)}${register}
+    ${link}${tag}
     <button type="button" class="info" data-info="${esc(m.idNorm)}" title="Details">i</button>`;
 }
 
@@ -130,20 +128,17 @@ function renderMods() {
   const alerts = [];
   if (!d.ok) alerts.push(`<div class="alert warn"><b>Can't read which mods are enabled.</b> ${esc(d.error || '')}</div>`);
   if (game.running) alerts.push('<div class="alert warn"><b>Civ6 is running.</b> You can prepare changes, but close the game before applying them.</div>');
-  const addable = d.mods.filter((m) => m.canRegister);
+  // No button here on purpose: adding mods writes to the game's database, and
+  // the mod manager's only write is Apply changes. Point at the dashboard
+  // instead so there is one place that adds mods, not two.
+  const addable = d.mods.filter((m) => m.needsSync);
   if (addable.length) {
     const one = addable.length === 1;
     const names = addable.slice(0, 4).map((m) => esc(renderCivText(m.name))).join(', ')
       + (addable.length > 4 ? ` and ${addable.length - 4} more` : '');
-    const others = Math.max(0, (d.profiles || 1) - 1);
-    alerts.push(`<div class="alert info"><b>${addable.length} mod${one ? '' : 's'} can be added:</b> ${names}.
-      ${one ? 'It' : 'They'} will be switched on in this profile, and available but off in your other
-      ${others === 1 ? 'profile' : `${others} profiles`} — without starting the game first.
-      <div class="alert-actions">
-        <button type="button" id="registerAll" ${game.running ? 'disabled' : ''}
-          title="${game.running ? 'Close Civ6 to add mods' : 'Add every listed mod'}">Add ${one ? 'it' : 'them all'}</button>
-        ${game.running ? '<small>Close Civ6 to add mods.</small>' : ''}
-      </div></div>`);
+    alerts.push(`<div class="alert info"><b>${addable.length} mod${one ? '' : 's'} not added yet:</b> ${names}.
+      Use <b>Rescan &amp; add new mods</b> on the dashboard to add ${one ? 'it' : 'them'}.
+      ${game.running ? 'Close Civ6 first — it has to be shut down to change its database.' : ''}</div>`);
   }
   $('modsAlerts').innerHTML = alerts.join('');
 
@@ -210,41 +205,9 @@ async function loadMods() {
   renderMods();
 }
 
-// ---- register --------------------------------------------------------------
-// Writes the registration the game would have written, so a newly subscribed
-// mod can be switched on without launching Civ6 first. An empty list registers
-// every mod still waiting. The mod is switched on in the profile in use and
-// made available - but off - in every other profile, so it stays switchable
-// wherever you are.
-async function registerMods(ids) {
-  if (game.running) {
-    toast('Civilization VI is running. Close the game first, then add mods.', 'err');
-    return;
-  }
-  try {
-    const r = await postJson('/api/mods/register', { ids });
-    const n = r.registered.length;
-    const elsewhere = n ? (r.registered[0].offElsewhere || 0) : 0;
-    const detail = [
-      n ? `on in "${esc(groupLabel(r.profile))}"` : null,
-      elsewhere > 0 ? `available but off in your other ${elsewhere} profile${elsewhere === 1 ? '' : 's'}` : null,
-      r.backupPath ? `backup: ${esc(r.backupPath)}` : null,
-    ].filter(Boolean).join('  ·  ');
-    toast(n === 1 ? 'Added 1 mod.' : `Added ${n} mods.`, 'ok', detail);
-    // Names of mods the game could not read are reported, never swallowed.
-    if (r.failed.length) {
-      toast(`${r.failed.length} mod${r.failed.length === 1 ? '' : 's'} could not be added: `
-        + r.failed.map((f) => esc(f.file || f.error)).join(', '), 'err');
-    }
-    await loadMods();
-  } catch (err) {
-    toast(esc(err.message), 'err');
-  }
-}
-
-$('modsAlerts').addEventListener('click', (e) => {
-  if (e.target.closest('#registerAll')) registerMods([]);
-});
+// Adding mods is not done from here. The dashboard's "Rescan & add new mods"
+// does it, and the server also does it at startup, so a newly subscribed mod
+// shows up tickable without anyone clicking anything.
 
 pages.mods = {
   show(params) {
@@ -278,7 +241,7 @@ $('viewSwitch').addEventListener('click', (e) => {
 });
 $('modsFilter').addEventListener('input', () => modsPage.data && renderMods());
 
-// Buttons inside rows (both views): "Turn it on" fixes, Register and details.
+// Buttons inside rows (both views): "Turn it on" fixes and details.
 function rowButtonClick(e) {
   const b = e.target.closest('button');
   if (!b) return false;
@@ -286,11 +249,6 @@ function rowButtonClick(e) {
     e.preventDefault(); // don't toggle the row's own checkbox
     setWanted(byNorm().get(b.dataset.fix), true);
     renderMods();
-    return true;
-  }
-  if (b.dataset.register) {
-    e.preventDefault();
-    registerMods([b.dataset.register]);
     return true;
   }
   if (b.dataset.info) {
@@ -455,8 +413,9 @@ function detailsHtml(x) {
   }
   files.push(`<dt>Mod ID</dt><dd><code>${esc(m.id)}</code></dd>`);
 
-  const stateTag = !m.scanned ? '<span class="tag unscanned">not scanned yet</span>'
-    : m.enabled == null ? '<span class="tag">not available</span>'
+  const stateTag = m.needsSync
+    ? '<span class="tag unscanned" title="Use “Rescan &amp; add new mods” on the dashboard">not added yet</span>'
+    : m.enabled == null ? '<span class="tag" title="The game doesn&#39;t list this in the active mod group (for example DLC you don&#39;t own)">not available</span>'
     : isOn(m) ? '<span class="chip good">enabled</span>' : '<span class="chip bad">disabled</span>';
 
   return `
