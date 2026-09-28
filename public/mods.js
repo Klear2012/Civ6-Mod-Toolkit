@@ -134,7 +134,7 @@ function renderMods() {
   const addable = d.mods.filter((m) => m.needsSync);
   if (addable.length) {
     const one = addable.length === 1;
-    const names = addable.slice(0, 4).map((m) => esc(renderCivText(m.name))).join(', ')
+    const names = addable.slice(0, 4).map((m) => renderCivText(m.name)).join(', ')
       + (addable.length > 4 ? ` and ${addable.length - 4} more` : '');
     alerts.push(`<div class="alert info"><b>${addable.length} mod${one ? '' : 's'} not added yet:</b> ${names}.
       Use <b>Rescan &amp; add new mods</b> on the dashboard to add ${one ? 'it' : 'them'}.
@@ -418,6 +418,17 @@ function detailsHtml(x) {
     : m.enabled == null ? '<span class="tag" title="The game doesn&#39;t list this in the active mod group (for example DLC you don&#39;t own)">not available</span>'
     : isOn(m) ? '<span class="chip good">enabled</span>' : '<span class="chip bad">disabled</span>';
 
+  // Remove lives here rather than on the row: it deletes files, so it should be
+  // one deliberate control per mod, not 380 identical ones down a list.
+  const remove = (m.source === 'workshop' || m.source === 'local')
+    ? `<h3>Remove</h3>
+       <p class="hint">Takes this mod out of the game and out of every profile${x.disk ? ', and deletes its folder from disk' : ''}.
+       ${m.workshopId ? 'Steam is not unsubscribed for you — use the Workshop page above to take it out of your library too.' : ''}</p>
+       <p><button type="button" class="danger" data-remove="${esc(m.idNorm)}" ${game.running ? 'disabled' : ''}
+         title="${game.running ? 'Close Civ6 to remove mods' : 'Remove this mod, and delete its folder'}">Remove mod</button>
+         ${game.running ? '<small>Close Civ6 to remove mods.</small>' : ''}</p>`
+    : '';
+
   return `
     <h2>${renderCivText(m.name)}</h2>
     <div class="tags"><span class="tag ${esc(m.source)}">${m.source === 'dlc' ? 'Official DLC' : esc(m.source)}</span>${stateTag}
@@ -431,7 +442,8 @@ function detailsHtml(x) {
     ${conflicts.length ? `<h3>Incompatible with</h3>${relList(conflicts)}` : ''}
     <h3>In your configurations</h3>
     ${x.inConfigs.length ? `<ul class="rel">${x.inConfigs.map((n) => `<li>${esc(n)}</li>`).join('')}</ul>` : '<p class="hint">Not used in any .Civ6Cfg file.</p>'}
-    <h3>Files</h3><dl class="facts">${files.join('')}</dl>`;
+    <h3>Files</h3><dl class="facts">${files.join('')}</dl>
+    ${remove}`;
 }
 
 async function showDetails(idNorm) {
@@ -450,3 +462,39 @@ async function showDetails(idNorm) {
 $('modDialogClose').addEventListener('click', () => $('modDialog').close());
 // A click on the backdrop (outside the dialog box) closes it.
 $('modDialog').addEventListener('click', (e) => { if (e.target === $('modDialog')) $('modDialog').close(); });
+
+// Deleting a mod's folder cannot be undone from here, so it asks first and says
+// exactly which folder. The database is backed up, but the files are not.
+$('modDialogBody').addEventListener('click', async (e) => {
+  const btn = e.target.closest('[data-remove]');
+  if (!btn) return;
+  const idNorm = btn.dataset.remove;
+  const m = byNorm().get(idNorm);
+  if (!m) return;
+  const folder = (await api('/api/mods/details?id=' + encodeURIComponent(idNorm)).catch(() => null))?.disk?.folder;
+
+  const what = [
+    `Remove **${m.name}** from the game and from every profile?`,
+    folder ? `Its folder will be deleted:\n\n<code>${esc(folder)}</code>` : 'Its folder is already gone.',
+    'This cannot be undone.',
+  ].join('\n\n');
+  if (!confirm(what)) return;
+
+  btn.disabled = true;
+  try {
+    const r = await postJson('/api/mods/remove', { ids: [idNorm] });
+    const n = r.removed.length;
+    const bits = [`Removed ${n} mod${n === 1 ? '' : 's'}.`];
+    if (r.backupPath) bits.push(`backup: ${r.backupPath}`);
+    toast(bits.join('  ·  '), 'ok');
+    // A folder that would not go is worth saying out loud: the game will find
+    // it again on its next scan and put the mod back.
+    for (const k of r.kept || []) toast(`Could not delete ${k.name || k.modId}: ${k.error}`, 'err');
+    for (const x of r.refused || []) toast(`Not removed: ${x.name || x.modId} — ${x.reason}`, 'err');
+    $('modDialog').close();
+    await loadMods();
+  } catch (err) {
+    toast(esc(err.message), 'err');
+    btn.disabled = false;
+  }
+});

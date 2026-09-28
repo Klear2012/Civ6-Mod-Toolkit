@@ -626,6 +626,123 @@ console.log('\nTest 17: an unattended sync switches nothing on');
   check('and has no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
 }
 
+// --- Test 18: removing a mod -------------------------------------------------
+// Removal deletes the mod's folder, so the refusals matter more than the happy
+// path. In a real database 42 of the 44 entries with no files on disk are
+// base-game scenarios and DLC civs, not unsubscribed mods - so anything that
+// does not check the path carefully would delete those.
+console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing');
+{
+  const modRoot = path.join(TMP, 'mods');
+  const sources = [{ root: modRoot, exists: true, type: 'local' }];
+  const ID = '33333333-4444-5555-6666-777777777777';
+  const dir = path.join(modRoot, 'Doomed Mod');
+  const modinfo = path.join(dir, 'Doomed.modinfo');
+  fs.mkdirSync(path.join(dir, 'Data'), { recursive: true });
+  fs.writeFileSync(modinfo, `<Mod id="${ID}" version="1"><Properties><Name>Doomed Mod</Name></Properties><Files><File>Data/x.xml</File></Files></Mod>`);
+  fs.writeFileSync(path.join(dir, 'Data', 'x.xml'), '<x/>');
+
+  const reg = db.registerMods(DB_PATH, [modinfo], true, 2);
+  check('registered first, so there is something to remove', reg.registered.length === 1, JSON.stringify(reg.failed));
+  const folder = path.dirname(modinfo.replace(/\\/g, '/'));
+  const countRows = () => raw('SELECT (SELECT count(*) FROM Mods) m, (SELECT count(*) FROM ModGroupItems) g')[0];
+  const before = countRows();
+
+  // --- refusals. Each must leave the database exactly as it was.
+  const noFolder = db.removeMods(DB_PATH, [ID], {});
+  check('refuses when no folder was confirmed', noFolder.removed.length === 0 && noFolder.refused.length === 1, JSON.stringify(noFolder.refused));
+
+  const wrongFolder = db.removeMods(DB_PATH, [ID], { [ID]: path.join(modRoot, 'Some Other Mod') });
+  check('refuses a folder that does not match the database', wrongFolder.removed.length === 0 && wrongFolder.refused.length === 1,
+    JSON.stringify(wrongFolder.refused));
+
+  const baseGame = db.removeMods(DB_PATH, [ID], { [ID]: 'C:/Program Files/Sid Meier/Civilization VI/Base/Scenarios' });
+  check('refuses a base-game folder', baseGame.removed.length === 0 && baseGame.refused.length === 1, JSON.stringify(baseGame.refused));
+
+  const theRoot = db.removeMods(DB_PATH, [ID], { [ID]: modRoot });
+  check('refuses a mod source folder itself', theRoot.removed.length === 0 && theRoot.refused.length === 1, JSON.stringify(theRoot.refused));
+
+  // Both of the above were refused for "folder does not match", which never
+  // reaches the guards that matter. Plant rows whose recorded path really is a
+  // base-game path, a DLC path, and the source root itself, so those guards are
+  // the thing actually under test.
+  const plant = (modId, scannedPath) => {
+    const w = new DatabaseSync(DB_PATH);
+    w.exec('BEGIN IMMEDIATE');
+    const sf = w.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, ?)').run(scannedPath, '0').lastInsertRowid;
+    const mr = w.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)').run(sf, modId).lastInsertRowid;
+    w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (2, ?, 1)').run(mr);
+    w.exec('COMMIT');
+    w.close();
+  };
+  const BASEGAME = '44444444-0000-0000-0000-00000000aaaa';
+  const DLCD = '44444444-0000-0000-0000-00000000bbbb';
+  const ROOTMOD = '44444444-0000-0000-0000-00000000cccc';
+  const PARENTMOD = '44444444-0000-0000-0000-00000000dddd';
+  const BASE_FOLDER = '../../Base/Scenarios';
+  const DLC_FOLDER = '../../DLC/Australia/Civilization';
+  const PARENT = modRoot.replace(/\\/g, '/').replace(/\/[^/]+$/, '');
+  plant(BASEGAME, `${BASE_FOLDER}/AncientRivalsScenario.modinfo`);
+  plant(DLCD, `${DLC_FOLDER}/Australia.modinfo`);
+  plant(ROOTMOD, modRoot.replace(/\\/g, '/') + '/Loose.modinfo');
+  plant(PARENTMOD, `${PARENT}/Loose2.modinfo`);
+
+  // Baseline after planting, so "nothing changed" means the refusals changed
+  // nothing rather than the planting having done it.
+  const planted = countRows();
+
+  // The folder passed has to be the one the database records, or the guard
+  // under test is never reached - which is how the first version of these two
+  // checks passed for the wrong reason.
+  const g1 = db.removeMods(DB_PATH, [BASEGAME], { [BASEGAME]: BASE_FOLDER }, [modRoot]);
+  check('a mod recorded at a base-game path is refused as base content',
+    g1.removed.length === 0 && /refusing to remove base/.test(g1.refused[0].reason), JSON.stringify(g1.refused));
+  const g2 = db.removeMods(DB_PATH, [DLCD], { [DLCD]: DLC_FOLDER }, [modRoot]);
+  check('a mod recorded at a DLC path is refused as dlc content',
+    g2.removed.length === 0 && /refusing to remove dlc/.test(g2.refused[0].reason), JSON.stringify(g2.refused));
+  const g3 = db.removeMods(DB_PATH, [ROOTMOD], { [ROOTMOD]: modRoot }, [modRoot]);
+  check('a mod whose folder IS a mod source folder is refused',
+    g3.removed.length === 0 && /mod source folder/.test(g3.refused[0].reason), JSON.stringify(g3.refused));
+  // The one that would have taken the whole mod library with it.
+  const g4 = db.removeMods(DB_PATH, [PARENTMOD], { [PARENTMOD]: PARENT }, [modRoot]);
+  check('so is a folder that contains the mod source folder',
+    g4.removed.length === 0 && /containing the mod folders/.test(g4.refused[0].reason), JSON.stringify(g4.refused));
+  check('all four are still in the database',
+    [BASEGAME, DLCD, ROOTMOD, PARENTMOD].every((x) => raw('SELECT count(*) n FROM Mods WHERE lower(ModId)=?', x)[0].n === 1));
+  check('and not one of those refusals changed a row',
+    JSON.stringify(countRows()) === JSON.stringify(planted), `${JSON.stringify(planted)} -> ${JSON.stringify(countRows())}`);
+
+  const unknown = db.removeMods(DB_PATH, ['99999999-0000-0000-0000-000000000000'],
+    { '99999999-0000-0000-0000-000000000000': modRoot });
+  check('reports an unknown mod rather than throwing', unknown.removed.length === 0 && unknown.refused.length === 1);
+
+  check('the unknown-id refusal changed nothing either', JSON.stringify(countRows()) === JSON.stringify(planted),
+    `${JSON.stringify(planted)} -> ${JSON.stringify(countRows())}`);
+
+  // --- a mod still on disk is not "gone"
+  const listed = db.findRemoved(DB_PATH, sources);
+  check('findRemoved reads the database', listed.ok === true, listed.error || '');
+  check('a mod that is still installed is not listed as gone', !listed.removed.some((r) => r.modId === ID));
+  check('base and DLC entries are never offered for removal',
+    listed.removed.every((r) => r.kind === 'dlc' || r.kind === 'base' ? r.removable === false : true),
+    `${listed.removed.length} listed, ${listed.removable} removable`);
+
+  // --- case must not matter, or a Steam library recorded as "d:\steam" fails
+  const shouty = db.removeMods(DB_PATH, [ID], { [ID]: folder.toUpperCase() });
+  check('a case difference in the folder is accepted', shouty.removed.length === 1, JSON.stringify(shouty.refused));
+  check('it really is gone from Mods', raw('SELECT count(*) n FROM Mods WHERE lower(ModId)=?', ID)[0].n === 0);
+  check('no profile still lists it', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId WHERE lower(m.ModId)=?`, ID)[0].n === 0);
+  check('its file rows went with it', raw('SELECT count(*) n FROM ModFiles WHERE ModRowId NOT IN (SELECT ModRowId FROM Mods)')[0].n === 0);
+  check('its ScannedFiles row went too', raw(`SELECT count(*) n FROM ScannedFiles WHERE Path LIKE '%Doomed%'`)[0].n === 0);
+  check('a backup was made', !!shouty.backupPath && fs.existsSync(shouty.backupPath));
+  check('only its own rows went: one fewer mod, fewer group items',
+    countRows().m === planted.m - 1 && countRows().g < planted.g,
+    `mods ${planted.m}->${countRows().m}, items ${planted.g}->${countRows().g}`);
+  check('removing nothing is a no-op', db.removeMods(DB_PATH, [], {}).removed.length === 0);
+  check('and the database is still intact', raw('PRAGMA quick_check')[0].quick_check === 'ok');
+  check('with no foreign key errors', raw('PRAGMA foreign_key_check').length === 0);
+}
+
 fs.rmSync(TMP, { recursive: true, force: true });
 console.log('\n============================================================');
 console.log(pass ? 'PROFILES: ALL CHECKS PASSED' : 'PROFILES: FAILURES PRESENT');

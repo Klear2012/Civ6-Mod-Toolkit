@@ -529,6 +529,7 @@ function importGroup(dbPath, data) {
 // ---------------------------------------------------------------------------
 
 const MAX_REGISTER_MODS = 2000;
+const MAX_REMOVE_MODS = 200;
 
 // .modinfo -> { id, version, properties }. Every <Properties> child becomes a
 // ModProperties row, which is what the game does - a hardcoded list of known
@@ -948,10 +949,149 @@ function findUnregistered(dbPath, sources, state) {
   return { ok: true, error: null, pending, count: pending.length, total: inDb.size };
 }
 
+const rootKey = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+
+// Mods recorded in the database whose files are gone: unsubscribed from the
+// Workshop, or deleted by hand. Returns the folder each one lived in so the
+// caller can show it, and so removal can refuse to delete anything unexpected.
+//
+// Only paths inside a mod source folder count. The database also holds base-game
+// scenarios and DLC civs, recorded with paths relative to the game install and
+// never present in a mod folder - in a real installation 42 of the 44 missing
+// entries are exactly those, and deleting them would be a disaster.
+// classifyPath() tells the two apart; the path must also sit under a root the
+// toolkit was pointed at.
+function findRemoved(dbPath, sources) {
+  requireDb();
+  const st = readModState(dbPath);
+  if (!st.ok) return { ok: false, error: st.error, removed: [], removable: 0 };
+  const roots = (sources || []).filter((s) => s && s.exists).map((s) => rootKey(s.root));
+  const onDisk = new Set(scanMods(sources).map((m) => m.idNorm));
+  const removed = [];
+  for (const m of st.mods) {
+    if (m.idNorm && onDisk.has(m.idNorm)) continue;
+    // Base-game entries are not user-facing, and nothing here should touch them.
+    if (m.hidden || m.source === 'base') continue;
+    const kind = classifyPath(m.path);
+    const managed = roots.some((r) => rootKey(m.path).startsWith(r + '/'));
+    // A mod that is gone has no name the player recognises: the game often
+    // leaves only the id, and a localization key cannot be resolved without the
+    // mod's text files. The .modinfo filename is the most useful thing left.
+    const file = path.basename(String(m.path || '').replace(/\\/g, '/'));
+    const label = (!m.name || /^[0-9a-f-]{32,}$/i.test(m.name) || /^LOC_/i.test(m.name))
+      ? (file.replace(/\.[^.]+$/, '') || m.name)
+      : m.name;
+    removed.push({
+      modId: m.idNorm,
+      name: label,
+      kind,           // workshop | local | dlc | base
+      managed,        // inside a mod folder the toolkit was pointed at
+      removable: managed && (kind === 'workshop' || kind === 'local'),
+      path: m.path,
+      folder: path.dirname(String(m.path || '').replace(/\\/g, '/')),
+    });
+  }
+  removed.sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  return { ok: true, error: null, removed, removable: removed.filter((r) => r.removable).length };
+}
+
+// Take mods out of the game completely: every row that refers to them, in every
+// profile. `expected` maps normalized mod id -> the folder the caller intends to
+// delete, and is checked here so this layer refuses anything it does not
+// recognise. The database is backed up first and the result read back.
+//
+// Files are NOT touched here: the caller deletes them after this succeeds and
+// reports if that fails. Database-first is deliberate - rows without files are
+// inert, whereas files without rows are clutter the game re-adds on its next
+// scan, and it is the files that actually make a mod gone.
+// Take mods out of the game completely: every row that refers to them, in every
+// profile. `expected` maps normalized mod id -> the folder the caller intends to
+// delete, and is checked here so this layer refuses anything it does not
+// recognise. `roots` are the mod source folders; a folder that is one of them,
+// or an ancestor of one, is refused outright - deleting that would take the whole
+// mod library with it. The database is backed up first and the result read back.
+//
+// Files are NOT touched here: the caller deletes them after this succeeds and
+// reports if that fails. Database-first is deliberate - rows without files are
+// inert, whereas files without rows are clutter the game re-adds on its next
+// scan, and it is the files that actually make a mod gone.
+function removeMods(dbPath, ids, expected, roots) {
+  requireDb();
+  if (!Array.isArray(ids) || !ids.length) return { removed: [], refused: [], backupPath: null };
+  if (ids.length > MAX_REMOVE_MODS) throw new Error('too many mods at once');
+  const rootKeys = (roots || []).map(rootKey).filter(Boolean);
+
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const removed = [];
+    const refused = [];
+    for (const rawId of ids) {
+      const idNorm = normId(rawId);
+      const row = db.prepare('SELECT ModRowId, ScannedFileRowId, ModId FROM Mods WHERE lower(ModId) = ?').get(idNorm);
+      if (!row) { refused.push({ modId: idNorm, reason: 'not in the database' }); continue; }
+
+      const scanned = row.ScannedFileRowId == null ? null
+        : db.prepare('SELECT Path FROM ScannedFiles WHERE ScannedFileRowId = ?').get(row.ScannedFileRowId);
+      const wanted = expected && expected[idNorm];
+      if (!wanted) { refused.push({ modId: idNorm, reason: 'no folder was confirmed for this mod' }); continue; }
+      if (!scanned) { refused.push({ modId: idNorm, reason: 'this mod has no recorded folder' }); continue; }
+      const actual = path.dirname(String(scanned.Path).replace(/\\/g, '/'));
+      // Case-insensitive: the game records the casing the filesystem has, and a
+      // Steam library found through the registry can come out as "d:\steam".
+      if (rootKey(wanted) !== rootKey(actual)) {
+        refused.push({ modId: idNorm, reason: 'the folder does not match the one in the database' });
+        continue;
+      }
+      const kind = classifyPath(scanned.Path);
+      if (kind !== 'workshop' && kind !== 'local') {
+        refused.push({ modId: idNorm, reason: `refusing to remove ${kind} content` });
+        continue;
+      }
+      // Never a mod source folder, and never anything above one. A mod whose
+      // recorded path sat directly in the source folder would otherwise let the
+      // caller delete the whole mod library.
+      const key = rootKey(wanted);
+      const isRoot = rootKeys.some((r) => key === r);
+      const holdsRoot = rootKeys.some((r) => r.startsWith(key + '/'));
+      if (isRoot || holdsRoot || !key) {
+        refused.push({ modId: idNorm, reason: isRoot ? 'refusing to remove a mod source folder' : 'refusing to remove a folder containing the mod folders' });
+        continue;
+      }
+
+      // Children before parents, so nothing is left pointing at a missing mod.
+      for (const r of db.prepare('SELECT ComponentRowId AS id FROM Components WHERE ModRowId = ?').all(row.ModRowId)) {
+        db.prepare('DELETE FROM ComponentFiles WHERE ComponentRowId = ?').run(r.id);
+        db.prepare('DELETE FROM ComponentProperties WHERE ComponentRowId = ?').run(r.id);
+      }
+      for (const r of db.prepare('SELECT SettingRowId AS id FROM Settings WHERE ModRowId = ?').all(row.ModRowId)) {
+        db.prepare('DELETE FROM SettingFiles WHERE SettingRowId = ?').run(r.id);
+      }
+      db.prepare('DELETE FROM Components WHERE ModRowId = ?').run(row.ModRowId);
+      db.prepare('DELETE FROM Settings WHERE ModRowId = ?').run(row.ModRowId);
+      for (const t of ['ModProperties', 'ModFiles', 'ModRelationships', 'Criteria', 'ModGroupItems']) {
+        db.prepare(`DELETE FROM ${t} WHERE ModRowId = ?`).run(row.ModRowId);
+      }
+      db.prepare('DELETE FROM Mods WHERE ModRowId = ?').run(row.ModRowId);
+      if (row.ScannedFileRowId != null) db.prepare('DELETE FROM ScannedFiles WHERE ScannedFileRowId = ?').run(row.ScannedFileRowId);
+      removed.push({ modId: idNorm, name: row.ModId, folder: wanted, kind });
+    }
+    if (!removed.length) return { removed, refused };
+
+    // Read back: none of them may still be anywhere in the database.
+    for (const r of removed) {
+      const left = db.prepare('SELECT count(*) AS n FROM Mods WHERE lower(ModId) = ?').get(r.modId).n;
+      if (left !== 0) throw new Error(`the database still lists ${r.modId} after removing it`);
+      const stray = db.prepare('SELECT count(*) AS n FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId WHERE lower(m.ModId) = ?').get(r.modId).n;
+      if (stray !== 0) throw new Error(`a profile still lists ${r.modId} after removing it`);
+    }
+    return { removed, refused };
+  });
+  return { backupPath, ...result };
+}
+
 module.exports = {
   readModState, readModDetails, applyChanges, classifyPath,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
-  findUnregistered,
+  findUnregistered, findRemoved, removeMods,
   exportGroup, importGroup, EXPORT_TOOLKIT, EXPORT_VERSION,
   registerMod, registerMods, readModinfoMeta, parseModinfo, fileTimeOf,
 };

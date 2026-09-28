@@ -44,7 +44,9 @@ function renderDashboard() {
     alerts.push(`<div class="alert warn"><b>Civ6 is running.</b> Close it, then rescan to add any new mods.</div>`);
   } else if (s && s.added.length) {
     const n = s.added.length;
-    const names = s.added.slice(0, 4).map((m) => esc(renderCivText(m.name))).join(', ')
+    // renderCivText already returns HTML, so escaping it again is what turned a
+    // mod's colour tags into visible "<span>" text.
+    const names = s.added.slice(0, 4).map((m) => renderCivText(m.name)).join(', ')
       + (n > 4 ? ` and ${n - 4} more` : '');
     alerts.push(`<div class="alert info"><b>Added ${n} new mod${n > 1 ? 's' : ''}:</b> ${names}.
       They're switched off — tick ${n > 1 ? 'them' : 'it'} in the mod manager when you want ${n > 1 ? 'them' : 'it'}.</div>`);
@@ -53,9 +55,17 @@ function renderDashboard() {
     alerts.push(`<div class="alert warn"><b>${s.failed.length} mod${s.failed.length > 1 ? 's' : ''} couldn't be read:</b> ${
       s.failed.map((f) => `${esc(f.file)} (${esc(f.error)})`).join(', ')}</div>`);
   }
+  if (d.gone && d.gone.removable) {
+    const gone = d.gone.removed.filter((r) => r.removable);
+    const names = gone.slice(0, 4).map((m) => renderCivText(m.name)).join(', ')
+      + (gone.length > 4 ? ` and ${gone.length - 4} more` : '');
+    alerts.push(`<div class="alert info"><b>${gone.length} mod${gone.length > 1 ? 's' : ''} no longer installed:</b> ${names}.
+      The game still lists ${gone.length > 1 ? 'them' : 'it'}. Use <b>Remove mod</b> in the mod manager to clear
+      ${gone.length > 1 ? 'them' : 'it'} out.</div>`);
+  }
   if (d.needsSync.length) {
     const n = d.needsSync.length;
-    const names = d.needsSync.slice(0, 4).map((m) => esc(renderCivText(m.name))).join(', ')
+    const names = d.needsSync.slice(0, 4).map((m) => renderCivText(m.name)).join(', ')
       + (n > 4 ? ` and ${n - 4} more` : '');
     alerts.push(`<div class="alert info"><b>${n} mod${n > 1 ? 's' : ''} not added yet:</b> ${names}.
       Rescan to add ${n > 1 ? 'them' : 'it'} — they stay switched off until you tick ${n > 1 ? 'them' : 'it'}.</div>`);

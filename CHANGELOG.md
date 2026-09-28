@@ -10,6 +10,37 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
+## v1.5.0 — 28 September 2026
+
+Remove a mod from the mod manager, and fix a mod name that would not render.
+
+### Added
+
+- **Remove mod**, in a mod's details panel. It takes the mod out of the game and
+  out of every profile, and deletes its folder from disk. The dialog names the
+  exact folder first, because the files cannot be undone — only the database is
+  backed up.
+- The dashboard lists mods the game still records that are no longer on disk
+  (unsubscribed, or deleted by hand) and points at the same button. They are only
+  ever listed, never removed automatically: a mod part-way through a Steam
+  download looks exactly like one just unsubscribed, and quietly deleting those
+  would be a nasty way to lose a mod you had just subscribed to.
+
+### Fixed
+
+- A mod whose name contains an XML entity rendered as a literal `&amp;amp;`, and
+  its colour markup showed as visible `<span>` text. Two causes: the text was
+  escaped a second time after the colour tags had already been turned into HTML,
+  and the entity was never decoded. The game stores the raw `&amp;`, so the fix
+  is at the point of display only — decoding earlier would have stopped the
+  database matching what the game writes.
+
+### Note
+
+Removing does not unsubscribe from Steam. The dialog links the Workshop page so
+that is one click away, but doing it for you would mean guessing at a `steam://`
+handler that may not exist for workshop items.
+
 ## v1.4.0 — 28 September 2026
 
 New mods are added automatically. The Register button is gone.

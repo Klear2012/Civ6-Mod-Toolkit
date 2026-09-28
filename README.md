@@ -122,6 +122,20 @@ the database is backed up first, and the result is read back and checked.
 
 A mod tagged **not added** is one the game can't load yet. Same fix: rescan.
 
+### Removing a mod
+
+Open a mod's details (**i**) and click **Remove mod**. It takes the mod out of
+the game and out of every profile, and deletes its folder from disk. The dialog
+names the exact folder first, because the files are gone for good — the database
+is backed up, your mods are not.
+
+It does not unsubscribe you from Steam; the dialog links the mod's Workshop page
+so that is one click away if you want it out of your library too.
+
+If you unsubscribed in Steam instead, the dashboard lists the mods the game still
+remembers that are no longer on disk, with the same button. Base game and DLC
+content is never offered — only Workshop and local mods.
+
 ### Profiles (mod groups)
 
 The **Profile** bar above the filters picks which group of mods you are
@@ -174,6 +188,10 @@ configuration).
   It **never switches anything on** — a new mod is registered and left off, and
   only appears in the list. It is skipped entirely if Civ6 is running, and it
   writes nothing at all when there is nothing new to add.
+- Removing a mod only ever touches Workshop and local mods. The folder comes
+  from the database, never from the page, and is refused if it is a mod source
+  folder, a folder containing one, or anything the game recorded as base game or
+  DLC. Nothing is removed without a click.
 
 ## Authors & feedback
 

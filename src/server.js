@@ -20,6 +20,7 @@ const {
   readModState, readModDetails, applyChanges,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
   exportGroup, importGroup, registerMods, findUnregistered,
+  findRemoved, removeMods, classifyPath,
 } = require('./modsdb');
 const { gameStatus } = require('./game');
 
@@ -261,6 +262,10 @@ async function handleApi(req, res, url) {
       // On disk but not yet switchable: never scanned by the game, or known to
       // it but with no row in the profile in use. A sync adds them all.
       needsSync: todo.pending.map((p) => ({ id: p.id, name: p.name, type: types.get(p.idNorm) || 'local', reason: p.reason })),
+      // Recorded by the game but no longer on disk: unsubscribed, or deleted by
+      // hand. Listed, never removed on our own initiative - a mod still
+      // downloading looks exactly like one just unsubscribed.
+      gone: dbState.ok ? findRemoved(modsDb.path, sources) : { removed: [], removable: 0 },
       // What the last sync did, so the page can say so rather than the user
       // having to remember.
       sync: lastSync,
@@ -331,6 +336,76 @@ async function handleApi(req, res, url) {
   if (req.method === 'POST' && url.pathname === '/api/sync') {
     const run = await syncMods();
     return send(res, 200, { ok: !run.error, ...run });
+  }
+
+  // POST /api/mods/remove { ids: [...] } -> take mods out of the game and
+  // delete their folders.
+  //
+  // The browser sends mod ids only. Folders come from the database and are
+  // re-checked against the mod sources before anything is deleted, so a stale or
+  // tampered request cannot name a path to delete - least of all a base-game or
+  // DLC one, which the game also records and which must never be touched.
+  if (req.method === 'POST' && url.pathname === '/api/mods/remove') {
+    const { ids } = await readBody(req);
+    const list = Array.isArray(ids) ? ids.map(normId) : [];
+    if (!list.length) return send(res, 400, { error: 'no mods were named' });
+    if (list.length > 200) return send(res, 400, { error: 'too many mods at once' });
+
+    const game = await gameStatus();
+    if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then remove mods.' });
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+
+    const sources = paths.getSources();
+    const roots = sources.filter((s) => s.exists)
+      .map((s) => String(s.root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase());
+    const inAModFolder = (p) => {
+      const key = String(p || '').replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase();
+      return roots.some((r) => key.startsWith(r + '/'));
+    };
+
+    // Folders come from the database, never from the request.
+    const st = readModState(modsDb.path);
+    if (!st.ok) return send(res, 400, { error: st.error });
+    const byId = new Map(st.mods.map((m) => [m.idNorm, m]));
+    const expected = {};
+    const rejected = [];
+    for (const id of list) {
+      const rec = byId.get(id);
+      if (!rec) { rejected.push({ modId: id, reason: 'not in the database' }); continue; }
+      const folder = path.dirname(String(rec.path || '').replace(/\\/g, '/'));
+      const kind = classifyPath(rec.path);
+      if (!inAModFolder(folder)) { rejected.push({ modId: id, name: rec.name, reason: 'not inside a mod folder' }); continue; }
+      if (kind !== 'workshop' && kind !== 'local') { rejected.push({ modId: id, name: rec.name, reason: `refusing to remove ${kind} content` }); continue; }
+      expected[id] = folder;
+    }
+    if (!Object.keys(expected).length) return send(res, 400, { error: 'none of those could be removed', refused: rejected });
+
+    let r;
+    try {
+      // roots go too, so the data layer can refuse a folder that is - or holds -
+      // a mod source folder. That check is what stands between a bug here and
+      // deleting somebody's entire mod library.
+      r = removeMods(modsDb.path, Object.keys(expected), expected, sources.filter((s) => s.exists).map((s) => s.root));
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
+
+    // Files last. The mod is already out of the game, so a failure here is
+    // reported rather than fatal - but it matters, because files left behind
+    // are re-registered by the game on its next scan.
+    const kept = [];
+    for (const m of r.removed) {
+      // Checked again immediately before deleting, not just earlier.
+      if (!inAModFolder(m.folder)) { kept.push({ ...m, error: 'outside the mod folders' }); continue; }
+      try {
+        if (!fs.lstatSync(m.folder).isDirectory()) { kept.push({ ...m, error: 'that path is not a folder' }); continue; }
+        fs.rmSync(m.folder, { recursive: true, force: true });
+      } catch (e) {
+        kept.push({ modId: m.modId, name: m.name, folder: m.folder, error: e.code === 'ENOENT' ? 'already gone' : e.message });
+      }
+    }
+    return send(res, 200, { ok: true, removed: r.removed, kept, refused: [...rejected, ...r.refused], backupPath: r.backupPath });
   }
 
   // ---- mod groups (player profiles) ---------------------------------------

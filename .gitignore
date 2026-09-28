@@ -11,3 +11,6 @@ civ6-paths.json
 scratch_*
 *.log
 .DS_Store
+
+# browser-tool screenshots taken while checking the UI
+.openchamber/
