@@ -87,12 +87,67 @@ async function groupAction(action, body, message) {
   }
 }
 
+// ---- switching ------------------------------------------------------------
+
+// The mods that would be loaded once `p` is in use: what is loaded now, plus
+// this profile's additions, minus its removals. Built from the differences
+// rather than fetched whole, because the server only sends those.
+function setAfterSwitch(p) {
+  const next = new Set((modsPage.data ? modsPage.data.mods : [])
+    .filter((m) => m.enabled === true).map((m) => m.idNorm));
+  for (const id of p.turningOn) next.add(id);
+  for (const id of p.turningOff) next.delete(id);
+  return next;
+}
+
+const modNames = (ids, all, limit) => {
+  const names = ids.map((id) => (all.get(id) || {}).name).filter(Boolean);
+  const shown = names.slice(0, limit).join(', ');
+  return names.length > limit ? `${shown} and ${names.length - limit} more` : shown;
+};
+
+// What the switch would do, in the order that matters: what starts loading, what
+// stops, and whether the result is a set the game can actually load. Problems
+// are worked out for the incoming set rather than the current one - warning about
+// conflicts that the switch would resolve is as misleading as missing one it
+// would cause.
+function switchPreview(p) {
+  const all = new Map((modsPage.data ? modsPage.data.mods : []).map((m) => [m.idNorm, m]));
+  const on = (m) => setAfterSwitch(p).has(m.idNorm);
+  const label = groupLabel({ name: p.to.name });
+  const lines = [`Now using "${label}"?`];
+  if (p.turningOn.length) lines.push(`\n${p.turningOn.length} mod${p.turningOn.length === 1 ? '' : 's'} will start loading:\n${modNames(p.turningOn, all, 5)}`);
+  if (p.turningOff.length) lines.push(`\n${p.turningOff.length} mod${p.turningOff.length === 1 ? '' : 's'} will stop loading:\n${modNames(p.turningOff, all, 5)}`);
+  if (!p.turningOn.length && !p.turningOff.length) lines.push('\nNothing will change.');
+
+  const problems = [];
+  for (const m of all.values()) {
+    for (const pr of problemsOf(m, all, on)) problems.push(`${m.name} — ${pr.text}`);
+  }
+  if (problems.length) {
+    lines.push(`\n${problems.length} problem${problems.length === 1 ? '' : 's'} with what would be loaded:`);
+    for (const pr of problems.slice(0, 4)) lines.push(`• ${pr}`);
+    if (problems.length > 4) lines.push(`• and ${problems.length - 4} more`);
+  }
+  return lines.join('\n');
+}
+
 async function switchTo(id) {
   const current = activeProfile();
   if (current && Number(id) === current.id) return;
   if (modsPage.pending.size &&
       !confirm('You have mod changes that haven\'t been applied. Switching profiles discards them. Continue?')) {
     renderBar(); // put the select back on the profile actually in use
+    return;
+  }
+  // A preview is a courtesy, not a gate: if it cannot be had, still switch. What
+  // it must never do is silently fail and leave the user unaware of the change.
+  let p = null;
+  try {
+    p = await api(`/api/modgroups/preview?id=${encodeURIComponent(id)}`);
+  } catch (_) { /* carry on without it */ }
+  if (p && !confirm(switchPreview(p))) {
+    renderBar();
     return;
   }
   modsPage.pending.clear();

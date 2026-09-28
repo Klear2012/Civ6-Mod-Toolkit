@@ -40,17 +40,22 @@ function setWanted(m, on) {
 
 // Problems for an enabled mod, given the pending state: missing / disabled
 // dependencies and enabled mods it's marked as incompatible with.
-function problemsOf(m, all) {
-  if (!isOn(m)) return [];
+//
+// `on` decides whether a mod counts as loaded. It defaults to the live state, but
+// the profile switch passes one built from the profile being switched to, so the
+// same rules can be applied to a set that is not in use yet - otherwise this
+// would need writing twice and the two copies would drift.
+function problemsOf(m, all, on = isOn) {
+  if (!on(m)) return [];
   const out = [];
   for (const r of m.requires) {
     const dep = all.get(r.id);
     if (!dep) out.push({ text: `Needs ${r.title}, which isn't installed` });
-    else if (!isOn(dep)) out.push({ text: `Needs ${dep.name}, which is turned off`, fix: canToggle(dep) ? dep.idNorm : null });
+    else if (!on(dep)) out.push({ text: `Needs ${dep.name}, which is turned off`, fix: canToggle(dep) ? dep.idNorm : null });
   }
   for (const b of m.blocks) {
     const other = all.get(b.id);
-    if (other && isOn(other)) out.push({ text: `Conflicts with ${other.name}` });
+    if (other && on(other)) out.push({ text: `Conflicts with ${other.name}` });
   }
   return out;
 }

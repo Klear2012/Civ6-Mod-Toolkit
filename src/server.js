@@ -18,7 +18,7 @@ const inventory = require('./inventory');
 const editor = require('./editor');
 const {
   readModState, readModDetails, applyChanges,
-  listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
+  listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup, previewGroup,
   exportGroup, importGroup, registerMods, findUnregistered,
   findRemoved, removeMods, classifyPath, modFolderFault,
 } = require('./modsdb');
@@ -473,6 +473,21 @@ async function handleApi(req, res, url) {
     const list = listGroups(modsDb.path);
     if (!list.ok) return send(res, 500, { error: list.error });
     return send(res, 200, { ...list, game: await gameStatus() });
+  }
+
+  // GET /api/modgroups/preview?id=... -> what using this profile would change:
+  // the mods that would start loading, and the ones that would stop. Read-only,
+  // so like export it works while the game is running.
+  if (req.method === 'GET' && url.pathname === '/api/modgroups/preview') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    const id = groupId(url.searchParams.get('id'));
+    if (id === null) return send(res, 400, { error: 'which profile?' });
+    try {
+      return send(res, 200, previewGroup(modsDb.path, id));
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
   }
 
   // GET /api/modgroups/export?id=... -> the profile as a downloadable .json

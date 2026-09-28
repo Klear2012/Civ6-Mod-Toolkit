@@ -349,6 +349,41 @@ function listGroups(dbPath) {
   }
 }
 
+// What activating a profile would change: the mods that would start loading and
+// the ones that would stop. Only the differences, not the whole set - the caller
+// already knows what is loaded now, and most profiles differ from the current
+// one by a handful of mods rather than by all of them.
+//
+// Read-only, so it works while the game is running, like export. Returns mod ids
+// by ModId rather than ModRowId, which is the only identifier stable across a
+// rescan and so the only one the caller can match against.
+function previewGroup(dbPath, id) {
+  if (!DatabaseSync) throw new Error(loadError);
+  let db;
+  try {
+    db = new DatabaseSync(dbPath, { readOnly: true });
+    const groups = readGroups(db);
+    const target = groups.find((g) => g.id === Number(id));
+    if (!target) throw new Error('that mod group no longer exists');
+    const current = groups.find((g) => g.selected) || null;
+    const onIn = (groupId) => new Set(db.prepare(`
+      SELECT m.ModId AS modId FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId
+      WHERE i.ModGroupRowId = ? AND i.Disabled = 0`).all(groupId).map((r) => normId(r.modId)));
+    const now = onIn(current ? current.id : -1);
+    const next = onIn(target.id);
+    return {
+      from: current ? { id: current.id, name: current.name } : null,
+      to: { id: target.id, name: target.name },
+      turningOn: [...next].filter((k) => !now.has(k)),
+      turningOff: [...now].filter((k) => !next.has(k)),
+      onNow: now.size,
+      onNext: next.size,
+    };
+  } finally {
+    try { if (db) db.close(); } catch (_) { /* ignore */ }
+  }
+}
+
 // Create an empty profile (everything off) and make it the active one. A name
 // that is already taken gets a " (2)" rather than a second profile the user
 // cannot tell apart in the dropdown.
@@ -1130,7 +1165,7 @@ function removeMods(dbPath, ids, expected, roots) {
 
 module.exports = {
   readModState, readModDetails, applyChanges, classifyPath,
-  listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
+  listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup, previewGroup,
   findUnregistered, findRemoved, removeMods, modFolderFault,
   exportGroup, importGroup, EXPORT_TOOLKIT,
   registerMod, registerMods, readModinfoMeta, parseModinfo, fileTimeOf,

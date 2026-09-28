@@ -258,8 +258,62 @@ console.log('\nTest 9: backups');
     `${beforeCount} -> ${baks().length}`);
 }
 
-// --- Test 10: export / import -----------------------------------------------
-console.log('\nTest 10: export and import');
+// --- Test 10: previewing a switch -------------------------------------------
+// Read-only, and it decides what the user is told before they change what the
+// game loads, so it gets checked properly.
+console.log('\nTest 10: previewing a profile switch');
+{
+  // The built-in group is the tidiest starting point: it has a row for all four
+  // mods, and only mod-a is on. Everything else in this file leaves the active
+  // profile wherever the last test left it.
+  const def = groupNamed('LOC_MODS_GROUP_DEFAULT_NAME');
+
+  // A profile with mod-b and mod-c on and mod-a off: mod-b and mod-c start
+  // loading, mod-a stops, mod-d is off in both and so is not mentioned.
+  //
+  // Both profiles are built first, and only then is the built-in group put back
+  // in use: creating a group activates it, so switching afterwards would be
+  // comparing the target against itself.
+  const gid = db.createGroup(DB_PATH, 'Preview target').group.id;
+  const emptyId = db.createGroup(DB_PATH, 'Preview empty').group.id;
+  const w = new DatabaseSync(DB_PATH);
+  const setIn = (modId, on) => w.prepare(
+    'UPDATE ModGroupItems SET Disabled = ? WHERE ModGroupRowId = ? AND ModRowId = (SELECT ModRowId FROM Mods WHERE ModId = ?)'
+  ).run(on ? 0 : 1, gid, modId);
+  setIn('mod-b', true);
+  setIn('mod-c', true);
+  w.close();
+  db.activateGroup(DB_PATH, def.id);
+  check('starting point: only mod-a is on', db.listGroups(DB_PATH).active.enabled === 1);
+
+  const p = db.previewGroup(DB_PATH, gid);
+  check('names the profile being switched to', p.to.name === 'Preview target', p.to.name);
+  check('and the one in use now', p.from && p.from.name === 'LOC_MODS_GROUP_DEFAULT_NAME', p.from && p.from.name);
+  check('reports the mods that would start loading', p.turningOn.join() === 'mod-b,mod-c', p.turningOn.join());
+  check('reports the mod that would stop loading', p.turningOff.join() === 'mod-a', p.turningOff.join());
+  check('and says nothing about a mod that is off in both', !p.turningOn.includes('mod-d') && !p.turningOff.includes('mod-d'));
+  check('counts what each profile has on', p.onNow === 1 && p.onNext === 2, `now=${p.onNow} next=${p.onNext}`);
+
+  const same = db.previewGroup(DB_PATH, def.id);
+  check('previewing the profile in use changes nothing',
+    same.turningOn.length === 0 && same.turningOff.length === 0 && same.from.id === same.to.id);
+
+  const empty = db.previewGroup(DB_PATH, emptyId);
+  check('an empty profile would stop everything that is on', empty.turningOff.join() === 'mod-a', empty.turningOff.join());
+  check('  and start nothing', empty.turningOn.length === 0);
+
+  check('an unknown profile is refused', fails(() => db.previewGroup(DB_PATH, 9999)));
+
+  const after = db.listGroups(DB_PATH);
+  check('and none of it wrote anything: the active profile is unchanged',
+    after.active && after.active.name === 'LOC_MODS_GROUP_DEFAULT_NAME' && after.active.enabled === 1,
+    JSON.stringify(after.active));
+  check('  and the previewed profile still has what it had',
+    groupNamed('Preview target').enabled === 2, `enabled=${groupNamed('Preview target').enabled}`);
+}
+
+// --- Test 11: export / import -----------------------------------------------
+console.log('\nTest 11: export and import');
 {
   const source = groupNamed('LOC_MODS_GROUP_DEFAULT_NAME'); // four mods, one on
   const file = db.exportGroup(DB_PATH, source.id);
