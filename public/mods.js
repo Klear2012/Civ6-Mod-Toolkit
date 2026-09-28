@@ -69,10 +69,19 @@ function workshopUrl(id) {
   return `https://steamcommunity.com/sharedfiles/filedetails/?id=${encodeURIComponent(id)}`;
 }
 
+// The source label is also the link to the mod's Workshop page, for Workshop
+// mods. That is not cosmetic: the whole row is the on/off switch, and
+// paneClick() only spares the things that are a <button> or an <a>. As a plain
+// <span> this label was neither, so clicking it toggled the mod instead of
+// opening anything. Making it a real link fixes that structurally rather than
+// adding another case to remember.
 function sourceTag(m) {
   if (!m.scanned) return '<span class="tag unscanned">not scanned yet</span>';
   if (m.enabled == null) return '<span class="tag" title="The game doesn&#39;t list this in the active mod group (for example DLC you don&#39;t own)">not available</span>';
-  return `<span class="tag ${esc(m.source)}">${m.source === 'dlc' ? 'DLC' : esc(m.source)}</span>`;
+  const label = m.source === 'dlc' ? 'DLC' : esc(m.source);
+  if (!m.workshopId) return `<span class="tag ${esc(m.source)}">${label}</span>`;
+  return `<a class="tag ${esc(m.source)}" href="${workshopUrl(m.workshopId)}" target="_blank" rel="noopener"`
+    + ` title="Open this mod&#39;s Steam Workshop page">${label}</a>`;
 }
 
 function rowClass(m, extra) {
@@ -82,13 +91,11 @@ function rowClass(m, extra) {
     .filter(Boolean).join(' ');
 }
 
-// Name, teaser, warnings, Workshop link, source tag and the details button.
+// Name, teaser, warnings, source tag and the details button. The source tag is
+// the Workshop link for Workshop mods, so there is no separate one.
 function rowBody(m, all) {
   const probs = problemsOf(m, all).map((p) => `<span class="warn-line">⚠ ${renderCivText(p.text)}${
     p.fix ? `<button type="button" data-fix="${esc(p.fix)}">Turn it on</button>` : ''}</span>`).join('');
-  const link = m.workshopId
-    ? `<a class="ext" href="${workshopUrl(m.workshopId)}" target="_blank" rel="noopener" title="Open the Steam Workshop page"><span class="ext-text">Workshop page </span>↗</a>`
-    : '';
   const sub = m.teaser ? `<span class="teaser">${renderCivText(m.teaser)}</span>` : `<small>${esc(m.id)}</small>`;
   // The mod manager does not write to the database itself - Apply changes and
   // the profile buttons are the only things that do. A mod that needs adding
@@ -97,7 +104,7 @@ function rowBody(m, all) {
     ? `<span class="tag unscanned" title="Not switched on yet. Use “Rescan &amp; add new mods” on the dashboard.">not added</span>`
     : sourceTag(m);
   return `<span class="name"><b>${renderCivText(m.name)}</b>${sub}${probs}</span>
-    ${link}${tag}
+    ${tag}
     <button type="button" class="info" data-info="${esc(m.idNorm)}" title="Details">i</button>`;
 }
 
