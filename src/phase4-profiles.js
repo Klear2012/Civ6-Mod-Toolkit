@@ -211,7 +211,8 @@ console.log('\nTest 10: export and import');
 {
   const source = groupNamed('LOC_MODS_GROUP_DEFAULT_NAME'); // four mods, one on
   const file = db.exportGroup(DB_PATH, source.id);
-  check('carries the toolkit and version', file.toolkit === 'civ6-mod-toolkit' && file.version === 1);
+  check('says which toolkit wrote it', file.toolkit === 'civ6-mod-toolkit', file.toolkit);
+  check('and carries no format version', !('version' in file), Object.keys(file).join(','));
   check('carries the profile name', file.name === 'LOC_MODS_GROUP_DEFAULT_NAME', file.name);
   check('has an export timestamp', !Number.isNaN(Date.parse(file.exportedAt)));
   check('lists every mod with its state', file.mods.length === 4 && file.mods.filter((m) => m.enabled).length === 1,

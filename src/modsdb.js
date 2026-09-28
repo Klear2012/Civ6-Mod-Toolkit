@@ -439,7 +439,6 @@ function activateGroup(dbPath, id) {
 // ---------------------------------------------------------------------------
 
 const EXPORT_TOOLKIT = 'civ6-mod-toolkit';
-const EXPORT_VERSION = 1;
 const MAX_IMPORT_MODS = 10000;
 
 // One profile as a portable object: every mod the profile lists, on or off.
@@ -456,7 +455,11 @@ function exportGroup(dbPath, id) {
       WHERE i.ModGroupRowId = ?
       ORDER BY m.ModId`).all(group.id)
       .map((r) => ({ modId: r.modId, enabled: !r.disabled }));
-    return { toolkit: EXPORT_TOOLKIT, version: EXPORT_VERSION, name: group.name, exportedAt: new Date().toISOString(), mods };
+    // No format-version field. There was one, and nothing ever read it, so it
+    // only implied a compatibility promise that was never checked. `toolkit` and
+    // `exportedAt` stay because a person opening the file reads them; a version
+    // number is machine metadata for a machine that never looks.
+    return { toolkit: EXPORT_TOOLKIT, name: group.name, exportedAt: new Date().toISOString(), mods };
   } finally {
     try { if (db) db.close(); } catch (_) { /* ignore */ }
   }
@@ -1110,6 +1113,6 @@ module.exports = {
   readModState, readModDetails, applyChanges, classifyPath,
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup,
   findUnregistered, findRemoved, removeMods, modFolderFault,
-  exportGroup, importGroup, EXPORT_TOOLKIT, EXPORT_VERSION,
+  exportGroup, importGroup, EXPORT_TOOLKIT,
   registerMod, registerMods, readModinfoMeta, parseModinfo, fileTimeOf,
 };
