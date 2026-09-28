@@ -370,12 +370,16 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return send(res, 400, { error: e.code === 'ENOENT' ? 'folder not found' : e.message });
     }
-    // explorer.exe is a GUI program and its exit code means nothing: it returns
-    // 1 for a folder that opened perfectly well, and 1 for one that does not
-    // exist. So the code is ignored - the statSync above already proved the
-    // folder is there - and only Explorer failing to launch at all is worth
-    // reporting, which surfaces as ENOENT.
-    execFile('explorer.exe', [folder], { windowsHide: true }, (err) => {
+    // explorer.exe reads each "/segment" of its argument as a switch, so the
+    // game's forward-slash path leaves it with no path at all and it opens
+    // Documents instead - silently, and with the same exit code as success.
+    // Verified: C:/... opens Documents, C:\... opens the folder. So convert at
+    // this boundary and nowhere else.
+    //
+    // The exit code itself is still no use as a success flag - it is 1 either
+    // way - so it is ignored, and the statSync above is what proves the folder is
+    // there. Only Explorer failing to launch at all is worth a line.
+    execFile('explorer.exe', [paths.toNativePath(folder)], { windowsHide: true }, (err) => {
       if (err && err.code === 'ENOENT') console.error('explorer.exe could not be launched');
     });
     return send(res, 200, { ok: true, folder });

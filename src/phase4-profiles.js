@@ -10,6 +10,7 @@ const os = require('os');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const db = require('./modsdb');
+const { toNativePath } = require('./paths');
 
 const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'civ6-profiles-'));
 const DB_PATH = path.join(TMP, 'Mods.sqlite');
@@ -776,6 +777,38 @@ console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing')
     // as DLC rather than as merely being somewhere unexpected.
     check('the kind is reported ahead of the location', /^refusing to remove dlc/.test(F('C:/nowhere', '../../DLC/A/X.modinfo', roots) || ''),
       String(F('C:/nowhere', '../../DLC/A/X.modinfo', roots)));
+  }
+
+  // Handing a path to a native program. explorer.exe treats each "/segment" of
+  // its argument as a switch, so the game's forward-slash paths leave it with no
+  // path at all and it opens Documents instead - silently, with the same exit
+  // code as success. Nothing about that failure is visible at runtime, so the
+  // conversion is checked here rather than left to be noticed.
+  console.log('\nTest 20: paths for native programs');
+  {
+    const win = process.platform === 'win32';
+    const fwd = 'D:/Steam/steamapps/workshop/content/289070/2573589760';
+    const native = toNativePath(fwd);
+    check('a forward-slash path comes back with no forward slashes on Windows',
+      win ? !native.includes('/') : true, native);
+    check('and with native separators on Windows', win ? /^[A-Za-z]:\\/.test(native) : true, native);
+    check('every segment survives the conversion',
+      win ? native.replace(/\\/g, '/') === fwd : true, native);
+    check('a path with a space is untouched by the separator change',
+      toNativePath('C:/Program Files/Steam') === (win ? 'C:\\Program Files\\Steam' : 'C:/Program Files/Steam'),
+      toNativePath('C:/Program Files/Steam'));
+    // Already-native input must not gain a second round of escaping.
+    check('an already-native path is unchanged',
+      toNativePath('C:\\Program Files') === 'C:\\Program Files', toNativePath('C:\\Program Files'));
+    check('a UNC path survives', toNativePath('//server/share/Mod') === (win ? '\\\\server\\share\\Mod' : '//server/share/Mod'),
+      toNativePath('//server/share/Mod'));
+    check('an empty path stays empty', toNativePath('') === '' && toNativePath(null) === '');
+    // The call site has to use it, or the function is just dead code and the bug
+    // is back. A source check is the only way to see that.
+    const srv = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+    check('the explorer call converts at the boundary', /execFile\('explorer\.exe', \[paths\.toNativePath\(folder\)\]/.test(srv));
+    check('and nothing else hands a raw forward-slash path to explorer',
+      !/execFile\('explorer\.exe', \[folder\]/.test(srv));
   }
 }
 

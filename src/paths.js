@@ -111,6 +111,28 @@ function workshopRoots() {
   return roots;
 }
 
+// --- Handing a path to a native program -------------------------------------
+
+// Node accepts the game's forward-slash paths everywhere, so nothing inside the
+// toolkit needs converting: fs, path and the SQL all cope. A native program is
+// different, and explorer.exe is the sharpest example.
+//
+// explorer.exe reads the first field of an argument that begins with "/" as a
+// switch. Given "D:/Steam/.../289070/12345" it sees /Steam, /steamapps,
+// /workshop as unknown switches, is left with no path at all, and quietly opens
+// Documents instead. It exits non-zero whether it worked or not, so nothing
+// reports the mistake - the window opens, just in the wrong place.
+//
+// Convert at the boundary, once, only for the program being launched. Internal
+// comparisons must keep the game's own form, or "is this folder ours" starts
+// depending on which separator some layer happened to use.
+//
+// On POSIX the forward-slash form already *is* native, so this is a no-op there.
+function toNativePath(p) {
+  const s = String(p || '');
+  return process.platform === 'win32' ? s.replace(/\//g, '\\') : s;
+}
+
 // --- Assemble sources -------------------------------------------------------
 
 function loadOverrides() {
@@ -164,4 +186,4 @@ function getModsDb() {
   return { path: file, exists };
 }
 
-module.exports = { getSources, getSavesDir, getModsDb, myGamesRoot };
+module.exports = { getSources, getSavesDir, getModsDb, myGamesRoot, toNativePath };

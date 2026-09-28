@@ -50,9 +50,14 @@ Workshop page, and see its name properly.
   beside a `.chip` at 12px. The state is now a `.tag` too, with colour variants.
   The dashboard's found/not-found badge and the change list are `.chip` and are
   deliberately left alone — those are meant to be read across a room.
-- `explorer.exe` returns exit code 1 whether the folder opened or not, so the
-  console was logging a failure for every folder that opened perfectly well. The
-  code is ignored now; the folder is checked before launch instead.
+- **The folder button opened Documents instead of the mod's folder.** The game
+  records paths with forward slashes even on Windows, and `explorer.exe` reads
+  the first field of an argument beginning with `/` as a *switch* — so given
+  `D:/Steam/…/289070/2573589760` it saw `/Steam`, `/steamapps`, `/workshop` as
+  unknown switches, was left with no path at all, and fell back to its default
+  folder. It exits non-zero either way, so nothing reported the mistake: the
+  window opened, just in the wrong place. Paths are now converted to native
+  separators at the point they cross into a native program, and nowhere else.
 - `removeMods` skipped its folder checks entirely when given no source roots, so
   a destructive call could proceed because nobody passed an argument. It now
   refuses: it cannot prove the folder is safe.
