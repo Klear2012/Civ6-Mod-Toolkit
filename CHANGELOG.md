@@ -12,11 +12,25 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 ## v1.5.0 — 28 September 2026
 
-A mod manager you can actually drive: remove a mod, open its folder, open its
-Workshop page, and see its name properly.
+A mod manager you can actually drive: it finds new mods by itself, and you can
+open a mod's folder, open its Workshop page, take it out of the game, or read
+its name properly.
+
+The work that was drafted as a separate v1.4.0 shipped as part of this one
+release, so there is no v1.4.0 tag or download — v1.3.1 is the version before
+this one.
 
 ### Added
 
+- **The toolkit adds new mods itself, when it starts.** Anything on disk the
+  game has never scanned is registered, and anything the game knows but that has
+  no row in the profile in use gets one, so it can be ticked. No button, and no
+  game launch.
+- **Rescan & add new mods** (was *Rescan*) on the dashboard does the same thing
+  on demand, for mods subscribed to while the toolkit is already open — which is
+  how you normally subscribe, in batches. Renamed because it now writes to the
+  game's database; a button labelled *Rescan* that silently registered thirty
+  mods would be a nasty surprise.
 - **A folder button on every Workshop and local mod**, which opens its folder in
   Explorer. A page cannot start Explorer itself — `file://` links are blocked from
   an `http://` page — so the server does it, taking ids only and re-deriving the
@@ -31,6 +45,19 @@ Workshop page, and see its name properly.
   ever listed, never removed automatically: a mod part-way through a Steam
   download looks exactly like one just unsubscribed, and quietly deleting those
   would be a nasty way to lose a mod you had just subscribed to.
+- The dashboard says what the last sync did — how many mods were added, and by
+  name — and which could not be read, and why.
+- If Civ6 is running, a sync is skipped and the reason is shown, rather than
+  attempted and failed.
+
+### Changed
+
+- **Nothing is ever switched on.** Added mods come up off, with a row in every
+  profile. This is the whole reason the above can run unattended: the toolkit
+  can put a mod in front of you, but it cannot change what the game loads.
+- The mod manager no longer has a Register button, an *Add to profile* button, or
+  the *Add them all* banner. Its only write is **Apply changes**. A mod that
+  needs adding is tagged **not added** and points at the dashboard.
 
 ### Fixed
 
@@ -69,44 +96,6 @@ Workshop page, and see its name properly.
 - `removeMods` skipped its folder checks entirely when given no source roots, so
   a destructive call could proceed because nobody passed an argument. It now
   refuses: it cannot prove the folder is safe.
-
-### Note
-
-Removing does not unsubscribe from Steam. The dialog links the Workshop page so
-that is one click away, but doing it for you would mean guessing at a `steam://`
-handler that may not exist for workshop items.
-
-## v1.4.0 — 28 September 2026
-
-New mods are added automatically. The Register button is gone.
-
-### Changed
-
-- **The toolkit adds new mods itself, when it starts.** Anything on disk the
-  game has never scanned is registered, and anything the game knows but that has
-  no row in the profile in use gets one, so it can be ticked. No button, and no
-  game launch.
-- **Nothing is ever switched on.** Added mods come up off, with a row in every
-  profile. This is the whole reason the above can run unattended: the toolkit
-  can put a mod in front of you, but it cannot change what the game loads.
-- **Rescan & add new mods** (was *Rescan*) on the dashboard does the same thing
-  on demand, for mods subscribed to while the toolkit is already open — which is
-  how you normally subscribe, in batches. Renamed because it now writes to the
-  game's database; a button labelled *Rescan* that silently registered thirty
-  mods would be a nasty surprise.
-- The mod manager no longer has a Register button, an *Add to profile* button, or
-  the *Add them all* banner. Its only write is **Apply changes**. A mod that
-  needs adding is tagged **not added** and points at the dashboard.
-
-### Added
-
-- The dashboard says what the last sync did — how many mods were added, and by
-  name — and which could not be read, and why.
-- If Civ6 is running, a sync is skipped and the reason is shown, rather than
-  attempted and failed.
-
-### Fixed
-
 - `registerMods()` ignored its `enabled` argument and always switched a mod on in
   the built-in group and the profile in use. Harmless while the only caller
   always wanted it on; under automatic syncing it would have switched mods on
@@ -118,10 +107,15 @@ New mods are added automatically. The Register button is gone.
 - A second sync with nothing new to do used to make a fresh backup, so every
   Rescan click spent one of the ten backups kept. It now returns before writing.
 
-### Note for anyone on v1.3.x
+### Note
 
-**Add to profile used to switch a mod on. It now leaves it off**, like everything
-else. Tick it in the mod manager as you would any other mod.
+Removing does not unsubscribe from Steam. The dialog links the Workshop page so
+that is one click away, but doing it for you would mean guessing at a `steam://`
+handler that may not exist for workshop items.
+
+**For anyone on v1.3.x: _Add to profile_ used to switch a mod on. It now leaves
+it off**, like everything else. Tick it in the mod manager as you would any
+other mod.
 
 ## v1.3.1 — 28 September 2026
 
