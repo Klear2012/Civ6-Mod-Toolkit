@@ -102,6 +102,26 @@ console.log('\nTest 2: create an empty profile');
   check('exactly one selected group', raw('SELECT count(*) n FROM ModGroups WHERE Selected = 1')[0].n === 1);
   check('existing profile untouched', (() => { const e = groupNamed('Existing'); return e.total === 2 && e.enabled === 2; })());
   check('default group untouched', (() => { const d0 = groupNamed('LOC_MODS_GROUP_DEFAULT_NAME'); return d0.total === 4 && d0.enabled === 1; })());
+
+  // Two profiles with the same name cannot be told apart in the dropdown, and
+  // nothing can say which one a save was played with.
+  const clash = db.createGroup(DB_PATH, 'Fresh');
+  check('a name already in use gets a suffix', clash.group.name === 'Fresh (2)', clash.group.name);
+  check('  and it is a real second profile', db.listGroups(DB_PATH).groups.filter((x) => x.name.startsWith('Fresh')).length === 2);
+  const cased = db.createGroup(DB_PATH, 'fresh');
+  // The suffix follows the spelling the user typed, not the one already stored.
+  check('a name differing only in case also gets a suffix', cased.group.name === 'fresh (3)', cased.group.name);
+  const longName = 'L'.repeat(100);
+  db.createGroup(DB_PATH, longName); // the first one is free, so it is kept as-is
+  const longClash = db.createGroup(DB_PATH, longName);
+  check('a long name is not pushed over the 100 character limit', longClash.group.name.length <= 100, `${longClash.group.name.length} chars`);
+  check('  and still ends in a suffix', /\(\d+\)$/.test(longClash.group.name), longClash.group.name.slice(-8));
+  const longFree = db.createGroup(DB_PATH, 'M'.repeat(100));
+  check('a free long name is left exactly as asked', longFree.group.name === 'M'.repeat(100), `${longFree.group.name.length} chars`);
+  check('groups unchanged after the check', (() => {
+    const n = db.listGroups(DB_PATH).groups.filter((x) => /^(Fresh|fresh|L{10}|M{10})/.test(x.name)).length;
+    return n === 6;
+  })());
 }
 
 // --- Test 3: duplicate ------------------------------------------------------
@@ -121,6 +141,18 @@ console.log('\nTest 3: duplicate a profile');
   db.applyChanges(DB_PATH, [{ modId: 'mod-a', enabled: false }]);
   const after = groupNamed('Existing');
   check('source unchanged after editing the copy', after.enabled === 2, `enabled=${after.enabled}`);
+
+  // Kept to the end of this test on purpose. Creating a group activates it, so
+  // doing this earlier would have left a different profile in use - and the
+  // applyChanges above edits the *active* profile, so its check would still have
+  // passed, for the wrong reason.
+  const dupClash = db.duplicateGroup(DB_PATH, src.id, 'AllOff');
+  check('duplicating onto a taken name gets a suffix', dupClash.group.name === 'AllOff (2)', dupClash.group.name);
+  check('  and it copied the source, not the profile it was named after',
+    dupClash.group.total === src.total && dupClash.group.enabled === src.enabled,
+    `total=${dupClash.group.total} enabled=${dupClash.group.enabled}`);
+  // Put the copy back in use, which is the state the next test expects.
+  db.activateGroup(DB_PATH, g.id);
 }
 
 // --- Test 4: rename ---------------------------------------------------------
@@ -132,6 +164,26 @@ console.log('\nTest 4: rename');
   check('renamed group is the active one', r.group.selected);
   check('empty name rejected', fails(() => db.renameGroup(DB_PATH, id, '   ')));
   check('unknown id rejected', fails(() => db.renameGroup(DB_PATH, 9999, 'x')));
+
+  // Renaming is an instruction about one profile, so a clash is refused rather
+  // than answered with a name the user did not type.
+  const taken = db.renameGroup(DB_PATH, id, 'Solo');
+  check('and the name it now holds is the one asked for', taken.group.name === 'Solo', taken.group.name);
+  const beforeClash = db.listGroups(DB_PATH).groups.length;
+  check('renaming onto a taken name is refused', fails(() => db.renameGroup(DB_PATH, id, 'Fresh (2)')));
+  check('  and no profile was renamed instead', db.listGroups(DB_PATH).groups.find((g) => g.id === id).name === 'Solo');
+  check('  and no extra profile was created', db.listGroups(DB_PATH).groups.length === beforeClash);
+  // 'Fresh' is a different profile (from Test 2), so this is a real clash that
+  // differs only in case. Compare with the check below: re-casing a profile's
+  // *own* name is not a clash, and must not be refused.
+  check('a clash is refused case-insensitively too', fails(() => db.renameGroup(DB_PATH, id, 'FRESH')));
+  // Renaming to the same letters in a different case is not a clash with itself.
+  const recase = db.renameGroup(DB_PATH, id, 'solo');
+  check('renaming to its own name in another case is allowed', recase.group.name === 'solo', recase.group.name);
+  // Put the name back: the next test looks this profile up as "Renamed", and
+  // these checks are not about that name.
+  db.renameGroup(DB_PATH, id, 'Renamed');
+  check('and it is back to the name the next test expects', groupNamed('Renamed').id === id);
 }
 
 // --- Test 5: activate -------------------------------------------------------

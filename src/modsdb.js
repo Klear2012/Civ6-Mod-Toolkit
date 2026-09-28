@@ -349,11 +349,13 @@ function listGroups(dbPath) {
   }
 }
 
-// Create an empty profile (everything off) and make it the active one.
+// Create an empty profile (everything off) and make it the active one. A name
+// that is already taken gets a " (2)" rather than a second profile the user
+// cannot tell apart in the dropdown.
 function createGroup(dbPath, name) {
   requireDb();
   const { result, backupPath } = mutateDb(dbPath, (db) => {
-    const id = insertGroup(db, name);
+    const id = insertGroup(db, unusedName(db, cleanName(name)));
     fillGroupDisabled(db, id);
     selectGroup(db, id);
     const group = requireGroup(db, id);
@@ -369,7 +371,7 @@ function duplicateGroup(dbPath, id, name) {
   requireDb();
   const { result, backupPath } = mutateDb(dbPath, (db) => {
     const source = requireGroup(db, id);
-    const newId = insertGroup(db, name);
+    const newId = insertGroup(db, unusedName(db, cleanName(name)));
     copyGroupItems(db, source.id, newId);
     selectGroup(db, newId);
     const group = requireGroup(db, newId);
@@ -383,9 +385,13 @@ function renameGroup(dbPath, id, name) {
   requireDb();
   const { result, backupPath } = mutateDb(dbPath, (db) => {
     const group = requireGroup(db, id);
-    db.prepare('UPDATE ModGroups SET Name = ? WHERE ModGroupRowId = ?').run(cleanName(name), group.id);
+    // Refused, not uniquified: renaming is an explicit instruction about one
+    // profile, and answering with a different name than the one asked for is
+    // worse than making them choose again.
+    const wanted = requireUnusedName(db, group.id, cleanName(name));
+    db.prepare('UPDATE ModGroups SET Name = ? WHERE ModGroupRowId = ?').run(wanted, group.id);
     const after = requireGroup(db, group.id);
-    if (after.name !== cleanName(name)) throw new Error('the profile was not renamed');
+    if (after.name !== wanted) throw new Error('the profile was not renamed');
     return { group: after };
   });
   return { backupPath, ...result };
@@ -465,15 +471,28 @@ function exportGroup(dbPath, id) {
   }
 }
 
-// "Name", "Name (2)", "Name (3)" ... so an import never silently replaces one.
+// "Name", "Name (2)", "Name (3)" ... so a new profile never silently takes an
+// existing one's name. Trimmed to fit cleanName's 100-character limit, but only
+// when a suffix is actually needed - a name that is free is left alone.
 function unusedName(db, wanted) {
   const taken = new Set(db.prepare('SELECT Name AS name FROM ModGroups').all().map((r) => String(r.name).toLowerCase()));
   if (!taken.has(wanted.toLowerCase())) return wanted;
   for (let n = 2; n < 1000; n++) {
-    const candidate = `${wanted} (${n})`;
+    const suffix = ` (${n})`;
+    const candidate = wanted.slice(0, 100 - suffix.length) + suffix;
     if (!taken.has(candidate.toLowerCase())) return candidate;
   }
-  return `${wanted} (${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')})`;
+  return `${wanted.slice(0, 80)} (${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')})`;
+}
+
+// The name `id` should get, or throw if it is already taken by another profile.
+// A rename is refused rather than quietly altered: the user typed a specific
+// name, and answering "B B (2)" would be worse than asking them to pick again.
+function requireUnusedName(db, id, wanted) {
+  const clash = db.prepare('SELECT Name AS name FROM ModGroups WHERE lower(Name) = lower(?) AND ModGroupRowId <> ?')
+    .get(wanted, Number(id));
+  if (clash) throw new Error(`there is already a profile called ${String(clash.name).slice(0, 100)}`);
+  return wanted;
 }
 
 // Create a new profile from an exported file and make it the active one. Mods
