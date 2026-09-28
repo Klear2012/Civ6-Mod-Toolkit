@@ -370,8 +370,13 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return send(res, 400, { error: e.code === 'ENOENT' ? 'folder not found' : e.message });
     }
+    // explorer.exe is a GUI program and its exit code means nothing: it returns
+    // 1 for a folder that opened perfectly well, and 1 for one that does not
+    // exist. So the code is ignored - the statSync above already proved the
+    // folder is there - and only Explorer failing to launch at all is worth
+    // reporting, which surfaces as ENOENT.
     execFile('explorer.exe', [folder], { windowsHide: true }, (err) => {
-      if (err) console.error(`Could not open ${folder}: ${err.message}`);
+      if (err && err.code === 'ENOENT') console.error('explorer.exe could not be launched');
     });
     return send(res, 200, { ok: true, folder });
   }
