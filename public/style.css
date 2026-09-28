@@ -135,6 +135,11 @@ select {
 .tag.local { color: var(--accent); border-color: var(--accent-dim); }
 .tag.workshop { color: #d2a8ff; border-color: #3b2d52; }
 .tag.dlc { color: var(--muted); }
+/* State colours for a .tag. .chip keeps the same treatment for badges meant to
+   be read across a room - found / not found, the change list - while a .tag
+   stays small; these only supply the colour. */
+.tag.good { color: var(--add); border-color: rgba(63,185,80,.45); }
+.tag.bad { color: var(--remove); border-color: rgba(248,81,73,.5); }
 .row.readonly { opacity: .6; }
 .row.pending-add { background: rgba(63,185,80,.10); border-color: rgba(63,185,80,.4); }
 .row.pending-remove { background: rgba(248,81,73,.10); border-color: rgba(248,81,73,.4); }

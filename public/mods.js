@@ -465,10 +465,14 @@ function detailsHtml(x) {
   }
   files.push(`<dt>Mod ID</dt><dd><code>${esc(m.id)}</code></dd>`);
 
+  // A .tag like the source label beside it, not a .chip. This row is a tag row,
+  // and the two had different font sizes - 11px against 12px - so their text sat
+  // on different baselines. .tag keeps its own quiet metrics; .tag.good and
+  // .tag.bad carry the state colour, so "disabled" still reads as a state.
   const stateTag = m.needsSync
     ? '<span class="tag unscanned" title="Use “Rescan &amp; add new mods” on the dashboard">not added yet</span>'
     : m.enabled == null ? '<span class="tag" title="The game doesn&#39;t list this in the active mod group (for example DLC you don&#39;t own)">not available</span>'
-    : isOn(m) ? '<span class="chip good">enabled</span>' : '<span class="chip bad">disabled</span>';
+    : isOn(m) ? '<span class="tag good">enabled</span>' : '<span class="tag bad">disabled</span>';
 
   // Remove lives here rather than on the row: it deletes files, so it should be
   // one deliberate control per mod, not 380 identical ones down a list.
