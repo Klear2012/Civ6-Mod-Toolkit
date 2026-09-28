@@ -741,6 +741,16 @@ console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing')
   check('a case difference in the folder is accepted', shouty.removed.length === 1, JSON.stringify(shouty.refused));
   check('it really is gone from Mods', raw('SELECT count(*) n FROM Mods WHERE lower(ModId)=?', ID)[0].n === 0);
   check('no profile still lists it', raw(`SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId=i.ModRowId WHERE lower(m.ModId)=?`, ID)[0].n === 0);
+  // The join above cannot see an orphan: a row whose ModRowId points at a mod
+  // that no longer exists has no match, so it is excluded by construction. This
+  // is the only assertion that would notice one, and a profile IS a set of
+  // ModGroupItems rows - an orphan inflates its "X of Y" count forever, with no
+  // symptom to notice it by. The schema declares ON DELETE CASCADE, but nothing
+  // in the toolkit turns PRAGMA foreign_keys on, so the cascade never fires and
+  // the explicit DELETEs in removeMods are the only thing keeping this clean.
+  check('and no profile row was left pointing at a mod that is gone',
+    raw('SELECT count(*) n FROM ModGroupItems WHERE ModRowId NOT IN (SELECT ModRowId FROM Mods)')[0].n === 0,
+    `${raw('SELECT count(*) n FROM ModGroupItems WHERE ModRowId NOT IN (SELECT ModRowId FROM Mods)')[0].n} orphans`);
   check('its file rows went with it', raw('SELECT count(*) n FROM ModFiles WHERE ModRowId NOT IN (SELECT ModRowId FROM Mods)')[0].n === 0);
   check('its ScannedFiles row went too', raw(`SELECT count(*) n FROM ScannedFiles WHERE Path LIKE '%Doomed%'`)[0].n === 0);
   check('a backup was made', !!shouty.backupPath && fs.existsSync(shouty.backupPath));
