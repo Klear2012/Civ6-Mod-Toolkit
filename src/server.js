@@ -370,16 +370,26 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return send(res, 400, { error: e.code === 'ENOENT' ? 'folder not found' : e.message });
     }
-    // explorer.exe reads each "/segment" of its argument as a switch, so the
-    // game's forward-slash path leaves it with no path at all and it opens
-    // Documents instead - silently, and with the same exit code as success.
-    // Verified: C:/... opens Documents, C:\... opens the folder. So convert at
-    // this boundary and nowhere else.
+    // Two separate things went wrong here, and each hid the other.
     //
-    // The exit code itself is still no use as a success flag - it is 1 either
-    // way - so it is ignored, and the statSync above is what proves the folder is
-    // there. Only Explorer failing to launch at all is worth a line.
-    execFile('explorer.exe', [paths.toNativePath(folder)], { windowsHide: true }, (err) => {
+    // 1. The path. explorer.exe reads each "/segment" of its argument as a
+    //    switch, so the game's forward-slash path left it with no path at all and
+    //    it opened Documents. Convert at this boundary and nowhere else.
+    //
+    // 2. The window. windowsHide: true sets STARTUPINFO.wShowWindow = SW_HIDE,
+    //    which Explorer inherits: it builds the window and the shell hides it.
+    //    The result is a flicker and nothing else, and a hidden window is still a
+    //    real entry in the shell's window list, so it looks like it opened. The
+    //    flag is not repeated here on purpose - it belongs on the tasklist and reg
+    //    calls, which are console programs that would otherwise flash a console.
+    //    explorer.exe is GUI-subsystem and never allocates one, so it bought
+    //    nothing and cost the window. Verified by launching the same path both
+    //    ways: with the flag nothing appeared, without it the folder opened.
+    //
+    // The exit code is not a success flag either - it is 1 whether the folder
+    // opened or not - so it is ignored, and the statSync above is what proves the
+    // folder is there. Only Explorer failing to launch at all is worth a line.
+    execFile('explorer.exe', [paths.toNativePath(folder)], (err) => {
       if (err && err.code === 'ENOENT') console.error('explorer.exe could not be launched');
     });
     return send(res, 200, { ok: true, folder });

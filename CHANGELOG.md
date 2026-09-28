@@ -50,14 +50,22 @@ Workshop page, and see its name properly.
   beside a `.chip` at 12px. The state is now a `.tag` too, with colour variants.
   The dashboard's found/not-found badge and the change list are `.chip` and are
   deliberately left alone — those are meant to be read across a room.
-- **The folder button opened Documents instead of the mod's folder.** The game
-  records paths with forward slashes even on Windows, and `explorer.exe` reads
-  the first field of an argument beginning with `/` as a *switch* — so given
-  `D:/Steam/…/289070/2573589760` it saw `/Steam`, `/steamapps`, `/workshop` as
-  unknown switches, was left with no path at all, and fell back to its default
-  folder. It exits non-zero either way, so nothing reported the mistake: the
-  window opened, just in the wrong place. Paths are now converted to native
-  separators at the point they cross into a native program, and nowhere else.
+- **The folder button didn't open the mod's folder.** Two separate faults, stacked,
+  each masking the other:
+  - It opened **Documents** instead, because the game records paths with forward
+    slashes even on Windows and `explorer.exe` reads the first field of an argument
+    beginning with `/` as a *switch* — given `D:/Steam/…/289070/2573589760` it saw
+    `/Steam`, `/steamapps` and `/workshop` as unknown switches, was left with no
+    path at all, and fell back to its default folder. Paths are now converted to
+    native separators where they cross into a native program, and nowhere else.
+  - Even with the right path, **no window appeared at all** — a flicker and
+    nothing more. `windowsHide: true` sets `STARTUPINFO.wShowWindow = SW_HIDE`,
+    which Explorer inherits, so it built the window and the shell hid it. A hidden
+    window is still a real entry in Explorer's window list, so it looks like it
+    worked. The flag is not repeated there on purpose: it belongs on the
+    `tasklist` and `reg` calls, which are console programs that would otherwise
+    flash one. `explorer.exe` is GUI-subsystem and never allocates a console, so
+    the flag bought nothing and cost the window.
 - `removeMods` skipped its folder checks entirely when given no source roots, so
   a destructive call could proceed because nobody passed an argument. It now
   refuses: it cannot prove the folder is safe.

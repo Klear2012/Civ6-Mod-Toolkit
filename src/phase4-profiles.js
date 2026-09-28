@@ -809,6 +809,18 @@ console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing')
     check('the explorer call converts at the boundary', /execFile\('explorer\.exe', \[paths\.toNativePath\(folder\)\]/.test(srv));
     check('and nothing else hands a raw forward-slash path to explorer',
       !/execFile\('explorer\.exe', \[folder\]/.test(srv));
+    // windowsHide sets STARTUPINFO.wShowWindow = SW_HIDE, which Explorer inherits:
+    // it builds the window and the shell hides it. The folder opens correctly and
+    // you see a flicker and nothing else - and because a hidden window is still a
+    // real entry in the shell's window list, a check that enumerates windows
+    // reports success. There is no runtime symptom to assert on, so the only place
+    // to catch it is here.
+    const explorerCall = (srv.match(/execFile\('explorer\.exe'[^;]*/) || [''])[0];
+    check('the explorer call does not pass windowsHide', !/windowsHide/.test(explorerCall), explorerCall.slice(0, 80));
+    check('  which is the whole difference from a working launch',
+      /execFile\('explorer\.exe', \[paths\.toNativePath\(folder\)\], \(err\)/.test(explorerCall));
+    // The flag still belongs on the console programs, where it stops a flash.
+    check('the console callers still hide their window', /execFile\('tasklist'.*windowsHide: true/.test(fs.readFileSync(path.join(__dirname, 'game.js'), 'utf8')));
   }
 }
 
