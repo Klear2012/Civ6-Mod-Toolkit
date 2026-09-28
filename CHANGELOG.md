@@ -12,15 +12,21 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 ## v1.5.0 — 28 September 2026
 
-Remove a mod from the mod manager, and fix a mod name that would not render.
+A mod manager you can actually drive: remove a mod, open its folder, open its
+Workshop page, and see its name properly.
 
 ### Added
 
+- **A folder button on every Workshop and local mod**, which opens its folder in
+  Explorer. A page cannot start Explorer itself — `file://` links are blocked from
+  an `http://` page — so the server does it, taking ids only and re-deriving the
+  folder from the database. A mod whose folder is gone shows the button disabled,
+  labelled *folder not found*.
 - **Remove mod**, in a mod's details panel. It takes the mod out of the game and
   out of every profile, and deletes its folder from disk. The dialog names the
   exact folder first, because the files cannot be undone — only the database is
   backed up.
-- The dashboard lists mods the game still records that are no longer on disk
+- The dashboard lists mods that are recorded by the game but no longer on disk
   (unsubscribed, or deleted by hand) and points at the same button. They are only
   ever listed, never removed automatically: a mod part-way through a Steam
   download looks exactly like one just unsubscribed, and quietly deleting those
@@ -28,12 +34,28 @@ Remove a mod from the mod manager, and fix a mod name that would not render.
 
 ### Fixed
 
+- **Clicking the `workshop` label toggled the mod instead of opening the Workshop
+  page.** The whole row is the on/off switch, and `paneClick` only spared what was
+  a `<button>` or an `<a>`; the label was a `<span>`, so it was neither. It is now
+  a real link, which fixes it structurally rather than adding another case to the
+  handler. The separate `↗` it replaces, and the CSS only it used, are gone.
 - A mod whose name contains an XML entity rendered as a literal `&amp;amp;`, and
   its colour markup showed as visible `<span>` text. Two causes: the text was
-  escaped a second time after the colour tags had already been turned into HTML,
-  and the entity was never decoded. The game stores the raw `&amp;`, so the fix
-  is at the point of display only — decoding earlier would have stopped the
-  database matching what the game writes.
+  escaped a second time after the colour tags had already become HTML, and the
+  entity was never decoded. The game stores the raw `&amp;`, so the fix is at the
+  point of display only — decoding earlier would have stopped the database
+  matching what the game writes.
+- The `workshop` and `enabled`/`disabled` labels in a mod's details sat on
+  different baselines, because they were different components: a `.tag` at 11px
+  beside a `.chip` at 12px. The state is now a `.tag` too, with colour variants.
+  The dashboard's found/not-found badge and the change list are `.chip` and are
+  deliberately left alone — those are meant to be read across a room.
+- `explorer.exe` returns exit code 1 whether the folder opened or not, so the
+  console was logging a failure for every folder that opened perfectly well. The
+  code is ignored now; the folder is checked before launch instead.
+- `removeMods` skipped its folder checks entirely when given no source roots, so
+  a destructive call could proceed because nobody passed an argument. It now
+  refuses: it cannot prove the folder is safe.
 
 ### Note
 

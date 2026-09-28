@@ -93,14 +93,19 @@ when it starts.
 
    Prefer moving mods between lists? Switch to **Two panes** and click a mod to
    move it across. The toolkit remembers which view you picked.
-3. Click **i** on any mod for its details: description, authors, version, what
+3. Each row has three controls. The **workshop** label opens the mod's Workshop
+   page and the **folder** icon opens its folder in Explorer — neither changes
+   whether the mod is on. The **arrow** moves it on or off, and so does clicking
+   anywhere else in the row. A mod whose folder is gone (unsubscribed, or
+   deleted) shows the icon greyed out.
+4. Click **i** on any mod for its details: description, authors, version, what
    it changes, what it needs, what needs it, what it's incompatible with, which
-   of your `.Civ6Cfg` configurations use it, and its folder, size and Workshop
+   of your `.Civ6Cfg` configurations use it, its folder, size and Workshop
    page.
-4. Warnings appear under a mod that is turned on but needs something that's off
+5. Warnings appear under a mod that is turned on but needs something that's off
    or missing (**Turn it on** fixes it), or that conflicts with another mod
    that's on.
-5. Click **Apply changes** (or **Discard**). The game must be **closed** —
+6. Click **Apply changes** (or **Discard**). The game must be **closed** —
    applying is blocked while Civ6 runs. Changes take effect the next time you
    start the game.
 
@@ -191,7 +196,8 @@ configuration).
 - Removing a mod only ever touches Workshop and local mods. The folder comes
   from the database, never from the page, and is refused if it is a mod source
   folder, a folder containing one, or anything the game recorded as base game or
-  DLC. Nothing is removed without a click.
+  DLC. The same rules guard the folder button, and they live in one place so the
+  two cannot drift.
 
 ## Authors & feedback
 
