@@ -979,3 +979,5 @@ $('modDialogBody').addEventListener('click', async (e) => {
     btn.disabled = false;
   }
 });
+
+function deliberatelyBroken( {
