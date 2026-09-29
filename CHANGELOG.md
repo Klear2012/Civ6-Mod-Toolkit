@@ -10,7 +10,16 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
-## Unreleased
+## v1.6.0 — 29 September 2026
+
+Two features in the mod manager: your own labels on mods, and an order for the
+list. Neither changes what the game loads — they are about finding your way
+round a library of several hundred.
+
+There is no v1.5.1. **v1.5.0** is tagged but was never published: the release
+build failed its checks, so no zip and no release page were produced for it. It
+is skipped here rather than backfilled, and this is the first release since
+v1.3.1.
 
 ### Added
 
