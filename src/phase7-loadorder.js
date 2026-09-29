@@ -501,19 +501,267 @@ if (real && fs.existsSync(real)) {
   console.log('    node src/phase7-loadorder.js "C:/Users/<you>/AppData/Local/Firaxis Games/Sid Meier\'s Civilization VI/Mods.sqlite"');
 }
 
-console.log('\nTest 9: nothing was left open');
-{
-  check('every read connection was closed', liveConns.size === 0, `${liveConns.size} still open`);
-}
+// The rest is async, because writing to the game's database is. It is a promise
+// chain rather than top-level await, which CommonJS does not allow.
+(async () => {
+  // Backups cannot be counted by file: modsdb names them to the second, so
+  // several writes in the same second collapse into one file. What can be
+  // checked is that a backup exists and points at a real copy.
+  const newestBackup = () => {
+    const all = fs.readdirSync(TMP).filter((f) => f.startsWith('Mods.sqlite.bak-'));
+    return all.length ? path.join(TMP, all.sort().pop()) : null;
+  };
+  const OPEN = async () => ({ running: false, known: true, processes: [] });
+  const RUNNING = async () => ({ running: true, known: true, processes: ['CivilizationVI.exe'] });
+  const crOf = (id) => {
+    const d = db();
+    try { return d.prepare('SELECT ComponentRowId AS c FROM Components WHERE ComponentId = ?').get(id).c; } finally { d.close(); }
+  };
+  const keyOf = (id) => {
+    const d = db();
+    try { return lo.actionKey(d, crOfIn(d, id)); } finally { d.close(); }
+  };
+  // One connection for both, so a helper cannot leak a handle of its own.
+  const crOfIn = (d, id) => d.prepare('SELECT ComponentRowId AS c FROM Components WHERE ComponentId = ?').get(id).c;
+  const firstCrIn = (d, id) => d.prepare('SELECT MIN(ComponentRowId) AS c FROM Components WHERE ComponentId = ?').get(id).c;
+  const stored = (id, k) => { const v = lo.readOverrides(OV_PATH); return (v.overrides[normId(id)] || {})[k]; };
+  const dbValue = (cr) => {
+    const d = db();
+    try { const r = d.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'").get(cr); return r ? String(r.v) : null; } finally { d.close(); }
+  };
+  const modRowId = (id) => {
+    const d = db();
+    try { const r = d.prepare('SELECT ModRowId AS r FROM Mods WHERE lower(ModId) = lower(?)').get(id); return r ? r.r : null; } finally { d.close(); }
+  };
+  const staleOf = (id) => {
+    const d = db();
+    try { return lo.stampIsStale(d, modRowIdIn(d, id)); } finally { d.close(); }
+  };
+  const modRowIdIn = (d, id) => d.prepare('SELECT ModRowId AS r FROM Mods WHERE lower(ModId) = lower(?)').get(id).r;
+  const fileOf = (id) => {
+    const d = db();
+    try { return lo.modFile(d, modRowIdIn(d, id)).path; } finally { d.close(); }
+  };
 
-// The cleanup must never decide whether the suite passed. maxRetries because
-// Windows can hold the copied database a moment after the last read.
-try {
-  fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
-} catch (e) {
-  console.log(`  (note: scratch dir ${TMP} could not be removed: ${e.code} ${e.message})`);
-}
-console.log('\n============================================================');
-console.log(pass ? 'LOAD ORDER: ALL CHECKS PASSED' : 'LOAD ORDER: FAILURES PRESENT');
-console.log('============================================================');
-process.exit(pass ? 0 : 1);
+  console.log('\nTest 9: refusing to write while the game has the database open');
+  {
+    try { fs.unlinkSync(OV_PATH); } catch (_) { /* absent */ }
+    const k = keyOf('PatchOne');
+    const before = newestBackup();
+    let msg = '';
+    try {
+      await lo.applyOverrides(DB_PATH, [{ modId: M1, key: k, value: 4242 }], { file: OV_PATH, statusFn: RUNNING });
+    } catch (e) { msg = e.message; }
+    check('apply refuses while Civilization VI is running', /close Civilization VI/.test(msg), msg);
+    check('  and says why, naming the database', /mod database open/.test(msg));
+    check('  and wrote nothing', dbValue(crOf('PatchOne')) !== '4242');
+    check('  and took no backup', newestBackup() === before, `${newestBackup()} vs ${before}`);
+    check('  and stored no intent', lo.readOverrides(OV_PATH).count === 0);
+
+    let rmsg = '';
+    try { await lo.resetOverride(DB_PATH, M1, k, { file: OV_PATH, statusFn: RUNNING }); } catch (e) { rmsg = e.message; }
+    check('reset refuses too', /close Civilization VI/.test(rmsg), rmsg);
+  }
+
+  console.log('\nTest 10: applying by hand');
+  {
+    try { fs.unlinkSync(OV_PATH); } catch (_) { /* absent */ }
+    const kOne = keyOf('PatchOne');
+    const kTwo = keyOf('PatchTwo');   // the one whose property is spelled LaodOrder
+    const kThree = keyOf('Strings');
+    const crOne = crOf('PatchOne');
+    const crTwo = crOf('PatchTwo');
+    const crThree = crOf('Strings');
+
+    const r = await lo.applyOverrides(DB_PATH, [
+      { modId: M1, key: kOne, value: 4242 },
+      { modId: M1, key: kTwo, value: 7000 },
+      { modId: M1, key: kThree, value: 8000 },
+    ], { file: OV_PATH, statusFn: OPEN });
+
+    check('three overrides in one call all land',
+      r.applied.length === 3 && r.applied.every((a) => typeof a.componentRowId === 'number'),
+      `applied ${r.applied.length}`);
+    check('  each value is in the database', dbValue(crOne) === '4242' && dbValue(crThree) === '8000',
+      `${dbValue(crOne)} / ${dbValue(crThree)}`);
+    check('  and a backup exists and is a real file',
+      typeof r.backupPath === 'string' && fs.existsSync(r.backupPath) && fs.statSync(r.backupPath).size > 0,
+      r.backupPath);
+
+    // The misspelled property: the write goes to a correctly spelled row and the
+    // author's typo is left exactly as it was.
+    const d = db();
+    const typoRow = d.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LaodOrder'").get(crTwo);
+    const goodRow = d.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'").get(crTwo);
+    d.close();
+    check('an action whose property is spelled LaodOrder is overridden anyway', r.applied.some((a) => a.key === kTwo),
+      JSON.stringify(r.applied.map((a) => a.key)));
+    check('  by writing a correctly spelled LoadOrder row', !!goodRow && String(goodRow.v) === '7000', JSON.stringify(goodRow));
+    check('  and leaving the mod\'s own misspelled row untouched',
+      !!typoRow && String(typoRow.v) === '200', JSON.stringify(typoRow));
+
+    // Numbers, because the file round trip normalises them - which is also what
+    // a hand-edited file gets.
+    check('the author\'s value is recorded, so reset is possible', stored(M1, kOne).declared === 9999, JSON.stringify(stored(M1, kOne)));
+    check('  and for the misspelled one it is read from the row the mod actually wrote', stored(M1, kTwo).declared === 200, JSON.stringify(stored(M1, kTwo)));
+
+    // And the stamp, which is what stops the game re-deriving on next launch.
+    const mr = modRowId(M1);
+    check('  and the mod is on disk, so it can be stamped at all', mr !== null, String(mr));
+    check('  and its stamp is fresh, so the game will not re-derive it',
+      staleOf(M1) === false, String(staleOf(M1)));
+
+    // A sentinel is reported, never refused.
+    const s = await lo.applyOverrides(DB_PATH, [{ modId: M1, key: kOne, value: 10000001 }], { file: OV_PATH, statusFn: OPEN });
+    check('a value past the load-last sentinel is applied and reported',
+      s.applied.length === 1 && s.sentinels.length === 1, JSON.stringify(s.sentinels));
+
+    // An override that resolves to nothing, or to more than one thing, is
+    // reported and never written.
+    const bad = await lo.applyOverrides(DB_PATH, [
+      { modId: M1, key: 'UpdateDatabase\nnope\nno.sql', value: 1 },
+      { modId: M2, key: 'UpdateDatabase\nNewAction\nBase/Shared.sql', value: 2 },
+    ], { file: OV_PATH, statusFn: OPEN });
+    check('an unresolvable key is reported, not written',
+      bad.orphans.length === 1 && bad.ambiguous.length === 1 && bad.applied.length === 0,
+      `orphans ${bad.orphans.length} ambiguous ${bad.ambiguous.length} applied ${bad.applied.length}`);
+    check('  and the ambiguity says how many matched', /2 actions match/.test(String(bad.ambiguous[0].reason)), String(bad.ambiguous[0].reason));
+    check('  and nothing was stored for either, so the three real ones are still three',
+      lo.readOverrides(OV_PATH).count === 3, String(lo.readOverrides(OV_PATH).count));
+
+    // A mod whose .modinfo is not on disk gets the value but is reported as
+    // unprotectable, because nothing can keep its stamp.
+    const kBase = (() => {
+      const d = db();
+      try { return lo.actionKey(d, firstCrIn(d, 'Lonely')); } finally { d.close(); }
+    })();
+    const un = await lo.applyOverrides(DB_PATH, [{ modId: M2, key: kBase, value: 999 }], { file: OV_PATH, statusFn: OPEN });
+    check('a mod with no .modinfo on disk still takes the value', un.applied.length === 1, JSON.stringify(un.applied));
+    check('  and is reported as unprotectable rather than treated as safe',
+      un.unprotectable.length === 1 && un.unprotectable[0] === normId(M2), JSON.stringify(un.unprotectable));
+  }
+
+  console.log('\nTest 11: putting one back');
+  {
+    const k = keyOf('PatchOne');
+    const r = await lo.resetOverride(DB_PATH, M1, k, { file: OV_PATH, statusFn: OPEN });
+    // 9999, because that is what Test 6 left as this action's declared value.
+    // The sentinel apply after it must NOT have replaced that with the override
+    // it wrote - which is exactly the bug this expectation caught.
+    check('reset restores the value the author declared', r.restored === 9999 && dbValue(crOf('PatchOne')) === '9999',
+      `${r.restored} / ${dbValue(crOf('PatchOne'))}`);
+    check('  and forgets the override', stored(M1, k) === undefined);
+    let msg = '';
+    try { await lo.resetOverride(DB_PATH, M1, k, { file: OV_PATH, statusFn: OPEN }); } catch (e) { msg = e.message; }
+    check('  and resetting again is refused', /no override is stored/.test(msg), msg);
+  }
+
+  console.log('\nTest 12: sync at startup');
+  {
+    // Nothing stored, nothing to do, and above all no backup spent.
+    try { fs.unlinkSync(OV_PATH); } catch (_) { /* absent */ }
+    const before = newestBackup();
+    let s = lo.syncOverrides(DB_PATH, { file: OV_PATH });
+    check('with no overrides, sync does nothing', s.changed === false && s.applied.length === 0);
+    check('  and spends no backup', newestBackup() === before, `${newestBackup()} vs ${before}`);
+
+    s = lo.syncOverrides(DB_PATH, { file: OV_PATH, gameRunning: true });
+    check('with the game running it is deferred, never silently skipped',
+      s.deferred === true && /Civilization VI is running/.test(String(s.reason)), JSON.stringify(s.reason));
+    check('  and nothing was written', newestBackup() === before, `${newestBackup()} vs ${before}`);
+
+    // Two overrides, both already matching and the stamp fresh: a sync that
+    // runs on every launch must be free.
+    const k1 = keyOf('Strings');
+    await lo.applyOverrides(DB_PATH, [{ modId: M1, key: k1, value: 300 }], { file: OV_PATH, statusFn: OPEN });
+    const mid = newestBackup();
+    s = lo.syncOverrides(DB_PATH, { file: OV_PATH });
+    check('a sync with nothing to repair writes nothing', s.changed === false && s.drifted.length === 0);
+    check('  and takes no backup', newestBackup() === mid, `${newestBackup()} vs ${mid}`);
+
+    // Now the event everything exists for: the mod updated. The file moved, the
+    // game would re-derive, and every row id is replaced.
+    const k2 = keyOf('PatchOne');
+    await lo.applyOverrides(DB_PATH, [{ modId: M1, key: k2, value: 4242 }], { file: OV_PATH, statusFn: OPEN });
+    const file = fileOf(M1);
+    fs.writeFileSync(file, '<Mod id="aaaaaaaa-1111-4111-8111-111111111111"><V2/></Mod>');
+    const w = new DatabaseSync(DB_PATH);
+    // What the game actually does on a rescan: every row replaced, and the
+    // values put back to what the .modinfo declares. A simulation that only
+    // renumbered the ids would leave the values already correct, and the sync
+    // would have nothing to repair - which is how this first looked like it
+    // worked when it had not been tested at all.
+    w.exec('UPDATE Mods SET ModRowId = ModRowId + 500');
+    w.exec('UPDATE Components SET ComponentRowId = ComponentRowId + 5000, ModRowId = ModRowId + 500');
+    w.exec('UPDATE ComponentProperties SET ComponentRowId = ComponentRowId + 5000');
+    w.exec('UPDATE ComponentFiles SET ComponentRowId = ComponentRowId + 5000');
+    w.exec("UPDATE ComponentProperties SET Value = '9999' WHERE Name = 'LoadOrder'");
+    w.exec("UPDATE ComponentProperties SET Value = '300' WHERE Name = 'LoadOrder' AND ComponentRowId IN (SELECT ComponentRowId FROM Components WHERE ComponentId = 'Strings')");
+    w.close();
+
+    const preSync = lo.staleMods(DB_PATH, { file: OV_PATH });
+    check('a mod that updated is reported stale before it is repaired',
+      preSync.stale.length === 1 && preSync.stale[0] === normId(M1), JSON.stringify(preSync.stale));
+
+    s = lo.syncOverrides(DB_PATH, { file: OV_PATH });
+    // One, not three: the simulated rescan put Strings back to 300, which is
+    // what it should be, and PatchTwo's row is the misspelled LaodOrder one a
+    // rescan does not touch. Only the sentinel override had actually drifted.
+    check('one sync repairs what had drifted', s.changed === true && s.applied.length === 1,
+      `changed ${s.changed} applied ${s.applied.length}`);
+    // `drifted` names what needed repairing, so the one that was repaired is in
+    // it - and Strings and PatchTwo are not, which is the point of the check.
+    check('  and reports exactly the one it repaired, and nothing else', s.drifted.length === 1,
+      JSON.stringify(s.drifted.map((d) => d.key)));
+    check('  from the value the rescan put back to the value asked for',
+      s.drifted[0].from === '9999' && s.drifted[0].to === '4242', JSON.stringify(s.drifted[0]));
+    // A new backup cannot be seen: modsdb names them to the second, so a write
+    // in the same second as the last one reuses that name. What is checkable is
+    // that the path is reported and is a real file.
+    check('  and a backup path is reported, pointing at a real file',
+      typeof s.backupPath === 'string' && fs.existsSync(s.backupPath), String(s.backupPath));
+    check('  against the NEW row ids, not the ones that were replaced',
+      s.applied.length > 0 && s.applied.every((a) => a.componentRowId > 5000),
+      JSON.stringify(s.applied.map((a) => a.componentRowId)));
+
+    const d3 = db();
+    const cr = d3.prepare('SELECT ComponentRowId AS c FROM Components WHERE ComponentId = ?').get('PatchOne').c;
+    d3.close();
+    check('  the value is back on the renumbered row', dbValue(cr) === '4242', String(dbValue(cr)));
+    check('  and the stamp is fresh again, so the first launch is right',
+      staleOf(M1) === false, String(staleOf(M1)));
+    check('  and nothing is reported stale any more', lo.staleMods(DB_PATH, { file: OV_PATH }).stale.length === 0);
+  }
+
+  console.log('\nTest 13: sync reports what it will not do');
+  {
+    // Two more entries that cannot be repaired, and must be reported separately
+    // from drift rather than quietly dropped.
+    const v = lo.readOverrides(OV_PATH);
+    const next = { ...v.overrides };
+    next[normId(M1)] = { ...(next[normId(M1)] || {}), 'UpdateDatabase\ngone\nx.sql': { value: 1 } };
+    next[normId(M2)] = { 'UpdateDatabase\nNewAction\nBase/Shared.sql': { value: 2 } };
+    lo.writeOverrides(OV_PATH, next);
+    const s = lo.syncOverrides(DB_PATH, { file: OV_PATH });
+    check('an orphaned override is reported', s.orphans.length >= 1, JSON.stringify(s.orphans.map((o) => o.reason)));
+    check('an ambiguous one is reported separately', s.ambiguous.length >= 1, JSON.stringify(s.ambiguous.map((a) => a.reason)));
+    check('  and neither was written', s.applied.every((a) => a.key !== 'UpdateDatabase\ngone\nx.sql'));
+    // Clean up so the connection check is not the only thing left clean.
+    lo.writeOverrides(OV_PATH, {});
+  }
+
+  console.log('\nTest 14: nothing was left open');
+  check('every read connection was closed', liveConns.size === 0, `${liveConns.size} still open`);
+
+  // The cleanup must never decide whether the suite passed. maxRetries because
+  // Windows can hold the copied database a moment after the last read.
+  try {
+    fs.rmSync(TMP, { recursive: true, force: true, maxRetries: 10, retryDelay: 100 });
+  } catch (e) {
+    console.log(`  (note: scratch dir ${TMP} could not be removed: ${e.code} ${e.message})`);
+  }
+  console.log('\n============================================================');
+  console.log(pass ? 'LOAD ORDER: ALL CHECKS PASSED' : 'LOAD ORDER: FAILURES PRESENT');
+  console.log('============================================================');
+  process.exit(pass ? 0 : 1);
+})().catch((e) => { console.error(e); process.exit(1); });

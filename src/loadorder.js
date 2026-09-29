@@ -19,7 +19,8 @@ const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { normId } = require('./modinfo');
 const { atomicWrite } = require('./editor');
-const { fileTimeOf } = require('./modsdb');
+const { fileTimeOf, mutateDb } = require('./modsdb');
+const { gameStatus } = require('./game');
 
 const VERSION = 1;
 // A key is a type, an id and a file list. Nothing in the library makes one this
@@ -404,10 +405,306 @@ function stampIsStale(db, modRowId) {
   return String(row.t) !== stampFor(file.path);
 }
 
+// ---------------------------------------------------------------------------
+// Applying
+// ---------------------------------------------------------------------------
+
+// Civ6's "load last, override everything" sentinel. Moving an action off one of
+// these changes the author's intent, so the caller is told - it is not refused,
+// because a refusal here would be the toolkit overruling a decision the user
+// made on purpose.
+const SENTINEL = 10000000;
+
+function modRowOf(db, modIdNorm) {
+  const r = db.prepare('SELECT ModRowId FROM Mods WHERE lower(ModId) = lower(?)').get(modIdNorm);
+  return r ? r.ModRowId : null;
+}
+
+// The two real misspellings in the wild, read but never written. A mod that
+// ships `LaodOrder` has told us its position, and refusing to look at it would
+// leave reset with nothing to go back to and the view unable to say what the
+// author declared. Reading it is not the same as touching it: writeValue only
+// ever writes the correctly spelled row.
+const MISSPELLINGS = ['LaodOrder', 'LoadingOrder'];
+
+// What the game currently has for one action. The correctly spelled row wins;
+// a misspelled one is the fallback, because it is the only other record of what
+// the mod asked for.
+function currentValue(db, componentRowId) {
+  const row = db.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'")
+    .get(componentRowId);
+  if (row) return String(row.v);
+  for (const name of MISSPELLINGS) {
+    const alt = db.prepare('SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = ?')
+      .get(componentRowId, name);
+    if (alt) return String(alt.v);
+  }
+  return null;
+}
+
+// Always the correctly spelled row: update it if it exists, and add it if not,
+// so an action that declared no position can be given one. A misspelled row is
+// left exactly as the mod shipped it, and never blocks the write.
+function writeValue(db, componentRowId, value) {
+  const r = db.prepare("UPDATE ComponentProperties SET Value = ? WHERE ComponentRowId = ? AND Name = 'LoadOrder'")
+    .run(String(value), componentRowId);
+  if (r.changes === 0) {
+    db.prepare("INSERT INTO ComponentProperties (ComponentRowId, Name, Value) VALUES (?, 'LoadOrder', ?)")
+      .run(componentRowId, String(value));
+  }
+}
+
+function writeStamp(db, scannedFileRowId, value) {
+  db.prepare('UPDATE ScannedFiles SET LastWriteTime = ? WHERE ScannedFileRowId = ?').run(value, scannedFileRowId);
+}
+
+// One stored override, and what is actually true of it right now.
+function inspect(db, modIdNorm, key, wanted) {
+  const res = resolveAction(db, modIdNorm, key);
+  const out = { modId: modIdNorm, key, state: res.state, componentRowId: res.componentRowId, candidates: res.candidates };
+  if (res.state !== FIND) return out;
+  const before = currentValue(db, res.componentRowId);
+  return {
+    ...out,
+    before,
+    wanted: String(wanted),
+    // A missing row is drift too: the action declares nothing, and the override
+    // is what gives it a position.
+    drifted: before !== String(wanted),
+  };
+}
+
+// One mod's worth of work: the overrides on it, and whether its stamp needs
+// re-writing. The stamp is maintained whether or not any value drifted, because
+// it is what stops the game re-deriving the whole mod.
+function planMod(db, modIdNorm, set) {
+  const modRowId = modRowOf(db, modIdNorm);
+  if (modRowId === null) {
+    return { modId: modIdNorm, missing: true, entries: [], stale: false, protectable: false };
+  }
+  const entries = Object.entries(set).map(([key, e]) => inspect(db, modIdNorm, key, e.value));
+  const file = modFile(db, modRowId);
+  return {
+    modId: modIdNorm,
+    modRowId,
+    missing: false,
+    entries,
+    // null means not on disk: nothing to stamp, and nothing to claim.
+    stale: stampIsStale(db, modRowId),
+    protectable: !!(file && file.onDisk),
+    scannedFileRowId: file ? file.scannedFileRowId : null,
+  };
+}
+
+function needsWrite(mods) {
+  return mods.some((m) => !m.missing && (m.stale === true || m.entries.some((e) => e.drifted && e.state === FIND)));
+}
+
+// Fold what was applied into the store, in one file write.
+//
+// A declared value already on file always wins over one read out of the database
+// during this apply. By then the database holds the override, not the author's
+// choice, so taking the fresh reading would replace 9999 with 4242 and leave
+// reset restoring the override. Only a first apply, which has nothing on file,
+// takes the value it read.
+function recordApplied(file, applied) {
+  const current = readForWrite(file, null);
+  const next = { ...current.overrides };
+  for (const a of applied) {
+    const id = normId(a.modId);
+    const set = { ...(next[id] || {}) };
+    const onFile = set[a.key] ? set[a.key].declared : undefined;
+    const declared = onFile !== undefined ? onFile : a.declared;
+    set[a.key] = declared === undefined || declared === null ? { value: a.value } : { value: a.value, declared };
+    next[id] = set;
+  }
+  writeOverrides(file, next);
+  return readOverrides(file, null);
+}
+
+// The write itself, shared by apply and sync so the two cannot drift.
+//
+// Every entry's value and the mod's stamp go in the same transaction, because
+// a value committed with a stale stamp is a value the game removes on its next
+// launch: the user watches it apply and then vanish. If the stamp cannot be
+// written, the value must not be either.
+function writeAll(db, mods) {
+  const applied = [];
+  for (const m of mods) {
+    if (m.missing) continue;
+    for (const e of m.entries) {
+      if (e.state !== FIND || !e.drifted) continue;
+      // `wanted`, not `value`: inspect() returns the wanted value under that
+      // name, and reading e.value wrote the string "undefined" into the
+      // database while every check that only counted rows went green.
+      writeValue(db, e.componentRowId, e.wanted);
+      // The row it landed on, so a caller can show or re-check it. It is the
+      // NEW id after a rescan, which is the whole point of resolving by key.
+      applied.push({ modId: m.modId, key: e.key, value: Number(e.wanted), declared: e.before, componentRowId: e.componentRowId });
+    }
+    if (m.protectable && m.stale === true) writeStamp(db, m.scannedFileRowId, stampFor(modFile(db, m.modRowId).path));
+  }
+  return applied;
+}
+
+function summarise(mods, applied, backupPath) {
+  const drifted = [];
+  const orphans = [];
+  const ambiguous = [];
+  const unprotectable = [];
+  for (const m of mods) {
+    if (m.missing) { orphans.push({ modId: m.modId, reason: 'no such mod' }); continue; }
+    if (!m.protectable) unprotectable.push(m.modId);
+    for (const e of m.entries) {
+      const at = { modId: m.modId, key: e.key, candidates: e.candidates };
+      if (e.state === MISSING) orphans.push({ ...at, reason: 'no action matches that key' });
+      else if (e.state === AMBIGUOUS) ambiguous.push({ ...at, reason: `${e.candidates.length} actions match that key` });
+      else if (e.drifted) drifted.push({ ...at, from: e.before, to: e.wanted });
+    }
+  }
+  const sentinels = applied.filter((a) => a.value >= SENTINEL).map((a) => ({ modId: a.modId, key: a.key, value: a.value }));
+  return {
+    changed: applied.length > 0 || mods.some((m) => m.stale === true),
+    applied, drifted, orphans, ambiguous, unprotectable, sentinels, backupPath,
+  };
+}
+
+// Apply a set of overrides by hand. One transaction, one backup, whatever the
+// size of the set.
+//
+// The game check is inside this function and awaited, not left to the caller.
+// An experiment script during the investigation read the result of an async
+// gameStatus() as a plain object, so `running` was always undefined and the
+// guard never fired - it looked like it was refusing to write while Civ6 ran
+// and was not. A safety check that cannot fail is not a safety check.
+async function applyOverrides(dbPath, entries, opts = {}) {
+  const file = opts.file || overridesFile();
+  // Injectable so the guard can be tested without starting Civilization VI.
+  // The default is the real check, and there is no way to pass "skip it".
+  const status = opts.statusFn || gameStatus;
+  if (!Array.isArray(entries) || !entries.length) throw new Error('no overrides to apply');
+
+  const game = await status();
+  if (game.running) throw new Error('close Civilization VI first - it has the mod database open');
+
+  const stored = readOverrides(file);
+  if (stored.unusable) throw new Error(`${stored.error} - nothing was written`);
+
+  const clean = entries.map((e) => ({
+    modId: cleanModId(e.modId), key: cleanKey(e.key), value: cleanValue(e.value),
+  }));
+
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const mods = clean.map((e) => planMod(db, e.modId, { [e.key]: { value: e.value } }));
+    return summarise(mods, writeAll(db, mods), null);
+  });
+  // The store is written after the database commits, never before. A store
+  // write that failed would leave an override that works but is not recorded, so
+  // it is not re-applied after an update - loud, and fixable. The other order
+  // would leave an override that does not work at all.
+  recordApplied(file, result.applied);
+  return { ...result, backupPath };
+}
+
+// Put one action back to the author's value, in the database and in the store.
+async function resetOverride(dbPath, modId, key, opts = {}) {
+  const file = opts.file || overridesFile();
+  const status = opts.statusFn || gameStatus;
+  const id = cleanModId(modId);
+  const k = cleanKey(key);
+
+  const game = await status();
+  if (game.running) throw new Error('close Civilization VI first - it has the mod database open');
+
+  const stored = readOverrides(file);
+  if (stored.unusable) throw new Error(`${stored.error} - nothing was written`);
+  const entry = (stored.overrides[id] || {})[k];
+  if (!entry) throw new Error('no override is stored for that action');
+  if (entry.declared === undefined) {
+    throw new Error("the author's value for that action was never recorded, so there is nothing to go back to");
+  }
+
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const mods = [planMod(db, id, { [k]: { value: entry.declared } })];
+    return summarise(mods, writeAll(db, mods), null);
+  });
+  clearOverride(file, id, k);
+  return { ...result, restored: entry.declared, backupPath };
+}
+
+// Run on server start, before the mod list is served. That is what makes an
+// override correct on the FIRST launch after a mod update, which is the only
+// launch that matters.
+//
+// Reads first and opens the write path only if something is actually wrong: the
+// app keeps ten database backups and spends them deliberately, and this runs on
+// every launch.
+function syncOverrides(dbPath, opts = {}) {
+  const file = opts.file || overridesFile();
+  const stored = readOverrides(file);
+  if (stored.unusable) {
+    return { ok: false, deferred: false, error: stored.error, applied: [], drifted: [], orphans: [], ambiguous: [], unprotectable: [] };
+  }
+  if (opts.gameRunning) {
+    // Reported, never silently skipped: the overrides stay as they are and the
+    // mod list says the sync was deferred.
+    return { ok: true, deferred: true, reason: 'Civilization VI is running', changed: false, applied: [], drifted: [], orphans: [], ambiguous: [], unprotectable: [] };
+  }
+  if (stored.count === 0) {
+    return { ok: true, deferred: false, changed: false, applied: [], drifted: [], orphans: [], ambiguous: [], unprotectable: [] };
+  }
+
+  const d = openDb(dbPath);
+  let mods;
+  try {
+    mods = Object.keys(stored.overrides).map((id) => planMod(d, id, stored.overrides[id]));
+  } finally {
+    d.close();
+  }
+
+  if (!needsWrite(mods)) {
+    const survey = summarise(mods, [], null);
+    return { ...survey, ok: true, deferred: false, changed: false, backupPath: null };
+  }
+
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    // Re-planned inside the transaction, so what is written is decided from the
+    // state being written to rather than from a read that has since gone stale.
+    const fresh = Object.keys(stored.overrides).map((id) => planMod(db, id, stored.overrides[id]));
+    return summarise(fresh, writeAll(db, fresh), null);
+  });
+  return { ...result, ok: true, deferred: false, backupPath };
+}
+
+// Which mods have an override and a stamp the game will not agree with - that
+// is, the ones it will re-register and re-derive on its next launch. Read-only,
+// one stat per overridden mod, and the thing the mod list turns into
+// "N mods updated since your last sync".
+function staleMods(dbPath, opts = {}) {
+  const file = opts.file || overridesFile();
+  const stored = readOverrides(file);
+  if (stored.unusable) return { stale: [], error: stored.error, unusable: true };
+  if (stored.count === 0) return { stale: [], error: null, unusable: false };
+
+  const d = openDb(dbPath);
+  const stale = [];
+  try {
+    for (const id of Object.keys(stored.overrides)) {
+      const modRowId = modRowOf(d, id);
+      if (modRowId === null) continue;
+      if (stampIsStale(d, modRowId) === true) stale.push(id);
+    }
+  } finally {
+    d.close();
+  }
+  return { stale, error: null, unusable: false };
+}
+
 module.exports = {
-  VERSION, FIND, MISSING, AMBIGUOUS,
+  VERSION, FIND, MISSING, AMBIGUOUS, SENTINEL,
   overridesFile, openDb,
   keyFor, actionKey, resolveAction, isModId,
   readOverrides, writeOverrides, setOverride, clearOverride,
   modFile, stampFor, stampIsStale,
+  applyOverrides, resetOverride, syncOverrides, staleMods,
 };

@@ -1204,4 +1204,9 @@ module.exports = {
   findUnregistered, findRemoved, removeMods, modFolderFault,
   exportGroup, importGroup, EXPORT_TOOLKIT,
   registerMod, registerMods, readModinfoMeta, parseModinfo, fileTimeOf, lastWriteMs,
+  // One backup, BEGIN IMMEDIATE, rollback on error, restore from the backup if
+  // the post-commit check fails. Every write to the game's database goes through
+  // here so those rules live in one place. It was left unexported while a
+  // one-off experiment reimplemented it - correct for that, wrong for a feature.
+  mutateDb,
 };
