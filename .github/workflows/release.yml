@@ -70,9 +70,14 @@ jobs:
             if ($LASTEXITCODE -ne 0) { throw "syntax error in $($_.Name)" }
           }
 
-      - name: Verify the profile operations
-        # Seeded mode: builds its own throwaway database, touches no game files.
-        run: npm run phase4
+      - name: Verify the release gate
+        # The list lives in package.json as check:release, so adding a suite to
+        # the gate is a one-file change and this file cannot drift out of step
+        # with it. Currently phase4, phase5 and phase6 - the three that seed
+        # their own scratch data. phase1 and phase2 need a real .Civ6Cfg in the
+        # git-ignored fixtures folder and so fail on every machine, runner
+        # included; a gate that is always red is a gate nobody reads.
+        run: npm run check:release
 
       - name: Refuse to publish without a tag
         # Only reachable by dispatch: a tag push never gets here with an empty
