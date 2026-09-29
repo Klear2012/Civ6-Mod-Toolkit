@@ -26,6 +26,12 @@ function toast(msg, kind, detail) {
   toast._t = setTimeout(() => (t.hidden = true), kind === 'err' ? 8000 : 5000);
 }
 
+// A number for display, or nothing. Lives here rather than in a page because
+// three scripts wanted it and two of them declared it, which is a SyntaxError
+// in a browser: classic scripts share one global scope, and a duplicate
+// top-level const makes the browser discard BOTH files.
+const n = (v) => (v == null ? '' : Number(v).toLocaleString());
+
 function esc(s) {
   return String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
     { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));

@@ -24,12 +24,6 @@ const lo = {
   hideOff: false, // rows that will not run are noise unless asked for
 };
 
-const esc = (s) => String(s == null ? '' : s)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
-const n = (v) => (v == null ? '' : Number(v).toLocaleString());
-
 function loMatches(a, q) {
   if (!q) return true;
   return `${a.modName} ${a.type} ${a.id || ''}`.toLowerCase().includes(q);
@@ -200,7 +194,7 @@ function renderHeader() {
   $('loCompare').textContent = cmp ? `Comparing with "${cmp.name}" — clear` : 'Clear comparison';
 }
 
-function render() {
+function renderLoOrder() {
   renderAlerts();
   renderHeader();
   renderList();
@@ -226,7 +220,7 @@ async function loadLoOrder() {
   } catch (err) {
     lo.data = { ok: false, error: err.message, groups: [], bands: [], summary: {}, undeclared: [] };
   }
-  render();
+  renderLoOrder();
 }
 
 $('loFilter').addEventListener('input', (e) => { lo.filter = e.target.value; renderList(); });

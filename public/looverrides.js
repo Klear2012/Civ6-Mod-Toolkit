@@ -14,12 +14,6 @@
 
 const lov = { data: null };
 
-const esc = (s) => String(s == null ? '' : s)
-  .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-  .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
-
-const n = (v) => (v == null ? '' : Number(v).toLocaleString());
-
 const STATE_TEXT = {
   applied: 'in place',
   drifted: 'drifted — the database has a different value',
@@ -56,7 +50,7 @@ function rowHtml(o) {
   </div>`;
 }
 
-function render() {
+function renderOverrides() {
   const d = lov.data;
   const alerts = [];
   if (d && !d.ok) alerts.push(`<div class="alert warn"><b>Can't read your overrides.</b> ${esc(d.error || '')}</div>`);
@@ -83,13 +77,13 @@ async function load() {
   } catch (err) {
     lov.data = { ok: false, error: err.message, overrides: [], count: 0 };
   }
-  render();
+  renderOverrides();
 }
 
 async function post(path, body) {
   const d = await postJson(path, body);
   lov.data = d;
-  render();
+  renderOverrides();
   return d;
 }
 
