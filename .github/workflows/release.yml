@@ -13,6 +13,13 @@ name: Release
 #
 # Re-running: "Run workflow" rebuilds the release for a tag that already exists,
 # so a failed publish never needs the tag deleted and pushed again.
+#
+# Running the checks without publishing: dispatch with mode=verify, and with the
+# tag left empty to check whatever ref you dispatched from. Every check below
+# still runs and the job is still red if one fails - only the zip and the release
+# are skipped. This is how the checks are exercised on an ordinary commit, given
+# that this is the only workflow in the repo and it otherwise speaks up only when
+# a tag is pushed.
 on:
   push:
     tags:
@@ -20,8 +27,15 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build the release for, e.g. v1.1.0'
-        required: true
+        description: 'Tag to build the release for, e.g. v1.1.0. Empty means the ref you dispatched from.'
+        required: false
+      mode:
+        description: 'verify runs every check and publishes nothing'
+        type: choice
+        options:
+          - publish
+          - verify
+        default: publish
 
 permissions:
   contents: write
@@ -60,7 +74,21 @@ jobs:
         # Seeded mode: builds its own throwaway database, touches no game files.
         run: npm run phase4
 
+      - name: Refuse to publish without a tag
+        # Only reachable by dispatch: a tag push never gets here with an empty
+        # tag, because that is the normal case. Made optional so the checks can
+        # be run against a branch, which would otherwise let "publish" be asked
+        # for with nothing to publish and fail obscurely on the last step.
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.mode == 'publish' && inputs.tag == '' }}
+        shell: pwsh
+        run: |
+          Write-Error "mode=publish needs a tag. Pass one, or use mode=verify to run the checks only."
+          exit 1
+
       - name: Build the zip
+        # Publishing only. On a tag push inputs.mode is empty, which is not
+        # 'verify', so a real release is unaffected by this condition.
+        if: ${{ inputs.mode != 'verify' }}
         id: build
         shell: pwsh
         env:
@@ -96,6 +124,7 @@ jobs:
           "zip=dist/$zip" >> $env:GITHUB_OUTPUT
 
       - name: Create the release
+        if: ${{ inputs.mode != 'verify' }}
         shell: pwsh
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
