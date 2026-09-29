@@ -270,6 +270,50 @@ this installation doesn't know rather than failing.
 `npm run phase4` proves the operations against a throwaway database and, when
 given a path, against a copy of a real `Mods.sqlite`.
 
+## Verification — what has to pass before a release
+
+**`npm run check:release` is the gate.** It runs `phase4`, `phase5` and `phase6`,
+and `.github/workflows/release.yml` runs that script and nothing else decides
+whether a release happens. Those three are in the gate because each seeds its own
+throwaway data — a temp SQLite database, a temp label store, pure functions — and
+so can run on any machine, including a clean CI one.
+
+| Suite | Covers | In the gate |
+|---|---|---|
+| `phase0` | round-trips a real `.Civ6Cfg` | **no** — needs a fixture you supply |
+| `phase1` | scan a Saves folder, diff it | **no** — needs a fixture you supply |
+| `phase2` | add/remove/save a config | **no** — needs a fixture you supply |
+| `phase4` | profiles, registration, removal, native paths | yes |
+| `phase5` | the label store, including a rescan that renumbers `ModRowId` | yes |
+| `phase6` | the six sort orderings, and the page's wiring to them | yes |
+
+`phase0`, `phase1` and `phase2` need a real `.Civ6Cfg` in `fixtures/`, which is
+git-ignored because a real config names your game and session. They are
+deliberately kept out: a suite that fails on every machine, CI included, makes a
+gate permanently red, and a permanently red gate is one people learn to read
+past. `phase0` now says so and exits non-zero rather than reporting a pass it
+did not earn.
+
+**A new area adds a suite, and the suite joins the gate.** The list is in
+`package.json` as `check:release`, so adding a suite and adding it to the gate
+are the same edit and `release.yml` cannot drift out of step.
+
+**Running the checks without publishing.** Dispatch `release.yml` with
+`mode=verify` and leave the tag empty to check whatever branch you are on. Every
+check runs, the job still goes red on a failure, and the zip and the release are
+skipped. This is the only workflow in the repo, and it otherwise speaks up only
+when a tag is pushed — which is how a defect that broke `phase4` went unnoticed
+on `main` and was only found by trying to release v1.5.0. An always-on `ci.yml`
+on every push was considered and declined, on the grounds that this is a
+single-developer project with no PR flow.
+
+**A suite that fails on the CI runner is a finding, not an obstacle.** Repair the
+suite. Do not drop it from the gate and do not add `continue-on-error` — that
+converts a finding into a silence, and the point of a gate is that the finding
+arrives before the release rather than after it. Note that CI pins Node 22 while
+a local checkout is likely on 24; the suites use `node:sqlite`, so a difference
+between the two is a real possibility rather than a hypothetical one.
+
 ## Possible follow-ups
 
 - Delete local mods / "open Steam page to unsubscribe" for Workshop mods.

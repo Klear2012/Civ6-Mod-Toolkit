@@ -276,11 +276,16 @@ in `public/`. The `.Civ6Cfg` format engine is `src/civ6cfg.js`, mod discovery is
 mod database, mod groups and registration are read and updated by
 `src/modsdb.js`, user-defined mod labels are stored by `src/labels.js` in
 `mod-labels.json`, and the mod list's orderings are in `public/modsort.js`.
-`npm run phase4` checks the profile and registration operations against a
-throwaway database, `npm run phase5` checks the label store — including that
-labels survive a simulated rescan that renumbers every `ModRowId`, which is the
-thing that would silently lose them all — and `npm run phase6` checks the six
-orderings, which are pure functions and so need no browser.
+`npm run check:release` runs the three suites that have to pass before anything
+is published: `phase4` checks the profile and registration operations against a
+throwaway database, `phase5` checks the label store — including that labels
+survive a simulated rescan that renumbers every `ModRowId`, which is the thing
+that would silently lose them all — and `phase6` checks the six orderings, which
+are pure functions and so need no browser. The release workflow runs that same
+script, so a change that breaks any of them cannot be published.
+`npm run phase0`, `phase1` and `phase2` check the `.Civ6Cfg` format itself and
+need a real config of your own in `fixtures/`; see
+[fixtures/README.md](fixtures/README.md).
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each release, and
 `FINDINGS.md` for the reverse-engineered file format and mod database schema.
