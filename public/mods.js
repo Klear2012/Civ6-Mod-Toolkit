@@ -11,12 +11,16 @@ const modsPage = {
   stateFilter: 'all',  // all | on | off (list view only)
   view: 'list',        // list | panes
   labels: new Set(),   // selected filter labels, lowercased
+  sort: 'name',        // which ordering, by key name
 };
 try { if (localStorage.getItem('modsView') === 'panes') modsPage.view = 'panes'; } catch (_) { /* storage blocked */ }
+const SORT_KEY = 'modsSort';
+try { modsPage.sort = localStorage.getItem(SORT_KEY) || 'name'; } catch (_) { /* storage blocked */ }
 
-// Comparing without regard to case, the same rule the store applies, so a
-// filter chip and a row's label chip always mean the same thing.
-const labelKey = (n) => String(n || '').toLowerCase();
+// A label name is free text the user typed, and the store compares it without
+// regard to case. Comparing without regard to case here too is what makes a
+// filter chip and a row's label chip the same thing.
+const labelKey = modsort.labelKey;
 
 // OR, not AND. Several labels selected show the mods carrying ANY of them.
 // AND would show only mods carrying every one, which is rarely what someone
@@ -83,11 +87,26 @@ function problemsOf(m, all, on = isOn) {
 
 function visibleMods() {
   const q = $('modsFilter').value.trim().toLowerCase();
-  return modsPage.data.mods.filter((m) => SRC_MATCH[modsPage.src](m)
+  const shown = modsPage.data.mods.filter((m) => SRC_MATCH[modsPage.src](m)
     && matchesLabels(m)
     && (modsPage.view === 'panes' || modsPage.stateFilter === 'all' || (modsPage.stateFilter === 'on') === isOn(m))
     && (!q || m.name.toLowerCase().includes(q) || m.idNorm.includes(q)
       || (m.teaser && m.teaser.toLowerCase().includes(q))));
+  // Sorting happens here, once, as the last step - not at each render site.
+  // This is the one place that answers "what is shown, and in what order", so
+  // the list view, both panes and the label dropdown's count all agree without
+  // any of them knowing about sorting. It cannot change which mods are shown,
+  // only their order, so the "N of M shown" count is unaffected by design.
+  return modsort.sortMods(shown, modsPage.sort, sortContext());
+}
+
+// What the orderings need to know about page state, injected rather than
+// imported: both of these reach into modsPage.pending, which lives on the page.
+// Mods with problems is the same problemsOf the warning count uses, so the order
+// and the number in the bottom bar cannot disagree.
+function sortContext() {
+  const all = modsPage.data ? byNorm() : new Map();
+  return { isOn, problemCount: (m) => problemsOf(m, all).length };
 }
 
 // ---- rows ------------------------------------------------------------------
@@ -245,6 +264,37 @@ function setLabelMenu(open) {
   if (open) renderLabelMenu();
 }
 
+// ---- sorting ---------------------------------------------------------------
+
+// Which keys are on offer right now, so the options are rebuilt only when that
+// actually changes. renderMods runs on every keystroke in the name filter, and
+// reassigning a <select>'s options while someone is reaching for it would close
+// it under their cursor.
+let sortSelectKeys = null;
+
+function renderSortSelect() {
+  const available = modsort.availableSorts(modsPage.data ? modsPage.data.mods : []);
+  modsPage.sort = modsort.resolveSortKey(modsPage.sort, available);
+  const sel = $('sortSelect');
+  const keys = available.map((s) => s.key).join();
+  if (keys !== sortSelectKeys) {
+    sortSelectKeys = keys;
+    sel.innerHTML = available
+      .map((s) => `<option value="${esc(s.key)}">${esc(s.label)}</option>`)
+      .join('');
+  }
+  if (sel.value !== modsPage.sort) sel.value = modsPage.sort;
+}
+
+$('sortSelect').addEventListener('change', (e) => {
+  modsPage.sort = e.target.value;
+  // Persisted for next time, and failing to persist is no reason to refuse to sort
+  // now - localStorage throws when storage is blocked, and the view preference
+  // already lives with that.
+  try { localStorage.setItem(SORT_KEY, modsPage.sort); } catch (_) { /* storage blocked */ }
+  renderMods();
+});
+
 function renderMods() {
   const d = modsPage.data;
   const all = byNorm();
@@ -285,6 +335,7 @@ function renderMods() {
   $('modsHint').textContent = (group ? `Editing mod group "${group}". ` : '') +
     'Changes are saved to the game when you click Apply, and take effect the next time you start Civ6.';
 
+  renderSortSelect();
   renderLabelTrigger();
   if (labelMenuIsOpen()) renderLabelMenu();
 

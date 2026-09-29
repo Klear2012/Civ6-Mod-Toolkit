@@ -212,6 +212,67 @@ console.log('\nTest 9: a stored key is only honoured if it can be sorted by');
     sort.SORTS.every((s, i) => withDates[i].key === sort.resolveSortKey(s.key, withDates)));
 }
 
+// --- Test 10: the wiring ----------------------------------------------------
+// The comparators above are checked by behaviour, but the page's use of them is
+// not: nothing here can click a native <select>, because Chrome draws its popup in
+// a layer the automation cannot reach. So the path from the control to the list is
+// asserted against the source instead - the same approach phase4 takes for the
+// explorer.exe call, for the same reason: there is no runtime symptom to catch it.
+console.log('\nTest 10: the wiring from the control to the list');
+{
+  const fs = require('fs');
+  const path = require('path');
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'mods.js'), 'utf8');
+  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+
+  // modsort.js must be parsed before mods.js runs: mods.js reads it at load, and
+  // `modsort.labelKey` against an undefined global throws before anything renders.
+  const at = (re) => { const m = re.exec(html); return m ? m.index : -1; };
+  check('modsort.js is loaded before mods.js, which reads it at load time',
+    at(/modsort\.js/) > -1 && at(/modsort\.js/) < at(/mods\.js/),
+    `modsort at ${at(/modsort\.js/)}, mods at ${at(/mods\.js/)}`);
+
+  check('the page reaches the orderings through the global the file publishes',
+    /modsort\.(sortMods|availableSorts|resolveSortKey|labelKey)/.test(page));
+  check('sorting happens in exactly one place - the end of visibleMods()',
+    /return modsort\.sortMods\(shown, modsPage\.sort, sortContext\(\)\)/.test(page)
+    && (page.match(/modsort\.sortMods\(/g) || []).length === 1,
+    `${(page.match(/modsort\.sortMods\(/g) || []).length} call sites`);
+
+  // Filters first, sort last: sorting before filtering would reorder mods the
+  // filters were about to exclude, which is harmless but means the order is not
+  // the one the user asked for among what is shown.
+  const visible = /function visibleMods\(\)[\s\S]*?\n\}/.exec(page);
+  check('the label and source filters are applied before the sort',
+    !!visible && visible[0].indexOf('matchesLabels(m)') < visible[0].indexOf('modsort.sortMods(')
+    && visible[0].indexOf('SRC_MATCH[modsPage.src](m)') < visible[0].indexOf('modsort.sortMods('));
+
+  check('the state ordering is given isOn, so a pending change counts as current',
+    /return \{ isOn, problemCount:/.test(page));
+  check('  and problemCount is problemsOf, the same function the warning bar uses',
+    /problemCount: \(m\) => problemsOf\(m, all\)\.length/.test(page));
+
+  check('the stored key is read at load, inside a try, defaulting to name',
+    /modsPage\.sort = localStorage\.getItem\(SORT_KEY\) \|\| 'name'/.test(page));
+  check('  and the change handler stores it back and re-renders',
+    /localStorage\.setItem\(SORT_KEY, modsPage\.sort\)/.test(page)
+    && /addEventListener\('change'[\s\S]{0,400}renderMods\(\)/.test(page));
+  check('  and a failed write does not stop the sort - the view preference does the same',
+    /localStorage\.setItem\(SORT_KEY, modsPage\.sort\); \} catch \(_\)/.test(page));
+
+  check('the select is built from the keys that can be sorted by, and the stored one validated',
+    /availableSorts\([\s\S]{0,160}resolveSortKey\(/.test(page));
+  check('the sort control is in the left half of the filter row',
+    /id="sortSelect"/.test(html)
+    && at(/id="sortSelect"/) > at(/class="filter-half"/)
+    && at(/id="sortSelect"/) < html.indexOf('class="filter-half"', at(/class="filter-half"/) + 1),
+    `first half at ${at(/class="filter-half"/)}, select at ${at(/id="sortSelect"/)}`);
+  // The reserved slot is gone. A comment still pointing at the spec would now be
+  // a lie about where the control is.
+  check('  and the placeholder it replaced is gone, not left as dead markup',
+    !/id="sortSlot"/.test(html) && !/SPEC-mod-sorting\.md puts the sort control/.test(html));
+}
+
 console.log('\n============================================================');
 console.log(pass ? 'SORTING: ALL CHECKS PASSED' : 'SORTING: FAILURES PRESENT');
 console.log('============================================================');

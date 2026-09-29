@@ -132,11 +132,11 @@
 
     <div class="filterbar" id="filterBar">
       <div class="filter-half">
-        <!-- SPEC-mod-sorting.md puts the sort control here. The half is built
-             so the row's proportions and spacing are settled now, but it is
-             left empty and uncaptioned: a heading over nothing reads as a
-             control that failed to load, which is worse than an empty half. -->
-        <span class="filter-slot" id="sortSlot"></span>
+        <span class="filter-caption">Sorting</span>
+        <!-- One labelled select, not a row of buttons: a single control does not
+             look lost in half a row, and the active key stays readable without
+             opening anything. -->
+        <select id="sortSelect" class="sort-select" title="How to order the mod list"></select>
       </div>
       <div class="filter-half">
         <span class="filter-caption">Label filters</span>
@@ -246,6 +246,7 @@
   <div id="toast" class="toast" hidden></div>
 
   <script src="app.js"></script>
+  <script src="modsort.js"></script>
   <script src="dashboard.js"></script>
   <script src="config.js"></script>
   <script src="mods.js"></script>
