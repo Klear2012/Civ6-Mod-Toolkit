@@ -10,8 +10,29 @@ const modsPage = {
   src: 'mods',         // mods | workshop | local | dlc
   stateFilter: 'all',  // all | on | off (list view only)
   view: 'list',        // list | panes
+  labels: new Set(),   // selected filter labels, lowercased
 };
 try { if (localStorage.getItem('modsView') === 'panes') modsPage.view = 'panes'; } catch (_) { /* storage blocked */ }
+
+// Comparing without regard to case, the same rule the store applies, so a
+// filter chip and a row's label chip always mean the same thing.
+const labelKey = (n) => String(n || '').toLowerCase();
+
+// OR, not AND. Several labels selected show the mods carrying ANY of them.
+// AND would show only mods carrying every one, which is rarely what someone
+// wants and quietly returns nothing at all - the worst possible answer to a
+// filter, because it looks like the labels are broken.
+function matchesLabels(m) {
+  if (!modsPage.labels.size) return true;
+  return (m.labels || []).some((n) => modsPage.labels.has(labelKey(n)));
+}
+
+function toggleLabelFilter(name) {
+  const k = labelKey(name);
+  if (modsPage.labels.has(k)) modsPage.labels.delete(k);
+  else modsPage.labels.add(k);
+  renderMods();
+}
 
 const SRC_MATCH = {
   mods: (m) => m.source === 'workshop' || m.source === 'local',
@@ -63,6 +84,7 @@ function problemsOf(m, all, on = isOn) {
 function visibleMods() {
   const q = $('modsFilter').value.trim().toLowerCase();
   return modsPage.data.mods.filter((m) => SRC_MATCH[modsPage.src](m)
+    && matchesLabels(m)
     && (modsPage.view === 'panes' || modsPage.stateFilter === 'all' || (modsPage.stateFilter === 'on') === isOn(m))
     && (!q || m.name.toLowerCase().includes(q) || m.idNorm.includes(q)
       || (m.teaser && m.teaser.toLowerCase().includes(q))));
@@ -167,6 +189,27 @@ function paneRow(m, all, arrow) {
 
 // ---- render ----------------------------------------------------------------
 
+// ---- label filter chips ----------------------------------------------------
+
+// The chips, one per label in use, each showing how many mods carry it. The
+// count is the point: a chip that would empty the list can be seen before it is
+// clicked, which is the one thing a chip this far from the list cannot otherwise
+// tell you. The server has already ordered them most-used first.
+function renderLabelChips() {
+  const d = modsPage.data;
+  const box = $('labelChips');
+  if (!d || !d.labelCounts || !d.labelCounts.length) {
+    box.innerHTML = '<span class="none">No labels yet — click <b>+</b> on a mod to add one.</span>';
+    return;
+  }
+  box.innerHTML = d.labelCounts.map((c) => {
+    const on = modsPage.labels.has(labelKey(c.name));
+    return `<button type="button" class="chip label-filter${on ? ' on' : ''}" data-label-filter="${esc(c.name)}"`
+      + ` aria-pressed="${on}" title="${esc(`${on ? 'Stop filtering by' : 'Show only mods labelled'} “${c.name}”`)}">`
+      + `${esc(c.name)}<span class="n">${c.count}</span></button>`;
+  }).join('');
+}
+
 function renderMods() {
   const d = modsPage.data;
   const all = byNorm();
@@ -203,6 +246,8 @@ function renderMods() {
   const group = d.activeGroup ? groupLabel(d.activeGroup) : '';
   $('modsHint').textContent = (group ? `Editing mod group "${group}". ` : '') +
     'Changes are saved to the game when you click Apply, and take effect the next time you start Civ6.';
+
+  renderLabelChips();
 
   const panes = modsPage.view === 'panes';
   $('stateFilter').hidden = panes;
@@ -291,6 +336,16 @@ $('viewSwitch').addEventListener('click', (e) => {
   renderMods();
 });
 $('modsFilter').addEventListener('input', () => modsPage.data && renderMods());
+
+// The filter chips are their own listener, not part of rowButtonClick: they sit
+// outside every row, so there is no row for a miss to fall through to. Claiming
+// them anyway would be the same defensive habit, and here there is nothing to
+// defend - the reason rowButtonClick must return true is that a <label> row
+// toggles a mod, and this is not one.
+$('labelChips').addEventListener('click', (e) => {
+  const b = e.target.closest('[data-label-filter]');
+  if (b) toggleLabelFilter(b.dataset.labelFilter);
+});
 
 // Buttons inside rows (both views): "Turn it on" fixes and details.
 function rowButtonClick(e) {
@@ -432,7 +487,7 @@ function labelEditorHtml() {
   // are simply every label in use - there is no second list to merge.
   const names = d.labelNames || [];
   const toggles = names.length
-    ? names.map((n) => `<button type="button" class="chip toggle${hasLabel(n) ? ' on' : ''}" data-toggle="${esc(n)}">${
+    ? names.map((n) => `<button type="button" class="chip label-toggle${hasLabel(n) ? ' on' : ''}" data-toggle="${esc(n)}">${
         esc(n)}${counts.has(n) ? `<span class="n">${counts.get(n)}</span>` : ''}</button>`).join('')
     : '<p class="hint">No labels yet. Type one below.</p>';
 

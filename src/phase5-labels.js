@@ -367,6 +367,18 @@ console.log('\nTest 10: the decisions the server makes about labels');
   check('the whole file is never sent by the page, only one mod id',
     /postJson\('\/api\/mods\/labels', \{ id: idNorm, labels: labelEdit\.names \}\)/.test(
       fs.readFileSync(path.join(__dirname, '..', 'public', 'mods.js'), 'utf8')));
+
+  // The filter combines as OR, not AND. Nothing at runtime can tell the
+  // difference when there is one chip, and with two it is the difference
+  // between a list of five and a list of one - so a refactor from some() to
+  // every() would pass every manual check anyone would think to do.
+  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'mods.js'), 'utf8');
+  const matches = /function matchesLabels\(m\) \{([\s\S]*?)\n\}/.exec(page);
+  check('a multi-label filter is a union, not an intersection',
+    matches && /\.some\(/.test(matches[1]) && !/\.every\(/.test(matches[1]),
+    matches ? matches[1].trim() : 'matchesLabels not found');
+  check('  and the filter narrows the visible list rather than replacing it',
+    /SRC_MATCH\[modsPage\.src\]\(m\)\s*\n\s*&& matchesLabels\(m\)/.test(page));
 }
 
 function cap(fn, ...args) {

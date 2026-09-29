@@ -130,6 +130,20 @@
       </div>
     </div>
 
+    <div class="filterbar" id="filterBar">
+      <div class="filter-half">
+        <!-- SPEC-mod-sorting.md puts the sort control here. The half is built
+             so the row's proportions and spacing are settled now, but it is
+             left empty and uncaptioned: a heading over nothing reads as a
+             control that failed to load, which is worse than an empty half. -->
+        <span class="filter-slot" id="sortSlot"></span>
+      </div>
+      <div class="filter-half">
+        <span class="filter-caption">Label filters</span>
+        <div class="label-chips" id="labelChips"></div>
+      </div>
+    </div>
+
     <div class="toolbar">
       <div class="seg" id="srcFilter">
         <button type="button" data-src="mods">All mods <span></span></button>
