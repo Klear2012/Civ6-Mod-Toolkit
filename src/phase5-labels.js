@@ -8,7 +8,9 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { DatabaseSync } = require('node:sqlite');
 const labels = require('./labels');
+const { scanMods } = require('./modinfo');
 // Deliberately not labels.js's own key: the point is to check that the store
 // keys by the same normalisation the mod list does, and using its own function
 // here would hide it if it ever stopped.
@@ -232,6 +234,102 @@ console.log('\nTest 8: writing over a broken file');
   check('a file with one bad entry is still writable', ok.labels[normId(ID_A)].join() === 'keep,added',
     JSON.stringify(ok.labels));
   check('  and the bad entry is gone from the file', !JSON.stringify(JSON.parse(fs.readFileSync(FILE, 'utf8'))).includes('oops'));
+}
+
+// --- Test 9: the mod's own GUID, not the row the game gave it ---------------
+// The constraint the spec says was learned the hard way. During a load-order
+// investigation a rescan moved two mods from ModRowId 1921/1758 to 2218/2219,
+// and anything keyed by ModRowId loses every label the next time Civ6 starts.
+//
+// This is the one test that would notice a regression to ModRowId keys, and
+// it is worth the synthetic database it needs: a test that cannot fail here
+// proves nothing about the thing that actually broke.
+console.log('\nTest 9: labels survive a rescan');
+{
+  const modsDir = path.join(TMP, 'mods');
+  const local = path.join(modsDir, 'Local');
+  const workshop = path.join(modsDir, 'Workshop');
+  for (const d of [local, workshop]) fs.mkdirSync(d, { recursive: true });
+
+  // Real .modinfo files, walked by the real scanner, so the id under test is
+  // the one the toolkit would actually key on.
+  const plant = (root, folder, id, name) => {
+    fs.mkdirSync(path.join(root, folder), { recursive: true });
+    fs.writeFileSync(path.join(root, folder, `${folder}.modinfo`),
+      `<?xml version="1.0" encoding="utf-8"?>\n<Mod id="${id}">\n\t<Properties>\n\t\t<Name>${name}</Name>\n\t</Properties>\n</Mod>\n`);
+    return id;
+  };
+  const GUID_1 = 'aaaaaaaa-1111-4111-8111-111111111111';
+  const GUID_2 = 'bbbbbbbb-2222-4222-8222-222222222222';
+  const Mover = plant(local, 'Mover', GUID_1, 'Mover');
+  const Stayer = plant(local, 'Stayer', GUID_2, 'Stayer');
+  const sources = [{ type: 'local', label: 'local', root: local, exists: true }];
+
+  const found = scanMods(sources);
+  check('the scanner finds both mods', found.length === 2, `${found.length} found`);
+  const ids = new Set(found.map((m) => m.idNorm));
+  check('  by the GUID from their .modinfo', ids.has(normId(GUID_1)) && ids.has(normId(GUID_2)));
+
+  labels.setLabels(FILE, GUID_1, ['favourite'], ids);
+  labels.setLabels(FILE, GUID_2, ['favourite', 'needs-testing'], ids);
+
+  // The game's database, and what a rescan does to it.
+  const dbPath = path.join(TMP, 'Mods.sqlite');
+  const seed = () => {
+    fs.rmSync(dbPath, { force: true });
+    const d = new DatabaseSync(dbPath);
+    d.exec(`CREATE TABLE Mods(ModRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, ModId TEXT NOT NULL);`);
+    for (const id of [GUID_1, GUID_2]) d.prepare('INSERT INTO Mods (ModId) VALUES (?)').run(id);
+    d.close();
+  };
+  const rowIds = () => {
+    const d = new DatabaseSync(dbPath, { readOnly: true });
+    try { return Object.fromEntries(d.prepare('SELECT ModRowId, ModId FROM Mods').all().map((r) => [normId(r.ModId), r.ModRowId])); }
+    finally { d.close(); }
+  };
+  seed();
+  const before = rowIds();
+  // A rescan: the game drops and rebuilds its rows, and the ids move. This is
+  // what happened to the two mods in the spec, and it is not hypothetical.
+  const d = new DatabaseSync(dbPath);
+  d.exec('UPDATE Mods SET ModRowId = ModRowId + 1000');
+  d.close();
+  const after = rowIds();
+
+  check('the rescan really did renumber the rows',
+    before[normId(GUID_1)] !== after[normId(GUID_1)] && before[normId(GUID_2)] !== after[normId(GUID_2)],
+    `${before[normId(GUID_1)]}->${after[normId(GUID_1)]}, ${before[normId(GUID_2)]}->${after[normId(GUID_2)]}`);
+
+  const v = labels.readLabels(FILE, ids);
+  check('every label is still attached to the same mod',
+    v.labels[normId(GUID_1)].join() === 'favourite' && v.labels[normId(GUID_2)].join() === 'favourite,needs-testing',
+    JSON.stringify(v.labels));
+  check('  and nothing was pruned as an orphan', v.pruned === 0, `pruned=${v.pruned}`);
+
+  // The negative control. If this passed for a ModRowId-keyed file, the test
+  // above would be proving nothing.
+  put({ version: 1, labels: { [String(before[normId(GUID_1)])]: ['favourite'] } });
+  const byRow = labels.readLabels(FILE, ids);
+  check('a file keyed by ModRowId loses the label on rescan, as it must',
+    byRow.labels[normId(GUID_1)] === undefined && byRow.pruned === 1,
+    JSON.stringify(byRow.labels));
+
+  // Moving a mod between the workshop and local folders changes its path, not
+  // its GUID. Criterion 3 of the spec.
+  labels.setLabels(FILE, GUID_1, ['favourite', 'mp-safe'], ids);
+  // Not created first: Windows refuses to rename a directory onto one that
+  // already exists, which is the sort of thing a test that only ever ran on
+  // Linux would not find.
+  const wsFolder = path.join(workshop, '12345');
+  fs.renameSync(path.join(local, 'Mover'), wsFolder);
+  const both = [...sources, { type: 'workshop', label: 'workshop', root: workshop, exists: true }];
+  const moved = scanMods(both);
+  const movedMod = moved.find((m) => m.idNorm === normId(GUID_1));
+  check('the mod is found in its new home', !!movedMod, moved.map((m) => `${m.name}:${m.type}`).join());
+  check('  and it is now a workshop mod', movedMod && movedMod.type === 'workshop');
+  const after2 = labels.readLabels(FILE, new Set(moved.map((m) => m.idNorm)));
+  check('  and both of its labels came with it',
+    after2.labels[normId(GUID_1)].join() === 'favourite,mp-safe', JSON.stringify(after2.labels[normId(GUID_1)]));
 }
 
 function cap(fn, ...args) {
