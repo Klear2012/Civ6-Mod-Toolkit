@@ -93,11 +93,11 @@ when it starts.
 
    Prefer moving mods between lists? Switch to **Two panes** and click a mod to
    move it across. The toolkit remembers which view you picked.
-3. Each row has three controls. The **workshop** label opens the mod's Workshop
-   page and the **folder** icon opens its folder in Explorer — neither changes
-   whether the mod is on. The **arrow** moves it on or off, and so does clicking
-   anywhere else in the row. A mod whose folder is gone (unsubscribed, or
-   deleted) shows the icon greyed out.
+3. Each row has four controls. The **workshop** label opens the mod's Workshop
+   page, the **folder** icon opens its folder in Explorer, and the **labels**
+   chip opens the label editor — none of them changes whether the mod is on. The
+   **arrow** moves it on or off, and so does clicking anywhere else in the row. A
+   mod whose folder is gone (unsubscribed, or deleted) shows the icon greyed out.
 4. Click **i** on any mod for its details: description, authors, version, what
    it changes, what it needs, what needs it, what it's incompatible with, which
    of your `.Civ6Cfg` configurations use it, its folder, size and Workshop
@@ -159,6 +159,26 @@ shows how many mods it has on. The game must be **closed** to change them.
 Worth exporting a profile as a backup now and then: a game patch that changes
 the mod database format can switch every mod back on.
 
+### Labels
+
+Your own labels on mods — *favourite*, *needs-testing*, *mp-safe* — for the
+things the game's own filters can't express. A mod can carry as many as are
+useful and counts towards each one.
+
+- Click the **+** on a mod's row to open the editor. Every label in use is a
+  one-click toggle showing how many mods carry it; type a new name to make one.
+  **Save** writes all of it at once, and the row updates straight away.
+- The **Label filters** row above the filters narrows the list. Each chip shows
+  how many mods have that label, so you can see whether it would leave you
+  nothing before clicking it. Several chips combine — you get the mods carrying
+  **any** of them, not all of them. Clearing them all brings the list back.
+- Labels are **yours**, stored in `mod-labels.json` beside `civ6-paths.json`.
+  They are the same in every profile, and survive Civ6 rescanning its database
+  and moving a mod between the Workshop and your local folder.
+
+A label that no mod carries stops being offered, and is forgotten. If you want
+to set a label up before the mods that use it, give it to one mod for now.
+
 ### Config editor
 
 1. Pick a **Configuration file** from the dropdown.
@@ -198,6 +218,17 @@ configuration).
   folder, a folder containing one, or anything the game recorded as base game or
   DLC. The same rules guard the folder button, and they live in one place so the
   two cannot drift.
+- **Labels are the one write that is not refused while Civ6 runs, and the one
+  with no backup.** Both because it writes `mod-labels.json` — a file the game
+  has never heard of and cannot be holding open — rather than the game's
+  database. Everything else in this list guards the game's files; this one
+  guards nothing but a few kilobytes of your own notes.
+- Labels are written to a temporary file and renamed into place, so an
+  interrupted save cannot leave a half-written file. A `mod-labels.json` that
+  has been corrupted, or hand-edited into a state the toolkit cannot read, shows
+  a warning and carries on with no labels rather than taking the mod list down
+  with it — and the toolkit refuses to overwrite it, so a bad file can still be
+  fixed by hand.
 
 ## Authors & feedback
 
@@ -213,10 +244,13 @@ Upstream is not being worked on, so issues filed there will not be seen.
 
 A small Node server (`src/server.js`) exposes a JSON API used by the browser UI
 in `public/`. The `.Civ6Cfg` format engine is `src/civ6cfg.js`, mod discovery is
-`src/modinfo.js` + `src/paths.js`, safe saving is `src/editor.js`, and the game's
+`src/modinfo.js` + `src/paths.js`, safe saving is `src/editor.js`, the game's
 mod database, mod groups and registration are read and updated by
-`src/modsdb.js`. `npm run phase4` checks the profile and registration operations
-against a throwaway database.
+`src/modsdb.js`, and user-defined mod labels are stored by `src/labels.js` in
+`mod-labels.json`. `npm run phase4` checks the profile and registration
+operations against a throwaway database, and `npm run phase5` checks the label
+store — including that labels survive a simulated rescan that renumbers every
+`ModRowId`, which is the thing that would silently lose them all.
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each release, and
 `FINDINGS.md` for the reverse-engineered file format and mod database schema.

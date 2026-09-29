@@ -10,6 +10,51 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
+## Unreleased
+
+### Added
+
+- **Your own labels on mods** — *favourite*, *needs-testing*, *mp-safe*, whatever
+  names you want. The mod list has filters for source, state and name, and
+  nothing for the judgement only you can make about which mods you actually
+  want. Labels are global rather than per profile, so the same set applies
+  whichever profile is in use.
+- **A labels editor on every mod row.** Unlabelled mods show a small **+**;
+  labelled ones show their labels. The editor lists every label in use as a
+  one-click toggle with a count, plus a field to make a new one, and saves the
+  lot in one write. A mod can carry as many labels as are useful and counts
+  towards each — capping it would force a choice nobody has a basis to make.
+- **A label filter row** under the profile bar, with a chip per label showing how
+  many mods carry it, so a chip that would empty the list can be seen before it
+  is clicked. Several chips combine as **or**, not and: you get the mods
+  carrying any of them. And-ing would show only mods carrying every one, which
+  is rarely what anyone wants and quietly returns nothing.
+- **`npm run phase5`**, which checks the label store against a scratch
+  directory. Its centrepiece is a rescan that renumbers every `ModRowId`, plus
+  a deliberately wrong file keyed by `ModRowId` that is read across the same
+  rescan and asserted to lose its labels — so the passing case cannot pass for
+  an unrelated reason.
+
+### Notes
+
+- Labels live in `mod-labels.json` beside `civ6-paths.json`, keyed by the mod's
+  own GUID from its `.modinfo` and **not** by `ModRowId`, which the game
+  renumbers on every rescan. Anything keyed by the row id loses every label the
+  next time Civ6 launches. This was found the hard way during the load-order
+  work, and is now covered by a test.
+- This is the only write in the toolkit that is **not** refused while Civ6 is
+  running, and the only one with no backup — both because it writes a file the
+  game has never heard of, rather than the game's database. Losing it costs a
+  few minutes of re-labelling; backing it up would leave `.bak-` files in the
+  project root.
+- A `mod-labels.json` that has been corrupted shows one warning and carries on
+  with no labels — a syntax error in a file the toolkit wrote itself must not be
+  able to take the mod list down. The toolkit also refuses to *write* over a file
+  it cannot read, so a bad one can still be fixed by hand.
+- The left half of the new filter row is deliberately empty. Sorting by label,
+  by name, by whether it is on, or by what needs attention is the natural next
+  step, and the space is already its own.
+
 ## v1.5.0 — 28 September 2026
 
 A mod manager you can actually drive: it finds new mods by itself, and you can
