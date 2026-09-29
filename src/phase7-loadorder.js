@@ -115,6 +115,7 @@ function seed() {
   addAction(w, m1, 'UpdateDatabase', 'AnySplitUnknown', ['Patches/AnySplitUnk.sql'], '5700');
   addAction(w, m1, 'UpdateDatabase', 'AndUnmetPlusUnknown', ['Patches/AndUnmet.sql'], '5800');
   addAction(w, m1, 'UpdateDatabase', 'AndMetPlusUnknown', ['Patches/AndMet.sql'], '5900');
+  addAction(w, m1, 'UpdateDatabase', 'GameOption', ['Patches/GameOption.sql'], '6000');
 
   // m1 is ON in Main and m3 is OFF in Main; the absent id names nothing.
   const G = (n, any, conds) => {
@@ -147,6 +148,20 @@ function seed() {
   w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AnyAllUnmet'), G(8, 1, [['ModInUse', 0, OFF3], ['ModInUse', 0, GONE]]));
   w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AnySplit'), G(9, 1, [['ModInUse', 0, ON1], ['ModInUse', 0, OFF3]]));
   w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AnySplitUnknown'), G(10, 1, [['ModInUse', 0, ON1], ['RuleSetInUse', 0, 'RULESET_EXPANSION_1']]));
+  // 13: a ConfigurationValueMatches condition, which is the only type here with
+  //     more than one property - ConfigurationId, Group and Value. It is also the
+  //     one no view can answer: measured, nothing in the library or the install
+  //     holds a GAMEMODE_ value, because the game keeps it in memory from the
+  //     main menu picker.
+  {
+    const crid = w.prepare('INSERT INTO Criteria (CriteriaRowId, ModRowId, CriteriaId, Any) VALUES (?, ?, ?, 0)').run(13, m1, 'GameOption').lastInsertRowid;
+    const c = w.prepare('INSERT INTO Criterion (CriterionRowId, CriteriaRowId, CriterionType, Inverse) VALUES (?, ?, ?, 0)').run(null, crid, 'ConfigurationValueMatches').lastInsertRowid;
+    for (const [n2, val] of [['ConfigurationId', 'GAMEMODE_MONOPOLIES'], ['Group', 'Game'], ['Value', '1']]) {
+      w.prepare("INSERT INTO CriterionProperties (CriterionRowId, Name, Value) VALUES (?, ?, ?)").run(c, n2, val);
+    }
+    w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('GameOption'), crid);
+  }
+
   // 11-12: AND sets. One unmet defeats the set however the other reads.
   w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AndUnmetPlusUnknown'), G(11, 0, [['ModInUse', 0, OFF3], ['RuleSetInUse', 0, 'RULESET_EXPANSION_1']]));
   w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AndMetPlusUnknown'), G(12, 0, [['ModInUse', 0, ON1], ['RuleSetInUse', 0, 'RULESET_EXPANSION_1']]));
@@ -1002,6 +1017,22 @@ if (real && fs.existsSync(real)) {
     check('  and no row decided false is left without saying why',
       decided.every((a) => a.willRun === true || a.reason),
       JSON.stringify(decided.filter((a) => !a.reason).map((a) => a.id)));
+    check('a condition with three properties is one condition, not three',
+      byId('GameOption').unknown.length === 1, JSON.stringify(byId('GameOption').unknown));
+    check('  and the row says so, having previously listed the same reason three times',
+      byId('GameOption').unknown[0].why.split(' - ').length === 2,
+      byId('GameOption').unknown[0].why);
+    check('  the reason names the game option, not just the criterion type',
+      /GAMEMODE_MONOPOLIES/.test(byId('GameOption').unknown[0].why)
+      && /main menu/.test(byId('GameOption').unknown[0].why),
+      byId('GameOption').unknown[0].why);
+    check('  and it is left undecided rather than guessed',
+      byId('GameOption').willRun === null, String(byId('GameOption').willRun));
+    check('a ruleset condition names the ruleset and says who picks it',
+      /RULESET_EXPANSION_1/.test(byId('PatchOne').unknown[0].why)
+      && /pick when you start a game/.test(byId('PatchOne').unknown[0].why),
+      byId('PatchOne').unknown[0].why);
+
     check('  and no row is left undecided without saying what it could not decide',
       undecided.every((a) => a.unknown && a.unknown.length > 0),
       JSON.stringify(undecided.filter((a) => !a.unknown || !a.unknown.length).map((a) => a.id)));

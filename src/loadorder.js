@@ -812,20 +812,47 @@ function readProfile(db, groupId) {
     declared.get(p.cr)[p.name] = String(p.value);
   }
 
-  const conds = new Map();
-  for (const c of db.prepare(
-    `SELECT cc.ComponentRowId AS cr, k.Any AS any,
-            cr.CriterionType AS type, cr.Inverse AS inverse, cp.Value AS value
+  // One item per CONDITION, not per property. The obvious join is wrong here:
+  // a ConfigurationValueMatches condition carries three properties -
+  // ConfigurationId, Group and Value - so joining CriterionProperties into the
+  // condition query yields three rows for one condition.
+  //
+  // No verdict was wrong, because every criterion type the view can decide
+  // happens to carry exactly one property, measured. But 22 criteria in the
+  // active profile inflated that way, all ConfigurationValueMatches, and each
+  // of those rows listed the same unreadable reason three times - and the row's
+  // own "and N more it cannot see" count was counting one condition as three.
+  // The duplication was already putting wrong information on screen.
+  const condRows = db.prepare(
+    `SELECT cc.ComponentRowId AS cr, k.Any AS any, cr.CriterionRowId AS id,
+            cr.CriterionType AS type, cr.Inverse AS inverse
        FROM ComponentCriteria cc
-       JOIN Components c      ON c.ComponentRowId = cc.ComponentRowId
-       JOIN ModGroupItems i   ON i.ModRowId = c.ModRowId
-       JOIN Criteria k        ON k.CriteriaRowId = cc.CriteriaRowId
-       JOIN Criterion cr      ON cr.CriteriaRowId = k.CriteriaRowId
-       LEFT JOIN CriterionProperties cp ON cp.CriterionRowId = cr.CriterionRowId
+       JOIN Components c    ON c.ComponentRowId = cc.ComponentRowId
+       JOIN ModGroupItems i ON i.ModRowId = c.ModRowId
+       JOIN Criteria k      ON k.CriteriaRowId = cc.CriteriaRowId
+       JOIN Criterion cr    ON cr.CriteriaRowId = k.CriteriaRowId
       WHERE i.ModGroupRowId = ? AND i.Disabled = 0`
-  ).all(groupId)) {
+  ).all(groupId);
+
+  // Properties are read whole and attached, rather than pivoted into columns,
+  // because which property carries the meaning depends on the criterion type and
+  // the reasons below need to name it.
+  const critProps = new Map();
+  for (const p of db.prepare('SELECT CriterionRowId AS id, Name AS name, Value AS value FROM CriterionProperties').all()) {
+    if (!critProps.has(p.id)) critProps.set(p.id, {});
+    critProps.get(p.id)[p.name] = p.value;
+  }
+
+  const conds = new Map();
+  for (const c of condRows) {
     if (!conds.has(c.cr)) conds.set(c.cr, { any: !!c.any, items: [] });
-    conds.get(c.cr).items.push({ type: c.type, inverse: !!c.inverse, value: c.value || null });
+    const kv = critProps.get(c.id) || {};
+    conds.get(c.cr).items.push({
+      type: c.type,
+      inverse: !!c.inverse,
+      value: kv.Value === undefined ? null : kv.Value,
+      props: kv,
+    });
   }
 
   return { on, rowToNorm, actions, declared, conds };
@@ -852,6 +879,34 @@ function declaredValueOf(declared, componentRowId) {
 // mind, and two of them exist because the first version got them wrong.
 const MAYBE = null;
 
+// Why this view cannot read a condition, in the words that help someone looking at
+// the row. "Depends on something this view cannot see" reads like a fault in the
+// row; the specific reason shows it is merely unanswerable here, which is a very
+// different thing to someone deciding whether to worry.
+//
+// These are measurements, not guesses. For ConfigurationValueMatches: no mod in
+// the library ships a GameConfig file (0 ModFiles rows mention one), the Civ6
+// install contains none, and DebugGameplay.sqlite - the 428-table database
+// UpdateDatabase actions write to - holds no GAMEMODE_ or CSE_ value in any table.
+// The value is state the game keeps in memory from the main menu's game-mode
+// picker, so it is not library state and no amount of reading the library gets it.
+function unreadableWhy(c) {
+  const v = c.value;
+  switch (c.type) {
+    case 'ConfigurationValueMatches':
+      return `needs ${(c.props && c.props.ConfigurationId) || 'a game option'} to be ${v}`
+        + ' - a game option picked in the main menu, so it is not known until the game starts';
+    case 'RuleSetInUse':
+      return `needs the ${v} ruleset - which you pick when you start a game, not something a profile sets`;
+    case 'GameCoreInUse':
+      return `needs the ${v} game core - that is a matter of which DLC is installed`;
+    case 'LeaderPlayable':
+      return `needs ${v} to be playable - which depends on who is in the game, not on the profile`;
+    default:
+      return `depends on ${c.type}, which this view cannot see`;
+  }
+}
+
 // One condition, three ways: satisfied, not satisfied, or not something this
 // view can read. Never a guess, and an inverted condition is inverted here
 // rather than skipped - skipping it made "NOT ModInUse(X)" read as satisfied
@@ -859,7 +914,10 @@ const MAYBE = null;
 // action as running that provably does not.
 function evalCondition(c, ctx) {
   if (!DECIDABLE.has(c.type)) {
-    return { sat: MAYBE, needs: `depends on something this view cannot see (${c.type})` };
+    // `needs`, not `why`: verdictOf reads one key off every branch, and a branch
+    // that spells it differently yields a reason of undefined - which is a row
+    // saying "cannot tell" with nothing after it.
+    return { sat: MAYBE, needs: unreadableWhy(c) };
   }
   const target = ctx.installed.get(normId(c.value));
   if (!target) {
