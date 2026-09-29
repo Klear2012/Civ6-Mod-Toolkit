@@ -884,12 +884,26 @@ const MAYBE = null;
 // row; the specific reason shows it is merely unanswerable here, which is a very
 // different thing to someone deciding whether to worry.
 //
-// These are measurements, not guesses. For ConfigurationValueMatches: no mod in
-// the library ships a GameConfig file (0 ModFiles rows mention one), the Civ6
-// install contains none, and DebugGameplay.sqlite - the 428-table database
-// UpdateDatabase actions write to - holds no GAMEMODE_ or CSE_ value in any table.
-// The value is state the game keeps in memory from the main menu's game-mode
-// picker, so it is not library state and no amount of reading the library gets it.
+// These are measurements, not guesses, and one of them corrected me.
+//
+// I first wrote that nothing on disk holds these values, having searched for
+// GAMEMODE_ as a VALUE. That search was wrong: DebugConfiguration.sqlite has a
+// `Parameters` table (75 rows) and DebugGameplay.sqlite has `GlobalParameters`
+// (476 rows), and neither is keyed by the column I was matching. Checked properly,
+// across every ConfigurationId-bearing table:
+//
+//   Parameters        75 rows  1 of the 41 ids appears: RULESET
+//   QueryParameters   23 rows  9 rows, all the same id: RULESET
+//   ParameterDependencies, ParameterCriteria, the Domain/Value* columns: 0
+//
+// So one of the forty-one ids the library names is known to the game at all, and
+// that one row has DefaultValue NULL - the game recording that it has no default,
+// which is the clearest statement available that the value is chosen at game start.
+// The other forty appear in no game database on this machine.
+//
+// No verdict is available from any of this, and none is claimed. What it buys is a
+// reason a user can check, which is the difference between a row that looks broken
+// and a row that is merely unanswerable here.
 function unreadableWhy(c) {
   const v = c.value;
   switch (c.type) {
@@ -897,7 +911,8 @@ function unreadableWhy(c) {
       return `needs ${(c.props && c.props.ConfigurationId) || 'a game option'} to be ${v}`
         + ' - a game option picked in the main menu, so it is not known until the game starts';
     case 'RuleSetInUse':
-      return `needs the ${v} ruleset - which you pick when you start a game, not something a profile sets`;
+      return `needs the ${v} ruleset - the game records RULESET with no default value`
+        + ' precisely because you choose it when you start a game';
     case 'GameCoreInUse':
       return `needs the ${v} game core - that is a matter of which DLC is installed`;
     case 'LeaderPlayable':

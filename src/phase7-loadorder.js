@@ -1049,10 +1049,13 @@ if (real && fs.existsSync(real)) {
       byId('GameOption').unknown[0].why);
     check('  and it is left undecided rather than guessed',
       byId('GameOption').willRun === null, String(byId('GameOption').willRun));
-    check('a ruleset condition names the ruleset and says who picks it',
+    check('a ruleset condition names the ruleset, and says who picks it',
       /RULESET_EXPANSION_1/.test(byId('PatchOne').unknown[0].why)
-      && /pick when you start a game/.test(byId('PatchOne').unknown[0].why),
+      && /when you start a game/.test(byId('PatchOne').unknown[0].why),
       byId('PatchOne').unknown[0].why);
+    check('  and cites the evidence rather than just asserting it',
+      /no default value/.test(byId('PatchOne').unknown[0].why),
+      'the game records RULESET with DefaultValue NULL, so there is no default to fall back on');
 
     check('  and no row is left undecided without saying what it could not decide',
       undecided.every((a) => a.unknown && a.unknown.length > 0),
