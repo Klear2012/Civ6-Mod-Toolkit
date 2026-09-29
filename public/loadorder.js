@@ -55,7 +55,15 @@ function stateBadge(a) {
 
 function conditionLine(a) {
   if (a.willRun === false) return `<span class="lo-cond lo-off">not run &mdash; ${esc(a.reason)}</span>`;
-  if (a.willRun === null && a.unknown && a.unknown.length) return `<span class="lo-cond lo-unknown">? ${esc(a.unknown[0].why)}</span>`;
+  if (a.willRun === null && a.unknown && a.unknown.length) {
+    // Name the first thing it could not decide, and say how many others there
+    // are. Showing only the first reads as "this is the one thing", which is a
+    // claim the row has not earned when a set gates on four unreadable conditions.
+    const more = a.unknown.length - 1;
+    return `<span class="lo-cond lo-unknown">? ${esc(a.unknown[0].why)}`
+      + (more > 0 ? ` <span class="lo-cond-more">and ${n(more)} more it cannot see</span>` : '')
+      + '</span>';
+  }
   return '';
 }
 

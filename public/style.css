@@ -508,6 +508,9 @@ button.small { padding: 5px 10px; font-size: 12.5px; }
 
 .lo-cond.lo-off { color: #f85149; }
 .lo-cond.lo-unknown { color: #d29922; }
+/* The "and N more" tail. Quieter than the reason it follows, because it is a
+   count of what is hidden rather than a claim about what will happen. */
+.lo-cond-more { opacity: .75; }
 .lo-ov { color: var(--muted); }
 .lo-diff { font-size: 11px; }
 .lo-diff-rm { color: #d29922; }
