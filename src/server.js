@@ -160,6 +160,7 @@ function modList(opts = {}) {
   return {
     modsDb, ok: st.ok, error: st.error || null, activeGroup: st.activeGroup || null,
     labelCounts: labelView.counts, labelNames: labelView.names, labelsError: labelView.error,
+    pathsError: paths.overridesStatus().error,
     profiles: groups, needsSync: todo.pending.length, mods: out,
   };
 }
@@ -272,6 +273,7 @@ async function handleApi(req, res, url) {
     return send(res, 200, {
       sources,
       saves: paths.getSavesDir(),
+      pathsError: paths.overridesStatus().error,
       ...listConfigs(),
       installed: installed.map((m) => ({ id: m.id, idNorm: m.idNorm, name: m.name, type: m.type })),
     });
@@ -305,6 +307,7 @@ async function handleApi(req, res, url) {
       version: VERSION,
       sources,
       saves: paths.getSavesDir(),
+      pathsError: paths.overridesStatus().error,
       modsDb: { ...modsDb, ok: dbState.ok, error: dbState.error || null, activeGroup: dbState.activeGroup || null },
       game: await gameStatus(),
       counts: {
@@ -708,16 +711,20 @@ async function handleApi(req, res, url) {
   }
 
   // POST /api/paths -> persist overrides to civ6-paths.json
+  //
+  // The whole write lives in paths.writeOverrides: which file it goes to, the
+  // type check on each value, the atomic replace, the cache invalidation and the
+  // refusal to build on a file it cannot read. Keeping it there is what stops
+  // the read and the write disagreeing about where the file is - which is how a
+  // test or a relocated install ends up writing to the project root while
+  // reading its overrides from somewhere else.
   if (req.method === 'POST' && url.pathname === '/api/paths') {
     const body = await readBody(req);
-    const file = path.join(__dirname, '..', 'civ6-paths.json');
-    const obj = {};
-    if (body.localMods) obj.localMods = body.localMods;
-    if (body.workshop) obj.workshop = body.workshop;
-    if (body.saves) obj.saves = body.saves;
-    if (body.modsDb) obj.modsDb = body.modsDb;
-    fs.writeFileSync(file, JSON.stringify(obj, null, 2));
-    return send(res, 200, { ok: true, file });
+    try {
+      return send(res, 200, paths.writeOverrides(body));
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
   }
 
   // POST /api/save -> apply edits

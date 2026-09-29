@@ -314,6 +314,13 @@ function renderMods() {
   if (d.labelsError) {
     alerts.push(`<div class="alert warn"><b>Problem with your labels.</b> ${esc(d.labelsError)} Showing no labels until it is fixed.</div>`);
   }
+  // A broken overrides file means we are reading the default folders instead of
+  // yours, so most of the library can look like it has simply vanished. Saying so
+  // is the difference between "my mods are gone" and "your path overrides did
+  // not load" - and the list keeps working either way.
+  if (d.pathsError) {
+    alerts.push(`<div class="alert warn"><b>Mod locations are not being read.</b> ${esc(d.pathsError)} Falling back to the usual folders, so mods kept elsewhere will not be listed.</div>`);
+  }
   if (serverIsStale) {
     alerts.push('<div class="alert warn"><b>The toolkit needs restarting.</b> This page is newer than the program serving it, so the parts of it that need the server will fail — saving labels, for one. Close the toolkit and start it again.</div>');
   }

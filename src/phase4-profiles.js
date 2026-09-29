@@ -1031,6 +1031,128 @@ console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing')
     // The flag still belongs on the console programs, where it stops a flash.
     check('the console callers still hide their window', /execFile\('tasklist'.*windowsHide: true/.test(fs.readFileSync(path.join(__dirname, 'game.js'), 'utf8')));
   }
+
+  console.log('\nTest 21: civ6-paths.json when it is broken');
+  {
+    const wasFile = process.env.CIV6_PATHS_FILE;
+    const scratch = path.join(TMP, 'paths-overrides.json');
+
+    // A fresh module per scenario. loadOverrides memoises - that is the point of
+    // it - so one shared instance would carry a scenario's verdict into the next
+    // and every check after the first would silently be about the wrong file.
+    const withFile = (text) => {
+      process.env.CIV6_PATHS_FILE = scratch;
+      delete require.cache[require.resolve('./paths')];
+      if (text === undefined) { try { fs.unlinkSync(scratch); } catch (_) { /* absent */ } }
+      else fs.writeFileSync(scratch, text);
+      return require('./paths');
+    };
+    // Everything a request touches. None of it may throw, whatever the file says.
+    const touches = (p) => [p.getSources(), p.getSavesDir(), p.getModsDb(), p.overridesStatus()];
+    const status = (p) => p.overridesStatus();
+
+    // --- the normal state: no file, nothing wrong --------------------------
+    let p = withFile(undefined);
+    check('no overrides file is not a failure', status(p).error === null, String(status(p).error));
+    check('  and is not marked unusable', status(p).unusable === false);
+    check('  and the folders still resolve', p.getSources().length >= 1);
+
+    // --- a good file --------------------------------------------------------
+    p = withFile(JSON.stringify({ localMods: 'D:/Games/Mods', workshop: 'D:/Steam/ws' }));
+    check('a good file is read', p.getSources()[0].root === 'D:/Games/Mods', p.getSources()[0].root);
+    check('  a single workshop path becomes a one-item list',
+      p.getSources().filter((s) => s.type === 'workshop').length === 1);
+    check('  and says nothing is wrong', status(p).error === null);
+
+    p = withFile(JSON.stringify({ workshop: ['D:/a', 'D:/b'] }));
+    check('a workshop list is kept as a list',
+      p.getSources().filter((s) => s.type === 'workshop').length === 2);
+
+    // --- broken: not JSON ---------------------------------------------------
+    // The bug. This returned {} with no message at all, so a user whose paths
+    // stopped resolving watched their whole library disappear with nothing to
+    // tell them why.
+    p = withFile('{ this is not json');
+    check('invalid JSON is reported', /is not valid JSON/.test(String(status(p).error)), String(status(p).error));
+    check('  the message names the file it is about', /paths-overrides\.json/.test(String(status(p).error)));
+    check('  and it is marked unusable, so a write would refuse', status(p).unusable === true);
+    check('  nothing throws - the mod list keeps working',
+      touches(p).every(Boolean) && !fails(() => touches(p)));
+    check('  and it falls back to the default folders',
+      p.getSources().some((s) => s.type === 'workshop'));
+
+    // --- broken: valid JSON, wrong shape -------------------------------------
+    for (const [what, text] of [['an array', '[]'], ['a string', '"hello"'], ['null', 'null'], ['a number', '42']]) {
+      p = withFile(text);
+      check(`${what} is rejected as unusable`,
+        status(p).unusable === true && /does not contain an object/.test(String(status(p).error)),
+        String(status(p).error));
+    }
+    p = withFile('   ');   // whitespace is a file holding nothing, not a broken one
+    check('a blank file is treated as no overrides, not as a broken one',
+      status(p).error === null && status(p).unusable === false, String(status(p).error));
+
+    // --- one bad key among good ones -----------------------------------------
+    p = withFile(JSON.stringify({ localMods: 'D:/Games/Mods', saves: 42, modsDb: null, workshop: {} }));
+    check('a good key survives alongside bad ones', p.getSources()[0].root === 'D:/Games/Mods', p.getSources()[0].root);
+    check('  the bad ones are dropped rather than passed through',
+      !touches(p).some((v) => JSON.stringify(v).includes('42')));
+    check('  and it says which, by name',
+      /saves/.test(String(status(p).error)) && /workshop/.test(String(status(p).error)), String(status(p).error));
+    check('  but the file is still usable, because the rest of it is real',
+      status(p).unusable === false);
+    check('  a null is "not set", not an error', !/modsDb/.test(String(status(p).error)), String(status(p).error));
+
+    p = withFile(JSON.stringify({ localMods: 'D:/Games/Mods', _comment: 'a note', somethingElse: [1, 2] }));
+    check('an unknown key is ignored without complaint',
+      status(p).error === null && p.getSources()[0].root === 'D:/Games/Mods', String(status(p).error));
+
+    // --- writing --------------------------------------------------------------
+    // The write path used to hardcode the project root while the read path
+    // honoured CIV6_PATHS_FILE, so a test or a relocated install read overrides
+    // from one file and overwrote another. The next two checks are the regression.
+    p = withFile(undefined);
+    p.writeOverrides({ localMods: 'E:/Elsewhere/Mods', workshop: 'E:/Steam/ws' });
+    check('a write lands in the file that was read',
+      JSON.parse(fs.readFileSync(scratch, 'utf8')).localMods === 'E:/Elsewhere/Mods');
+    const real = path.join(__dirname, '..', 'civ6-paths.json');
+    check('  and not in the project root',
+      !fs.existsSync(real)
+        || JSON.parse(fs.readFileSync(real, 'utf8')).localMods !== 'E:/Elsewhere/Mods');
+    check('  and it is seen without a restart', p.getSources()[0].root === 'E:/Elsewhere/Mods');
+
+    p = withFile(undefined);
+    p.writeOverrides({ localMods: 'E:/M', saves: '', workshop: [] });
+    const written = JSON.parse(fs.readFileSync(scratch, 'utf8'));
+    check('an empty value is dropped, not written as an empty string',
+      !('saves' in written) && !('workshop' in written) && written.localMods === 'E:/M', JSON.stringify(written));
+
+    p = withFile('{ broken');
+    check('writing over a broken file is refused', fails(() => p.writeOverrides({ localMods: 'E:/M' })));
+    check('  and leaves it exactly as it was', fs.readFileSync(scratch, 'utf8') === '{ broken');
+    let refusal = '';
+    try { p.writeOverrides({ localMods: 'E:/M' }); } catch (e) { refusal = e.message; }
+    check('  and says why, rather than just failing', /nothing was written/.test(refusal), refusal);
+
+    // --- the wiring, which is all a source check can see -----------------------
+    const srv = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+    const modsJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'mods.js'), 'utf8');
+    const dashJs = fs.readFileSync(path.join(__dirname, '..', 'public', 'dashboard.js'), 'utf8');
+    check('the server writes paths through paths.writeOverrides', /paths\.writeOverrides\(body\)/.test(srv));
+    check('  and no longer writes the overrides file itself',
+      !/writeFileSync\(\s*file,\s*JSON\.stringify\(obj/.test(srv));
+    check('  a refusal becomes a 400 rather than a crash',
+      /catch \(e\) \{\s*return send\(res, 400, \{ error: e\.message \}\);/.test(srv));
+    check('every response that carries paths also carries the error',
+      (srv.match(/pathsError: paths\.overridesStatus\(\)\.error/g) || []).length === 3,
+      String((srv.match(/pathsError: paths\.overridesStatus\(\)\.error/g) || []).length));
+    check('the mod manager says so, and says the list still works',
+      /pathsError/.test(modsJs) && /not being read/.test(modsJs));
+    check('the dashboard says so too', /pathsError/.test(dashJs));
+
+    if (wasFile === undefined) delete process.env.CIV6_PATHS_FILE;
+    else process.env.CIV6_PATHS_FILE = wasFile;
+  }
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });

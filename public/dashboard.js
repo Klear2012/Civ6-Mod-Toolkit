@@ -32,6 +32,12 @@ function renderDashboard() {
   $('cDlc').textContent = dbOk ? `${d.counts.dlc.enabled} / ${d.counts.dlc.total}` : '?';
 
   const alerts = [];
+  // The counts below come from the folders we are actually reading, so if the
+  // overrides file did not load these totals are of the wrong library entirely.
+  // That is worth saying before the numbers, not after.
+  if (d.pathsError) {
+    alerts.push(`<div class="alert warn"><b>Mod locations are not being read.</b> ${esc(d.pathsError)} These counts are of the usual folders, not the ones you set.</div>`);
+  }
   if (!dbOk) {
     alerts.push(`<div class="alert warn"><b>Can't read which mods are enabled.</b> ${esc(d.modsDb.error || '')}</div>`);
   }
