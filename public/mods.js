@@ -284,6 +284,13 @@ function renderSortSelect() {
       .join('');
   }
   if (sel.value !== modsPage.sort) sel.value = modsPage.sort;
+  // The tooltip follows the active key, set on the control rather than on the
+  // options: a native select draws its own popup, and no browser will show a
+  // title on an option inside it. Set unconditionally rather than only when the
+  // value changes, so a stored key that resolveSortKey quietly replaced still
+  // gets the right description.
+  const active = available.find((s) => s.key === modsPage.sort);
+  sel.title = active ? `${active.label} — ${active.hint}` : 'How to order the mod list';
 }
 
 $('sortSelect').addEventListener('change', (e) => {

@@ -16,9 +16,10 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 - **The mod list can be sorted**, from a dropdown beside the label filters. Six
   orders: **Name** (default), **State**, **Source**, **Label**, **Needs
-  attention** and **Last changed**. Your choice is remembered. Sorting only
-  changes the order, never which mods are shown, and it composes with every
-  filter rather than replacing one.
+  attention** and **Last changed**. Your choice is remembered, and hovering the
+  dropdown explains whichever key is selected. Sorting only changes the order,
+  never which mods are shown, and it composes with every filter rather than
+  replacing one.
 - **Needs attention** is the one worth knowing about: it puts mods with a missing
   dependency or an active conflict at the top, which is what you want when
   something is broken and you are working out why.

@@ -13,6 +13,9 @@
 // right - so the comments say which group each mod is in.
 
 const sort = require('../public/modsort');
+const fs = require('fs');
+const path = require('path');
+const readPage = (file) => fs.readFileSync(path.join(__dirname, '..', 'public', file), 'utf8');
 
 let pass = true;
 const check = (label, cond, extra = '') => {
@@ -220,10 +223,8 @@ console.log('\nTest 9: a stored key is only honoured if it can be sorted by');
 // explorer.exe call, for the same reason: there is no runtime symptom to catch it.
 console.log('\nTest 10: the wiring from the control to the list');
 {
-  const fs = require('fs');
-  const path = require('path');
-  const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'mods.js'), 'utf8');
-  const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  const page = readPage('mods.js');
+  const html = readPage('index.html');
 
   // modsort.js must be parsed before mods.js runs: mods.js reads it at load, and
   // `modsort.labelKey` against an undefined global throws before anything renders.
@@ -271,6 +272,51 @@ console.log('\nTest 10: the wiring from the control to the list');
   // a lie about where the control is.
   check('  and the placeholder it replaced is gone, not left as dead markup',
     !/id="sortSlot"/.test(html) && !/SPEC-mod-sorting\.md puts the sort control/.test(html));
+}
+
+// --- Test 11: the tooltip -------------------------------------------------
+// Hovering the control shows the active key's description. That only works if
+// every key on offer has one, including the key a stored value gets resolved to.
+console.log('\nTest 11: every key has something to say about itself');
+{
+  const all = sort.availableSorts(library());
+  check('every key on offer carries a hint', all.every((s) => typeof s.hint === 'string' && s.hint.length > 0),
+    all.filter((s) => !s.hint).map((s) => s.key).join(', ') || `${all.length} keys, all with a hint`);
+  check('no hint is a placeholder - each is longer than "TODO"',
+    all.every((s) => s.hint.length > 20),
+    all.filter((s) => s.hint.length <= 20).map((s) => s.key).join(', '));
+  // The label is repeated in the tooltip, so a key that reads as its own label is
+  // not explaining anything.
+  check('no hint is just the label again',
+    all.every((s) => s.hint.toLowerCase() !== s.label.toLowerCase()));
+  check('with no data at all, the keys still carry hints - a tooltip must not need a page',
+    sort.availableSorts([]).every((s) => s.hint && s.hint.length > 0));
+
+  // The one that actually matters at runtime: whatever resolveSortKey hands back
+  // is a key that can be described, or the tooltip goes blank.
+  const stale = ['', 'by-vibes', 'changed', 'NAME', null, undefined];
+  const withDates = all;
+  const without = sort.availableSorts([{ name: 'A' }]);
+  let described = true;
+  const bare = [];
+  for (const stored of stale) {
+    for (const list of [withDates, without]) {
+      const key = sort.resolveSortKey(stored, list);
+      const entry = list.find((s) => s.key === key);
+      if (!entry || !entry.hint) { described = false; bare.push(`${JSON.stringify(stored)} -> ${key}`); }
+    }
+  }
+  check('every key a stored value can resolve to is one that has a hint', described, bare.join(' | '));
+
+  // The 18-digit hazard, in the one place a user's own input could reach it: a
+  // hint is plain text set through innerHTML, so it has to be escaped like any
+  // other text reaching the DOM.
+  check('a hint is plain text, and the page escapes it like any other',
+    /\$\{esc\(s\.label\)\}/.test(readPage('mods.js'))
+    && /sel\.title = active \? `\$\{active\.label\}/.test(readPage('mods.js')),
+    'title is assigned as a property, not as markup');
+  check('  and a key with no matching entry still leaves a tooltip rather than "undefined"',
+    /sel\.title = active \? .* : 'How to order the mod list'/.test(readPage('mods.js')));
 }
 
 console.log('\n============================================================');

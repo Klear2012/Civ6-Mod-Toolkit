@@ -19,14 +19,24 @@ const API = (() => {
 
 // The keys, in the order the select lists them. `changed` is appended only when
 // the server actually sent a timestamp - see `availableSorts`.
-  const SORTS = [
-    { key: 'name', label: 'Name' },
-    { key: 'state', label: 'State' },
-    { key: 'source', label: 'Source' },
-    { key: 'label', label: 'Label' },
-    { key: 'attention', label: 'Needs attention' },
-    { key: 'changed', label: 'Last changed' },
-  ];
+//
+// `hint` is the tooltip, shown when the pointer rests on the control. It lives
+// here, beside the comparator it describes, so the two cannot drift apart the
+// way a tooltip written in the HTML would.
+//
+// A native <select> draws its own popup, so a tooltip cannot be attached to an
+// individual unselected option - no browser shows one. The control's title is
+// therefore the *active* key's hint: the one on screen, and the one worth
+// explaining. Per-option tooltips would mean replacing the select with a
+// hand-built dropdown, which is a far larger change than the tooltip is worth.
+const SORTS = [
+  { key: 'name', label: 'Name', hint: 'Alphabetical, ignoring case and Civ colour markup.' },
+  { key: 'state', label: 'State', hint: 'Enabled first, then disabled. A mod you have switched on but not yet applied counts as on.' },
+  { key: 'source', label: 'Source', hint: 'Workshop, then local, then official DLC.' },
+  { key: 'label', label: 'Label', hint: 'By your first label - the order you applied them. Mods with no label go last.' },
+  { key: 'attention', label: 'Needs attention', hint: 'Mods with a missing dependency or an active conflict first. How many problems it has makes no difference.' },
+  { key: 'changed', label: 'Last changed', hint: 'Newest .modinfo file first. This means the file changed, not that the author released something - a Steam file repair also bumps it. Not the same number as the details panel\'s "Last changed", which reports the newest file anywhere in the folder.' },
+];
 
   const DEFAULT_SORT = 'name';
 

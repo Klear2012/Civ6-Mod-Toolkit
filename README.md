@@ -162,7 +162,8 @@ the mod database format can switch every mod back on.
 ### Sorting
 
 The **Sorting** dropdown above the filters orders the list. Your choice is
-remembered between sessions.
+remembered between sessions, and hovering the dropdown explains whichever key
+is selected.
 
 | Order | What it means |
 |---|---|
