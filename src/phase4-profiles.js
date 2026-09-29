@@ -804,18 +804,40 @@ console.log('\nTest 17: an unattended sync switches nothing on');
 // does not check the path carefully would delete those.
 console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing');
 {
-  const modRoot = path.join(TMP, 'mods');
+  // The database records the canonical path, and on Windows that resolves 8.3
+  // short names to their long form. A GitHub runner's TEMP is
+  // C:\Users\RUNNER~1\AppData\Local\Temp, so the literal scratch path is the
+  // short name and the recorded one is the long name - the same folder, and two
+  // strings that agree in nothing. Every path below therefore goes through the
+  // same realpathSync.native the product uses, so the block compares like with
+  // like. Without that, "a case difference in the folder is accepted" is not a
+  // test of case at all: it is a test of short-name expansion, and it failed the
+  // v1.5.0 release build on the runner while passing on any machine whose TEMP
+  // has no 8.3 alias.
+  const rawRoot = path.join(TMP, 'mods');
+  fs.mkdirSync(path.join(rawRoot, 'Doomed Mod', 'Data'), { recursive: true });
+  const modRoot = fs.realpathSync.native(rawRoot).split('\\').join('/');
   const sources = [{ root: modRoot, exists: true, type: 'local' }];
   const ID = '33333333-4444-5555-6666-777777777777';
   const dir = path.join(modRoot, 'Doomed Mod');
   const modinfo = path.join(dir, 'Doomed.modinfo');
-  fs.mkdirSync(path.join(dir, 'Data'), { recursive: true });
   fs.writeFileSync(modinfo, `<Mod id="${ID}" version="1"><Properties><Name>Doomed Mod</Name></Properties><Files><File>Data/x.xml</File></Files></Mod>`);
   fs.writeFileSync(path.join(dir, 'Data', 'x.xml'), '<x/>');
 
   const reg = db.registerMods(DB_PATH, [modinfo], true, 2);
   check('registered first, so there is something to remove', reg.registered.length === 1, JSON.stringify(reg.failed));
   const folder = path.dirname(modinfo.replace(/\\/g, '/'));
+  // Asserted rather than assumed. The checks below only mean anything if this
+  // folder is the one the database recorded: when the two diverge, every guard in
+  // this block is skipped for a different reason, and the only symptom is a
+  // refusal several checks later saying "folder does not match". Naming the
+  // invariant here means a future environment that reintroduces the divergence
+  // fails with an explanation, not a riddle.
+  const recordedPath = raw(`SELECT s.Path AS p FROM ScannedFiles s
+    JOIN Mods m ON m.ScannedFileRowId = s.ScannedFileRowId
+    WHERE lower(m.ModId) = ?`, ID)[0].p;
+  check('the folder these checks use is the one the database recorded',
+    folder === path.dirname(recordedPath), `${folder} vs ${path.dirname(recordedPath)}`);
   const countRows = () => raw('SELECT (SELECT count(*) FROM Mods) m, (SELECT count(*) FROM ModGroupItems) g')[0];
   const before = countRows();
 
