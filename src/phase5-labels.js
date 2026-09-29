@@ -381,6 +381,98 @@ console.log('\nTest 10: the decisions the server makes about labels');
     /SRC_MATCH\[modsPage\.src\]\(m\)\s*\n\s*&& matchesLabels\(m\)/.test(page));
 }
 
+// --- Test 11: renaming and deleting a label everywhere ---------------------
+console.log('\nTest 11: rename and delete');
+{
+  const A = normId(ID_A);
+  const B = normId(ID_B);
+  const known = new Set([A, B]);
+
+  const seed = () => labels.writeLabels(FILE, {
+    [A]: ['favourite', 'mp-safe'],
+    [B]: ['favourite', 'needs-testing'],
+  });
+  seed();
+
+  // --- rename -------------------------------------------------------------
+  let v = labels.renameLabel(FILE, 'favourite', 'starred', known);
+  check('a rename reaches every mod that carried the label', v.moved === 2, `moved=${v.moved}`);
+  check('  the new name is on both of them', v.labels[A].includes('starred') && v.labels[B].includes('starred'),
+    JSON.stringify(v.labels));
+  check('  the old name is on neither', !v.names.includes('favourite'), v.names.join());
+  check('  and the other labels are untouched', v.labels[A].join() === 'starred,mp-safe', JSON.stringify(v.labels[A]));
+  check('  and the count followed the rename', (v.counts.find((c) => c.name === 'starred') || {}).count === 2);
+  check('a rename is not reported as a merge', v.merged === false);
+
+  // Renaming to a spelling that already exists adopts that spelling, rather than
+  // creating a second label nobody can tell apart.
+  v = labels.renameLabel(FILE, 'starred', 'MP-Safe', known);
+  check('renaming onto an existing label merges the two', v.moved === 2 && v.merged === true,
+    `moved=${v.moved} merged=${v.merged}`);
+  check('  every mod ends up with one label, not two', v.names.length === 2, v.names.join());
+  check('  and it took the spelling already in use', v.names.includes('mp-safe') && !v.names.includes('MP-Safe'),
+    v.names.join());
+  check('  the mod that had both keeps just the target',
+    (v.labels[A] || []).join() === 'mp-safe', JSON.stringify(v.labels[A]));
+  check('  and the one that had only the old name gains the target',
+    (v.labels[B] || []).join() === 'mp-safe,needs-testing', JSON.stringify(v.labels[B]));
+
+  // Renaming to a name only differing in case is a spelling change, not a merge.
+  seed();
+  v = labels.renameLabel(FILE, 'favourite', 'FAVOURITE', known);
+  check('a rename that only changes case keeps one label', v.names.length === 3, v.names.join());
+  check('  and does not report a merge', v.merged === false);
+  check('  the spelling on file is the one that was there', v.names.includes('favourite'));
+
+  check('renaming a label nothing carries is refused', /no mod is labelled/.test(cap(labels.renameLabel, FILE, 'nope', 'x', known)));
+  check('  and nothing was written', !labels.readLabels(FILE, known).names.includes('x'));
+  check('renaming to an empty name is refused', /cannot be empty/.test(cap(labels.renameLabel, FILE, 'favourite', '  ', known)));
+  check('renaming to an over-long name is refused', /longer than 100/.test(cap(labels.renameLabel, FILE, 'favourite', 'y'.repeat(101), known)));
+  check('renaming nothing at all is refused', /which label/.test(cap(labels.renameLabel, FILE, '', 'x', known)));
+  check('a rename over a corrupt file is refused', (() => {
+    put('{ broken');
+    const m = cap(labels.renameLabel, FILE, 'a', 'b', known);
+    put(JSON.stringify({ version: 1, labels: { [A]: ['favourite'], [B]: ['mp-safe'] } }));
+    return /nothing was written/.test(m);
+  })());
+
+  // --- delete -------------------------------------------------------------
+  seed();
+  v = labels.deleteLabel(FILE, 'favourite', known);
+  check('a delete reports how many mods it came off', v.removed === 2, `removed=${v.removed}`);
+  check('  and none of them has it any more', !v.names.includes('favourite'), v.names.join());
+  check('  and the other labels survived', v.names.includes('mp-safe') && v.names.includes('needs-testing'), v.names.join());
+  // The mod that had favourite + mp-safe keeps mp-safe; the one that had
+  // favourite + needs-testing keeps needs-testing. Neither entry disappears.
+  check('  a mod with another label keeps it', v.labels[A].join() === 'mp-safe', JSON.stringify(v.labels[A]));
+
+  labels.writeLabels(FILE, { [A]: ['lonely'], [B]: ['favourite', 'needs-testing'] });
+  v = labels.deleteLabel(FILE, 'lonely', known);
+  check('a mod left with no labels loses its entry entirely', v.labels[A] === undefined, JSON.stringify(v.labels[A]));
+  check('  so it cannot come back if the label is reused', !v.names.includes('lonely'), v.names.join());
+  check('deleting a label nothing carries is refused', /no mod is labelled/.test(cap(labels.deleteLabel, FILE, 'nothing', known)));
+  check('deleting nothing at all is refused', /which label/.test(cap(labels.deleteLabel, FILE, '', known)));
+  check('a delete over a corrupt file is refused', (() => {
+    put('{ broken');
+    const m = cap(labels.deleteLabel, FILE, 'a', known);
+    put(JSON.stringify({ version: 1, labels: { [A]: ['favourite'] } }));
+    return /nothing was written/.test(m);
+  })());
+
+  // A name differing only in case is the same label to delete.
+  labels.writeLabels(FILE, { [A]: ['Favourite'] });
+  check('a delete matches without regard to case',
+    labels.deleteLabel(FILE, 'favourite', known).removed === 1);
+  check('  and leaves nothing behind', Object.keys(labels.readLabels(FILE, known).labels).length === 0);
+
+  // Both honour a caller that cannot vouch for its id set.
+  labels.writeLabels(FILE, { [A]: ['favourite'], 'someone-elses': ['other'] });
+  const deferred = labels.readLabels(FILE, null);
+  check('an unvouched set keeps the entry during a read', Object.keys(deferred.labels).length === 2);
+  check('  and a delete only touches what it can see',
+    labels.deleteLabel(FILE, 'other', null).removed === 1 && !labels.readLabels(FILE, null).labels['someone-elses']);
+}
+
 function cap(fn, ...args) {
   try { fn(...args); return ''; } catch (e) { return e.message; }
 }

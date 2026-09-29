@@ -175,6 +175,25 @@ function canonicalLabels(existing, names) {
   return out;
 }
 
+// Comparing names without regard to case. The browser has its own copy of this
+// rule in public/mods.js, because the two cannot import each other; if one
+// changes, the other has to.
+const labelKey = (n) => String(n == null ? '' : n).trim().toLowerCase();
+
+// The read a write is built on.
+//
+// Refuses outright if the file exists but is not the shape we write. Building on
+// an unreadable file would replace whatever it holds, so a corrupt file is fixed
+// or deleted by hand rather than overwritten by a click the user did not think of
+// as destructive.
+function readForWrite(file, known) {
+  const v = readLabels(file, known);
+  if (v.unusable) {
+    throw new Error(`${v.error} - nothing was written. Fix or delete it, then try again.`);
+  }
+  return v;
+}
+
 // Set one mod's labels, and return the refreshed view.
 //
 // The file is re-read inside the call rather than sent by the caller. Two tabs
@@ -184,21 +203,12 @@ function canonicalLabels(existing, names) {
 //
 // The whole set is replaced, not patched. The editor is a set of toggles, so
 // the answer is a set, and one write either lands or does not.
-//
-// Refuses outright if the file exists but is not the shape we write. Building
-// on an unreadable file would replace whatever it holds with one mod's labels,
-// so a corrupt file is fixed or deleted by hand rather than overwritten by a
-// click the user did not think of as destructive.
 function setLabels(file, idNorm, names, known = null) {
   const key = normId(idNorm);
   if (!key) throw new Error('which mod?');
   if (!Array.isArray(names)) throw new Error('labels must be a list');
 
-  const current = readLabels(file, known);
-  if (current.unusable) {
-    throw new Error(`${current.error} - nothing was written. Fix or delete it, then try again.`);
-  }
-
+  const current = readForWrite(file, known);
   const wanted = canonicalLabels(current.labels, names);
   if (wanted.length) current.labels[key] = wanted;
   else delete current.labels[key]; // no labels left: the entry goes, so it cannot come back
@@ -207,4 +217,72 @@ function setLabels(file, idNorm, names, known = null) {
   return readLabels(file, known);
 }
 
-module.exports = { VERSION, MAX_NAME, labelsFile, cleanLabel, readLabels, writeLabels, setLabels };
+// Take a label off every mod that carries it, and drop any mod left with none.
+// Returns how many mods it was on, which is the number the user wants to hear:
+// "deleted" on its own says nothing about what changed.
+function deleteLabel(file, name, known = null) {
+  const key = labelKey(name);
+  if (!key) throw new Error('which label?');
+  const current = readForWrite(file, known);
+
+  let removed = 0;
+  for (const [id, names] of Object.entries(current.labels)) {
+    const rest = names.filter((n) => labelKey(n) !== key);
+    if (rest.length === names.length) continue;
+    removed++;
+    if (rest.length) current.labels[id] = rest;
+    else delete current.labels[id];
+  }
+  if (!removed) throw new Error(`no mod is labelled "${name}"`);
+
+  writeLabels(file, current.labels);
+  return { ...readLabels(file, known), removed };
+}
+
+// Rename a label everywhere it is used.
+//
+// Renaming onto a name that is already in use MERGES the two labels rather than
+// being refused. Refusing would leave the user unable to reach a name they want
+// without first deleting a label they meant to keep, and a merge is not silent:
+// `merged` says it happened and `moved` says how many mods moved, so the dialog
+// can report it.
+function renameLabel(file, from, to, known = null) {
+  const oldKey = labelKey(from);
+  if (!oldKey) throw new Error('which label?');
+  const newName = cleanLabel(to);
+  const current = readForWrite(file, known);
+
+  // The spelling already in use for the target, if there is one, so a rename
+  // cannot introduce a second spelling of a label that already exists.
+  const existing = spellingIndex(current.labels).get(labelKey(newName));
+  const target = existing || newName;
+  const targetKey = labelKey(target);
+  // Merged means the two labels were actually combined, which needs a target
+  // that already existed. A rename to a fresh name is not a merge, however
+  // different the two names are.
+  const merged = !!existing && targetKey !== oldKey;
+
+  let moved = 0;
+  for (const [id, names] of Object.entries(current.labels)) {
+    const at = names.findIndex((n) => labelKey(n) === oldKey);
+    if (at === -1) continue;
+    moved++;
+    const rest = names.filter((_, i) => i !== at);
+    // Put the target back where the old name was, rather than at the end, so a
+    // rename does not silently reorder a mod's labels. And add it whenever it
+    // is not already there - including when the target is the old name in a
+    // different spelling, which is a rename that must not delete anything.
+    if (!rest.some((n) => labelKey(n) === targetKey)) rest.splice(Math.min(at, rest.length), 0, target);
+    if (rest.length) current.labels[id] = rest;
+    else delete current.labels[id];
+  }
+  if (!moved) throw new Error(`no mod is labelled "${from}"`);
+
+  writeLabels(file, current.labels);
+  return { ...readLabels(file, known), moved, merged };
+}
+
+module.exports = {
+  VERSION, MAX_NAME, labelsFile, cleanLabel, readLabels, writeLabels,
+  setLabels, deleteLabel, renameLabel,
+};
