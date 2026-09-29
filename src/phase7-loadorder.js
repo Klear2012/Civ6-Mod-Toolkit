@@ -41,7 +41,14 @@ function seed() {
     CREATE TABLE Components(ComponentRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, ComponentId TEXT, ComponentType TEXT NOT NULL);
     CREATE TABLE ComponentProperties(ComponentRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ComponentRowId, Name));
     CREATE TABLE ModFiles(FileRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, Path TEXT NOT NULL);
-    CREATE TABLE ComponentFiles(ComponentRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, Priority INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, FileRowId));`);
+    CREATE TABLE ComponentFiles(ComponentRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, Priority INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, FileRowId));
+    CREATE TABLE ModGroups(ModGroupRowId INTEGER PRIMARY KEY, Name TEXT NOT NULL, CanDelete BOOLEAN, Selected BOOLEAN, SortIndex INTEGER);
+    CREATE TABLE ModGroupItems(ModGroupRowId INTEGER NOT NULL, ModRowId INTEGER NOT NULL, Disabled BOOLEAN NOT NULL, PRIMARY KEY(ModGroupRowId, ModRowId));
+    CREATE TABLE ModProperties(ModRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ModRowId, Name));
+    CREATE TABLE Criteria(CriteriaRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, CriteriaId TEXT NOT NULL, Any BOOLEAN);
+    CREATE TABLE Criterion(CriterionRowId INTEGER PRIMARY KEY, CriteriaRowId INTEGER NOT NULL, CriterionType TEXT NOT NULL, Inverse BOOLEAN NOT NULL DEFAULT 0);
+    CREATE TABLE CriterionProperties(CriterionRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(CriterionRowId, Name));
+    CREATE TABLE ComponentCriteria(ComponentRowId INTEGER NOT NULL, CriteriaRowId INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, CriteriaRowId));`);
 
   // A modinfo that is really on disk, so the stamp has something to compare.
   const modDir = path.join(TMP, 'mods', 'Real Mod');
@@ -55,6 +62,8 @@ function seed() {
   addAction(w, m1, 'UpdateDatabase', 'PatchOne', ['Patches/One.sql'], '100');
   addAction(w, m1, 'UpdateDatabase', 'PatchTwo', ['Patches/Two.sql'], '200');
   addAction(w, m1, 'UpdateText', 'Strings', ['Text/Strings.xml'], '300');
+  addAction(w, m1, 'UpdateDatabase', 'NeedsAbsent', ['Patches/Absent.sql'], '4000');
+  addAction(w, m1, 'UpdateIcons', 'NoPosition', ['Icons/Extra.dds'], null);
 
   // mod 2 is NOT on disk, and has two identical actions - the ambiguous case
   const sf2 = w.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, 1)').run('../../../Base/Game/modinfo.xml').lastInsertRowid;
@@ -63,6 +72,25 @@ function seed() {
   addAction(w, m2, 'UpdateDatabase', 'NewAction', ['Base/Shared.sql'], '600');
   addAction(w, m2, 'UpdateDatabase', 'Lonely', ['Base/Unique.sql'], null);
 
+  // Two profiles over the same mods, so Compare has something to compare.
+  w.prepare('INSERT INTO ModGroups (ModGroupRowId, Name, CanDelete, Selected, SortIndex) VALUES (1, ?, 0, 1, 0)').run('Main');
+  w.prepare('INSERT INTO ModGroups (ModGroupRowId, Name, CanDelete, Selected, SortIndex) VALUES (2, ?, 1, 0, 1)').run('Small');
+  const item = w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, 0)');
+  item.run(1, m1); item.run(1, m2); item.run(2, m1);
+  w.prepare("INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, 'Name', ?)").run(m1, 'Real Mod');
+  w.prepare("INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, 'Name', ?)").run(m2, 'Off Disk Mod');
+
+  // Conditions, the two cases the view has to be honest about: one naming a
+  // mod nobody has installed (provable), one naming a game ruleset (not).
+  const crOf = (id) => w.prepare('SELECT ComponentRowId AS c FROM Components WHERE ComponentId = ? AND ModRowId = ?').get(id, m1).c;
+  w.prepare('INSERT INTO Criteria (CriteriaRowId, ModRowId, CriteriaId, Any) VALUES (1, ?, ?, 0)').run(m1, 'Absent');
+  w.prepare('INSERT INTO Criteria (CriteriaRowId, ModRowId, CriteriaId, Any) VALUES (2, ?, ?, 0)').run(m1, 'Ruleset');
+  w.prepare('INSERT INTO Criterion (CriterionRowId, CriteriaRowId, CriterionType, Inverse) VALUES (1, 1, ?, 0)').run('ModInUse');
+  w.prepare('INSERT INTO Criterion (CriterionRowId, CriteriaRowId, CriterionType, Inverse) VALUES (2, 2, ?, 0)').run('RuleSetInUse');
+  w.prepare("INSERT INTO CriterionProperties (CriterionRowId, Name, Value) VALUES (1, 'Value', ?)").run('DDDDDDDD-4444-4444-8444-444444444444');
+  w.prepare("INSERT INTO CriterionProperties (CriterionRowId, Name, Value) VALUES (2, 'Value', 'RULESET_EXPANSION_1')").run();
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, 1)').run(crOf('NeedsAbsent'));
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, 2)').run(crOf('PatchOne'));
   w.close();
 }
 
@@ -314,9 +342,15 @@ console.log('\nTest 6: the key has to survive what actually changes');
   // decided to re-register, so ModRowId AND ComponentRowId both move.
   const renumber = new DatabaseSync(DB_PATH);
   renumber.exec('UPDATE Mods SET ModRowId = ModRowId + 100');
+  // Group membership moves too. A rescan re-registers the mod everywhere, and
+  // leaving ModGroupItems behind strands the profile on row ids that no
+  // longer exist - which is what silently emptied the view's profile in the
+  // first run of these tests.
+  renumber.exec('UPDATE ModGroupItems SET ModRowId = ModRowId + 100');
   renumber.exec('UPDATE Components SET ComponentRowId = ComponentRowId + 1000, ModRowId = ModRowId + 100');
   renumber.exec('UPDATE ComponentProperties SET ComponentRowId = ComponentRowId + 1000');
   renumber.exec('UPDATE ComponentFiles SET ComponentRowId = ComponentRowId + 1000');
+  renumber.exec('UPDATE ComponentCriteria SET ComponentRowId = ComponentRowId + 1000');
   renumber.close();
 
   d2 = db();
@@ -692,9 +726,11 @@ if (real && fs.existsSync(real)) {
     // would have nothing to repair - which is how this first looked like it
     // worked when it had not been tested at all.
     w.exec('UPDATE Mods SET ModRowId = ModRowId + 500');
+    w.exec('UPDATE ModGroupItems SET ModRowId = ModRowId + 500');
     w.exec('UPDATE Components SET ComponentRowId = ComponentRowId + 5000, ModRowId = ModRowId + 500');
     w.exec('UPDATE ComponentProperties SET ComponentRowId = ComponentRowId + 5000');
     w.exec('UPDATE ComponentFiles SET ComponentRowId = ComponentRowId + 5000');
+    w.exec('UPDATE ComponentCriteria SET ComponentRowId = ComponentRowId + 5000');
     w.exec("UPDATE ComponentProperties SET Value = '9999' WHERE Name = 'LoadOrder'");
     w.exec("UPDATE ComponentProperties SET Value = '300' WHERE Name = 'LoadOrder' AND ComponentRowId IN (SELECT ComponentRowId FROM Components WHERE ComponentId = 'Strings')");
     w.close();
@@ -750,7 +786,137 @@ if (real && fs.existsSync(real)) {
     lo.writeOverrides(OV_PATH, {});
   }
 
-  console.log('\nTest 14: nothing was left open');
+  console.log('\nTest 14: the load order view');
+  {
+    try { fs.unlinkSync(OV_PATH); } catch (_) { /* absent */ }
+    const v = lo.profileLoadOrder(DB_PATH, { file: OV_PATH });
+    check('the view builds', v.ok === true, v.error || '');
+    check('  and names the profile in use', v.profile && v.profile.name === 'Main', JSON.stringify(v.profile));
+    check('  and offers every profile to choose from', v.groups.length === 2, JSON.stringify(v.groups.map((g) => g.name)));
+
+    // The list is the answer, so it has to be in order, with ties grouped and
+    // never ordered inside the group.
+    const values = v.bands.filter((b) => b.kind === 'value').map((b) => b.value);
+    check('  value bands are ascending', values.every((x, i) => i === 0 || x > values[i - 1]), values.join(','));
+    check('  every positioned action is in exactly one band',
+      v.bands.filter((b) => b.kind === 'value').reduce((t, b) => t + b.actions.length, 0) + v.undeclaredTotal === v.summary.actions,
+      JSON.stringify(v.summary));
+    check('  and every action knows its mod',
+      v.bands.flatMap((b) => b.actions || []).every((a) => a.modId && a.modName && a.modName !== 'unknown mod'));
+
+    // Free runs sit between two values and are self-consistent.
+    const frees = v.bands.filter((b) => b.kind === 'free');
+    check('  free runs are rows of their own', frees.length > 0, String(frees.length));
+    check('  each one is at least the threshold and adds up',
+      frees.every((b) => b.count >= lo.MIN_FREE_RUN && b.to - b.from + 1 === b.count),
+      frees.map((b) => `${b.from}..${b.to}=${b.count}`).join(' '));
+    const freeOk = v.bands.every((b, i, all) => {
+      if (b.kind !== 'free') return true;
+      const before = all[i - 1];
+      const after = all[i + 1];
+      return before.kind === 'value' && after.kind === 'value' && b.from === before.value + 1 && b.to === after.value - 1;
+    });
+    check('  and each one really is between the values either side of it', freeOk);
+
+    // The undeclared block, which is where "this mod relies on ordering nobody
+    // controls" comes from.
+    check('  undeclared actions are counted, not dropped', v.undeclaredTotal === 1, String(v.undeclaredTotal));
+    check('  and grouped by mod', v.undeclared.length === 1 && v.undeclared[0].count === 1, JSON.stringify(v.undeclared));
+    check('  the arithmetic closes over all three views of the actions',
+      v.summary.positioned + v.undeclaredTotal === v.summary.actions);
+
+    // Conditions: provable where it can be, honest where it cannot.
+    const byId = (cid) => v.bands.flatMap((b) => b.actions || []).find((a) => a.id === cid);
+    check('an action gated on a mod that is not installed is provably off',
+      byId('NeedsAbsent').willRun === false, JSON.stringify(byId('NeedsAbsent')));
+    check('  and says which mod is missing', /not installed/.test(byId('NeedsAbsent').reason), byId('NeedsAbsent').reason);
+    check('an action gated on a game ruleset is not guessed at',
+      byId('PatchOne').willRun === null, String(byId('PatchOne').willRun));
+    check('  and the row says what it could not decide',
+      byId('PatchOne').unknown.length === 1 && byId('PatchOne').unknown[0].type === 'RuleSetInUse',
+      JSON.stringify(byId('PatchOne').unknown));
+    check('  an action with no conditions at all is simply on',
+      byId('Strings').willRun === true, String(byId('Strings').willRun));
+
+    // A mod whose .modinfo is not on disk cannot be stamped, and is said so.
+    const m2row = modRowId(M2);
+    check('a mod with no .modinfo on disk is reported not protected',
+      staleOf(M2) === null && v.summary.unprotectable === 1, JSON.stringify(v.summary));
+
+    // A second profile, and the comparison between them.
+    const small = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 2 });
+    check('another profile loads', small.ok === true && small.profile.name === 'Small', JSON.stringify(small.profile));
+    check('  with only the mods it has on', small.summary.modsOn === 1, String(small.summary.modsOn));
+    const cmp = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 1, compareGroupId: 2 });
+    check('and the two can be compared', cmp.compare && cmp.compare.id === 2, JSON.stringify(cmp.compare));
+    const marked = cmp.bands.flatMap((b) => b.actions || []).filter((a) => a.inCompare !== null);
+    check('  marking every action as in or not in the other profile', marked.length > 0, String(marked.length));
+    check('  and a mod off there is marked as such',
+      marked.some((a) => a.modId === normId(M2) && a.inCompare === false));
+
+    // Overrides show on their rows, and one that no longer matches is listed
+    // separately rather than silently disappearing.
+    const k = keyOf('PatchOne');
+    await lo.applyOverrides(DB_PATH, [{ modId: M1, key: k, value: 777 }], { file: OV_PATH, statusFn: OPEN });
+    const withOv = lo.profileLoadOrder(DB_PATH, { file: OV_PATH });
+    const row = withOv.bands.flatMap((b) => b.actions || []).find((a) => a.id === 'PatchOne');
+    check('an override shows on its row, with the author value beside it',
+      row.state === 'overridden' && row.override.declared !== null, JSON.stringify(row.override));
+    check('  and the summary counts it', withOv.summary.overrides === 1, String(withOv.summary.overrides));
+
+    // A stored override whose action has gone.
+    // A stored override whose action has gone. Read from the store, not from
+    // the view's response: the view reports override state per row and a count,
+    // and carries no map - so snapshotting its `overrides` gave undefined and
+    // "restored" an empty file.
+    const orphan = lo.readOverrides(OV_PATH).overrides;
+    lo.writeOverrides(OV_PATH, { [normId(M1)]: { 'UpdateDatabase\nGone\nGone.sql': { value: 1 } } });
+    const withOrphan = lo.profileLoadOrder(DB_PATH, { file: OV_PATH });
+    check('an override that no longer matches is listed, not hidden',
+      withOrphan.unmatched.length === 1 && withOrphan.unmatched[0].state === 'orphaned', JSON.stringify(withOrphan.unmatched));
+    check('  and the row it belonged to no longer claims to be overridden',
+      (withOrphan.bands.flatMap((b) => b.actions || []).find((a) => a.id === 'PatchOne') || {}).state !== 'overridden');
+    lo.writeOverrides(OV_PATH, orphan);
+
+    // The management listing, which is a different thing from the view.
+    const list = lo.listOverrides(DB_PATH, { file: OV_PATH });
+    check('the overrides screen lists them with a resolved state',
+      list.ok === true && list.count >= 1 && list.overrides[0].state === 'applied', JSON.stringify(list.overrides[0] && list.overrides[0].state));
+    check('  and the key it names is readable rather than a hash',
+      String(list.overrides[0].key).includes('\n') && list.overrides[0].type === 'UpdateDatabase',
+      JSON.stringify(list.overrides[0].key));
+  }
+
+  console.log('\nTest 15: the view is read-only');
+  {
+    // This is the guard on the thing the handoff said had been conflated before.
+    // It erodes quietly as features are added, so it is asserted rather than
+    // intended - and both halves matter: no write route, and no control.
+    const srv = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+    const view = fs.readFileSync(path.join(__dirname, '..', 'public', 'loadorder.js'), 'utf8');
+    const html = fs.readFileSync(path.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+
+    check('the view route is a GET', /req.method === 'GET' && url.pathname === '\/api\/load-order'/.test(srv));
+    check('  and no POST writes to it', !/req.method === 'POST' && url.pathname === '\/api\/load-order'/.test(srv));
+    const loadWrites = (srv.match(/url.pathname === '\/api\/load-overrides[^']*'/g) || []).length;
+    check('every write route is under /api/load-overrides, and there are five of them',
+      loadWrites === 5, String(loadWrites));
+    check('the view page has no button that posts anything', !/postJson|\bfetch\(|<form/.test(view));
+    // The page does have an input - the text filter. What it must not have is
+    // anything that could carry a load order into the database.
+    const section = (html.split('id="page-load-order"')[1] || '').split('id="page-load-overrides"')[0];
+    const inputs = (section.match(/<input[^>]*>/g) || []);
+    check('  and the only input on it is the text filter',
+      inputs.length === 1 && /type="search"/.test(inputs[0]), inputs.join(' '));
+    check('  and no number input, which is what a value control would be',
+      !/type="number"/.test(section));
+    check('  and no form to submit one', !/<form/.test(section));
+    check('the manage button navigates instead', /location.hash = '#\/load-overrides'/.test(view));
+    check('and the two are different page sections',
+      /id="page-load-order"/.test(html) && /id="page-load-overrides"/.test(html));
+  }
+
+  console.log('\nTest 16: nothing was left open');
   check('every read connection was closed', liveConns.size === 0, `${liveConns.size} still open`);
 
   // The cleanup must never decide whether the suite passed. maxRetries because

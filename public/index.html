@@ -13,6 +13,7 @@
       <a href="#/dashboard" data-nav="dashboard">Dashboard</a>
       <a href="#/config" data-nav="config">Config editor</a>
       <a href="#/mods" data-nav="mods">Mod manager</a>
+      <a href="#/load-order" data-nav="load-order">Load order</a>
     </nav>
     <span id="gamePill" class="pill" title="Whether Civilization VI is running">Checking game…</span>
   </header>
@@ -235,6 +236,86 @@
     </div>
   </footer>
 
+  <!-- ===== Load order (read-only) ===== -->
+  <section class="page" id="page-load-order" hidden>
+    <div id="loAlerts"></div>
+
+    <div class="profilebar">
+      <label class="profile-label" for="loProfile">Profile</label>
+      <select id="loProfile"></select>
+      <span id="loSummary" class="meta"></span>
+      <div class="profile-actions">
+        <button id="loCompare" type="button" class="secondary" hidden>Clear comparison</button>
+        <button id="loManage" type="button" class="secondary">Manage overrides&hellip;</button>
+      </div>
+    </div>
+
+    <div class="toolbar">
+      <input id="loFilter" class="filter" type="search" placeholder="Filter by mod or action&hellip;" />
+      <div class="seg" id="loJump">
+        <button type="button" data-jump="next">Next free band</button>
+        <button type="button" data-jump="nextoff">Next that will not run</button>
+      </div>
+      <span class="meta" id="loShown"></span>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Load order <span id="loCount" class="count"></span></h2>
+      </div>
+      <!-- One list. Bands are value rows, free-range rows, and action rows, in
+           the order the game will use. The explanatory note is here rather than
+           in a dialog because the thing being explained is the shape of the
+           list itself. -->
+      <div id="loNote" class="note"></div>
+      <div class="list tall" id="loList"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>No declared position <span id="loUndeclaredCount" class="count"></span></h2>
+      </div>
+      <div class="panel-body">
+        <p class="note" id="loUndeclaredNote"></p>
+        <div class="list" id="loUndeclared"></div>
+      </div>
+    </section>
+
+    <section class="panel" id="loUnmatchedPanel" hidden>
+      <div class="panel-head">
+        <h2>Overrides that no longer match <span id="loUnmatchedCount" class="count"></span></h2>
+        <div class="panel-actions">
+          <button id="loUnmatchedManage" class="secondary">Manage&hellip;</button>
+        </div>
+      </div>
+      <div class="list" id="loUnmatched"></div>
+    </section>
+  </section>
+
+  <!-- ===== Load order overrides (problem 2 - a separate screen) ===== -->
+  <section class="page" id="page-load-overrides" hidden>
+    <div id="lovAlerts"></div>
+
+    <div class="toolbar">
+      <span class="meta" id="lovMeta"></span>
+      <div class="profile-actions">
+        <button id="lovSync" type="button" class="secondary">Re-apply all</button>
+      </div>
+    </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Your overrides <span id="lovCount" class="count"></span></h2>
+      </div>
+      <div class="note">
+        These are your changes, not the library's. Load order is per action, not
+        per mod, and an override survives a mod updating &mdash; as long as the
+        toolkit has synced since.
+      </div>
+      <div class="list" id="lovList"></div>
+    </section>
+  </section>
+
   <footer id="bar" class="actionbar" hidden>
     <div id="pending" class="pending">No changes</div>
     <div class="bar-actions">
@@ -251,5 +332,7 @@
   <script src="config.js"></script>
   <script src="mods.js"></script>
   <script src="profiles.js"></script>
+  <script src="loadorder.js"></script>
+  <script src="looverrides.js"></script>
 </body>
 </html>

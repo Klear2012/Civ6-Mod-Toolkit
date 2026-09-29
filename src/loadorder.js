@@ -700,11 +700,426 @@ function staleMods(dbPath, opts = {}) {
   return { stale, error: null, unusable: false };
 }
 
+// Appended to src/loadorder.js: the read side behind the load order view.
+//
+// The view is the profile's load order as one flat list, sorted by the value the
+// game will use. This builds that list. It reads only - there is no write
+// anywhere in this section, and phase7 asserts that no write route is reachable
+// from the page which renders it.
+
+// The smallest gap worth showing as a row. A free run of two is real but says
+// nothing you could act on, and a 183-mod profile has hundreds of them, so below
+// this the list simply steps from one value to the next.
+const MIN_FREE_RUN = 5;
+
+// The six criterion types in a real library, measured:
+//
+//   ModInUse                   604   a mod with this GUID is in use
+//   RuleSetInUse               318   a game ruleset
+//   ConfigurationValueMatches  215   a config value
+//   LeaderPlayable             150   which leaders are playable
+//   GameCoreInUse               68   which game core
+//   ModIsEnabled                 1   a mod is switched on in the profile
+//
+// Only the last is unambiguously about the profile. Whether ModInUse means
+// "subscribed and present" or "switched on in this profile" is untested, so a
+// ModInUse pointing at an installed-but-off mod is reported as unknown rather
+// than decided.
+//
+// The first plan assumed the opposite and was wrong. It proposed warning that
+// switching profile would stop 214 of Harmony in Diversity's 222 actions
+// running, on the strength of "ModInUse is the commonest, 604 uses" - true
+// across the library and misleading about the one mod it was cited for. HiD's
+// dominant gate is RuleSetInUse, at 213 rows against 97, and a game ruleset
+// does not change when you switch profile.
+const DECIDABLE = new Set(['ModInUse', 'ModIsEnabled']);
+
+function groupsOf(db) {
+  return db.prepare('SELECT ModGroupRowId AS id, Name AS name, Selected AS selected FROM ModGroups ORDER BY SortIndex, ModGroupRowId').all();
+}
+
+function activeGroupId(db) {
+  const g = db.prepare('SELECT ModGroupRowId AS id FROM ModGroups WHERE Selected = 1 LIMIT 1').get();
+  return g ? g.id : null;
+}
+
+// Every mod the game knows. Needed to say whether a criterion names a mod you
+// have, which is the difference between "will not run, ever" and "cannot tell".
+function installedMods(db) {
+  const byId = new Map();
+  for (const m of db.prepare(
+    `SELECT m.ModRowId AS modRowId, m.ModId AS modId, mp.Value AS name
+       FROM Mods m
+       LEFT JOIN ModProperties mp ON mp.ModRowId = m.ModRowId AND mp.Name = 'Name'`
+  ).all()) {
+    const id = normId(m.modId);
+    byId.set(id, { modRowId: m.modRowId, modId: id, name: m.name || m.modId });
+  }
+  return byId;
+}
+
+function enabledMods(db, groupId) {
+  const on = new Map();
+  const rowToNorm = new Map();
+  for (const m of db.prepare(
+    `SELECT m.ModRowId AS modRowId, m.ModId AS modId, mp.Value AS name
+       FROM ModGroupItems i
+       JOIN Mods m ON m.ModRowId = i.ModRowId
+       LEFT JOIN ModProperties mp ON mp.ModRowId = m.ModRowId AND mp.Name = 'Name'
+      WHERE i.ModGroupRowId = ? AND i.Disabled = 0`
+  ).all(groupId)) {
+    const id = normId(m.modId);
+    on.set(id, { modRowId: m.modRowId, modId: id, name: m.name || m.modId });
+    rowToNorm.set(m.modRowId, id);
+  }
+  return { on, rowToNorm };
+}
+
+// Everything in one profile, in four queries.
+//
+// The identity key is deliberately NOT built here for every action: that would
+// be 3176 key builds per request, each reading a file list. Only the actions an
+// override names need one, and there are a handful of those.
+function readProfile(db, groupId) {
+  const { on, rowToNorm } = enabledMods(db, groupId);
+
+  const actions = db.prepare(
+    `SELECT c.ComponentRowId AS componentRowId, c.ModRowId AS modRowId,
+            c.ComponentType AS type, c.ComponentId AS id
+       FROM Components c
+       JOIN ModGroupItems i ON i.ModRowId = c.ModRowId
+       JOIN Mods m         ON m.ModRowId = c.ModRowId
+      WHERE i.ModGroupRowId = ? AND i.Disabled = 0
+      ORDER BY c.ComponentRowId`
+  ).all(groupId);
+
+  // Correctly spelled row and both misspellings, kept apart so the view can say
+  // a mod spelled it wrong.
+  const declared = new Map();
+  for (const p of db.prepare(
+    `SELECT cp.ComponentRowId AS cr, cp.Name AS name, cp.Value AS value
+       FROM ComponentProperties cp
+       JOIN Components c     ON c.ComponentRowId = cp.ComponentRowId
+       JOIN ModGroupItems i  ON i.ModRowId = c.ModRowId
+      WHERE i.ModGroupRowId = ? AND i.Disabled = 0
+        AND cp.Name IN ('LoadOrder','LaodOrder','LoadingOrder')`
+  ).all(groupId)) {
+    if (!declared.has(p.cr)) declared.set(p.cr, {});
+    declared.get(p.cr)[p.name] = String(p.value);
+  }
+
+  const conds = new Map();
+  for (const c of db.prepare(
+    `SELECT cc.ComponentRowId AS cr, k.Any AS any,
+            cr.CriterionType AS type, cr.Inverse AS inverse, cp.Value AS value
+       FROM ComponentCriteria cc
+       JOIN Components c      ON c.ComponentRowId = cc.ComponentRowId
+       JOIN ModGroupItems i   ON i.ModRowId = c.ModRowId
+       JOIN Criteria k        ON k.CriteriaRowId = cc.CriteriaRowId
+       JOIN Criterion cr      ON cr.CriteriaRowId = k.CriteriaRowId
+       LEFT JOIN CriterionProperties cp ON cp.CriterionRowId = cr.CriterionRowId
+      WHERE i.ModGroupRowId = ? AND i.Disabled = 0`
+  ).all(groupId)) {
+    if (!conds.has(c.cr)) conds.set(c.cr, { any: !!c.any, items: [] });
+    conds.get(c.cr).items.push({ type: c.type, inverse: !!c.inverse, value: c.value || null });
+  }
+
+  return { on, rowToNorm, actions, declared, conds };
+}
+
+// The author's position: the correctly spelled row, else a misspelling, else
+// nothing. Mirrors currentValue, so the view and the write path cannot disagree
+// about what the mod asked for.
+function declaredValueOf(declared, componentRowId) {
+  const row = declared.get(componentRowId);
+  if (!row) return null;
+  if (row.LoadOrder !== undefined) return row.LoadOrder;
+  for (const m of MISSPELLINGS) if (row[m] !== undefined) return row[m];
+  return null;
+}
+
+// Whether this action will run, and how sure we are. true or false only where
+// it is provable; null where the toolkit cannot tell.
+//
+// Sound but incomplete beats complete but unsound. This view exists to stop a
+// user concluding "my load order is fine" when it is not, so a row that
+// over-reports costs a glance and one that under-reports recreates the exact
+// confusion being removed.
+function verdictOf(entry, ctx) {
+  if (!entry || entry.items.length === 0) return { willRun: true, reason: null, unknown: [] };
+  const unknown = [];
+  let off = null;
+  for (const c of entry.items) {
+    if (!DECIDABLE.has(c.type)) {
+      unknown.push({ type: c.type, why: 'depends on something this view cannot see' });
+      continue;
+    }
+    const target = ctx.installed.get(normId(c.value));
+    if (!target) {
+      // Not installed at all - provable whichever way ModInUse is meant, and the
+      // case that catches a sub-mod silently doing nothing.
+      if (!c.inverse) off = `needs ${c.value}, which is not installed`;
+      continue;
+    }
+    if (c.type === 'ModIsEnabled') {
+      if (!c.inverse && !ctx.on.has(target.modId)) off = `needs ${target.name}, which is off in this profile`;
+      continue;
+    }
+    if (!ctx.on.has(target.modId)) {
+      unknown.push({ type: c.type, why: `needs ${target.name}, which is off here - whether "in use" counts that is untested` });
+    }
+  }
+  if (off) return { willRun: false, reason: off, unknown };
+  if (unknown.length) return { willRun: null, reason: null, unknown };
+  return { willRun: true, reason: null, unknown: [] };
+}
+
+// Which overrides point where, so a row can be labelled without building an
+// identity key for every action in the library.
+function overrideIndex(db, stored) {
+  const index = new Map();
+  const unmatched = [];
+  for (const [id, set] of Object.entries(stored.overrides)) {
+    for (const [key, entry] of Object.entries(set)) {
+      const res = resolveAction(db, id, key);
+      if (res.state === FIND) {
+        index.set(res.componentRowId, { state: 'overridden', entry, key, modId: id });
+      } else {
+        unmatched.push({
+          modId: id,
+          key,
+          value: entry.value,
+          declared: entry.declared === undefined ? null : entry.declared,
+          state: res.state === AMBIGUOUS ? 'ambiguous' : 'orphaned',
+          candidates: res.state === AMBIGUOUS ? res.candidates.length : 0,
+        });
+      }
+    }
+  }
+  return { index, unmatched };
+}
+
+// The list. One band per value, ties grouped and never ordered within the
+// group, with the free runs between them as rows of their own.
+function buildList(rows) {
+  const withPos = rows.filter((r) => r.effective !== null);
+  const undeclared = rows.filter((r) => r.effective === null);
+  withPos.sort((a, b) => Number(a.effective) - Number(b.effective)
+    || a.modName.localeCompare(b.modName) || a.componentRowId - b.componentRowId);
+
+  const bands = [];
+  let i = 0;
+  while (i < withPos.length) {
+    const value = Number(withPos[i].effective);
+    const members = [];
+    while (i < withPos.length && Number(withPos[i].effective) === value) { members.push(withPos[i]); i++; }
+    bands.push({ kind: 'value', value, actions: members, tie: members.length > 1 });
+    const next = i < withPos.length ? Number(withPos[i].effective) : null;
+    if (next !== null && next - value - 1 >= MIN_FREE_RUN) {
+      bands.push({ kind: 'free', from: value + 1, to: next - 1, count: next - value - 1 });
+    }
+  }
+  if (withPos.length) {
+    const last = Number(withPos[withPos.length - 1].effective);
+    bands.push({ kind: 'headroom', from: last + 1, to: null, count: null });
+  }
+  return { bands, undeclared };
+}
+
+// The whole view, for one profile. Read-only.
+function profileLoadOrder(dbPath, opts = {}) {
+  const file = opts.file || overridesFile();
+  const stored = readOverrides(file);
+  const db = openDb(dbPath);
+  try {
+    const groups = groupsOf(db);
+    const groupId = opts.groupId != null ? Number(opts.groupId) : activeGroupId(db);
+    const blank = { ok: false, error: 'the mod database has no active profile', groups, profile: null, bands: [], undeclared: [], undeclaredTotal: 0, unmatched: [], summary: {} };
+    if (groupId === null || !groups.some((g) => g.id === groupId)) return blank;
+    const group = groups.find((g) => g.id === groupId);
+
+    const { on, rowToNorm, actions, declared, conds } = readProfile(db, groupId);
+    const ctx = { installed: installedMods(db), on };
+    const { index, unmatched } = overrideIndex(db, stored);
+
+    // Comparing two profiles is cheaper than it looks: ComponentRowId belongs to
+    // the database, not to a profile, so a mod's actions have the same row ids in
+    // both. Two profiles differ only in which mods are switched on, and a row is
+    // in the other profile exactly when its mod is.
+    const compareGroupId = opts.compareGroupId != null ? Number(opts.compareGroupId) : null;
+    const compareOn = compareGroupId != null && groups.some((g) => g.id === compareGroupId)
+      ? enabledMods(db, compareGroupId).on
+      : null;
+
+    // 42 of 427 rows are base-game or DLC assets whose .modinfo is not on disk.
+    // Nothing can keep their stamp, so an override on one is re-derived on the
+    // next rescan, and the view says so instead of implying protection.
+    const unprotectable = new Set();
+    for (const [id, m] of on) if (!modFile(db, m.modRowId).onDisk) unprotectable.add(id);
+
+    const rows = actions.map((a) => {
+      const modId = rowToNorm.get(a.modRowId);
+      const mod = on.get(modId);
+      const props = declared.get(a.componentRowId) || {};
+      const declaredValue = declaredValueOf(declared, a.componentRowId);
+      const misspelled = declaredValue !== null && props.LoadOrder === undefined;
+      const ov = index.get(a.componentRowId);
+      const v = verdictOf(conds.get(a.componentRowId), ctx);
+      return {
+        modId,
+        modName: (mod && mod.name) || modId || 'unknown mod',
+        componentRowId: a.componentRowId,
+        type: a.type,
+        id: a.id,
+        declared: declaredValue,
+        misspelled,
+        effective: declaredValue,
+        override: ov ? { value: ov.entry.value, declared: ov.entry.declared === undefined ? null : ov.entry.declared } : null,
+        state: ov ? (String(props.LoadOrder) === String(ov.entry.value) ? 'overridden' : 'drifted') : 'author default',
+        protected: !unprotectable.has(modId),
+        willRun: v.willRun,
+        reason: v.reason,
+        unknown: v.unknown,
+        // null when nothing is being compared, so the client can tell "not
+        // compared" from "compared and absent".
+        inCompare: compareOn ? compareOn.has(modId) : null,
+      };
+    });
+
+    const { bands, undeclared } = buildList(rows);
+
+    // The undeclared block, grouped by mod. 1579 actions in the library declare
+    // nothing at all, and that number is what says a mod is relying on ordering
+    // nobody controls. The verdict counts ride along, because "declares no
+    // position and will not run anyway" is a different thing from either alone.
+    const byMod = new Map();
+    for (const r of undeclared) {
+      if (!byMod.has(r.modId)) byMod.set(r.modId, { modId: r.modId, name: r.modName, count: 0, willNotRun: 0, unknown: 0 });
+      const e = byMod.get(r.modId);
+      e.count++;
+      if (r.willRun === false) e.willNotRun++;
+      else if (r.willRun === null) e.unknown++;
+    }
+    const undeclaredList = [...byMod.values()].sort((a, b) => b.count - a.count || a.name.localeCompare(b.name));
+
+    const values = rows.filter((r) => r.effective !== null).map((r) => Number(r.effective));
+    const distinct = [...new Set(values)].sort((a, b) => a - b);
+
+    return {
+      ok: true,
+      error: null,
+      groups,
+      profile: { id: group.id, name: group.name },
+      bands,
+      undeclared: undeclaredList,
+      undeclaredTotal: undeclared.length,
+      undeclaredWillNotRun: undeclared.filter((r) => r.willRun === false).length,
+      unmatched,
+      compare: compareOn && groups.some((g) => g.id === compareGroupId)
+        ? { id: compareGroupId, name: (groups.find((g) => g.id === compareGroupId) || {}).name, modsOn: compareOn.size }
+        : null,
+      stale: staleMods(dbPath, { file }),
+      labelsError: stored.error,
+      labelsUnusable: stored.unusable,
+      summary: {
+        modsOn: on.size,
+        actions: rows.length,
+        positioned: rows.length - undeclared.length,
+        undeclared: undeclared.length,
+        willNotRun: rows.filter((r) => r.willRun === false).length,
+        unknown: rows.filter((r) => r.willRun === null).length,
+        distinctValues: distinct.length,
+        min: distinct.length ? distinct[0] : null,
+        max: distinct.length ? distinct[distinct.length - 1] : null,
+        overrides: index.size,
+        unmatched: unmatched.length,
+        unprotectable: unprotectable.size,
+      },
+    };
+  } finally {
+    db.close();
+  }
+}
+
+// ---------------------------------------------------------------------------
+
+
+// ---------------------------------------------------------------------------
+// Listing
+// ---------------------------------------------------------------------------
+
+// Every stored override, with what is actually true of it right now: does its
+// key still resolve, is the database carrying the value, and can the stamp be
+// maintained for the mod it is on.
+//
+// The identity key is stored as a readable string on purpose, so a user
+// reporting "my override stopped matching" can be answered by looking at the
+// file rather than at a hash.
+function listOverrides(dbPath, opts = {}) {
+  const file = opts.file || overridesFile();
+  const stored = readOverrides(file);
+  const out = [];
+  const groups = [];
+  const db = openDb(dbPath);
+  try {
+    for (const [id, set] of Object.entries(stored.overrides)) {
+      const modRowId = modRowOf(db, id);
+      const meta = modRowId === null ? null : db.prepare(
+        "SELECT Value AS name FROM ModProperties WHERE ModRowId = ? AND Name = 'Name'"
+      ).get(modRowId);
+      const onDisk = modRowId !== null && modFile(db, modRowId).onDisk;
+      const modName = (meta && meta.name) || id;
+
+      for (const [key, entry] of Object.entries(set)) {
+        const row = { modId: id, modName, modInstalled: modRowId !== null, protected: onDisk, key, value: entry.value, declared: entry.declared === undefined ? null : entry.declared };
+        if (modRowId === null) {
+          out.push({ ...row, state: 'orphaned', reason: 'that mod is not in the database' });
+          continue;
+        }
+        const res = resolveAction(db, id, key);
+        if (res.state === AMBIGUOUS) {
+          out.push({ ...row, state: 'ambiguous', candidates: res.candidates.length, reason: `${res.candidates.length} actions in that mod match this key` });
+          continue;
+        }
+        if (res.state === MISSING) {
+          out.push({ ...row, state: 'orphaned', reason: 'no action in that mod matches this key any more' });
+          continue;
+        }
+        const comp = db.prepare('SELECT ComponentType AS type, ComponentId AS id FROM Components WHERE ComponentRowId = ?')
+          .get(res.componentRowId);
+        const before = currentValue(db, res.componentRowId);
+        out.push({
+          ...row,
+          state: before === String(entry.value) ? 'applied' : 'drifted',
+          componentRowId: res.componentRowId,
+          type: comp.type,
+          id: comp.id,
+          inDatabase: before,
+          reason: before === String(entry.value) ? null : `the database has ${before === null ? 'no value' : before}`,
+        });
+      }
+    }
+    for (const g of groupsOf(db)) groups.push({ id: g.id, name: g.name, selected: !!g.selected });
+    return {
+      ok: true,
+      error: stored.error,
+      unusable: stored.unusable,
+      groups,
+      stale: staleMods(dbPath, { file }),
+      count: out.length,
+      overrides: out,
+    };
+  } finally {
+    db.close();
+  }
+}
+
 module.exports = {
-  VERSION, FIND, MISSING, AMBIGUOUS, SENTINEL,
+  VERSION, FIND, MISSING, AMBIGUOUS, SENTINEL, MIN_FREE_RUN,
   overridesFile, openDb,
   keyFor, actionKey, resolveAction, isModId,
   readOverrides, writeOverrides, setOverride, clearOverride,
   modFile, stampFor, stampIsStale,
-  applyOverrides, resetOverride, syncOverrides, staleMods,
+  applyOverrides, resetOverride, syncOverrides, staleMods, listOverrides,
+  profileLoadOrder,
 };

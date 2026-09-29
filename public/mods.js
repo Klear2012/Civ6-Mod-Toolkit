@@ -185,6 +185,7 @@ function rowBody(m, all) {
     : sourceTag(m);
   return `<span class="name"><b>${renderCivText(m.name)}</b>${sub}${probs}</span>
     ${tag}${labelsChip(m)}${folderButton(m)}
+    <button type="button" class="info lo-info" data-loadorder="${esc(m.idNorm)}" title="See this mod in the load order">&#8646;</button>
     <button type="button" class="info" data-info="${esc(m.idNorm)}" title="Details">i</button>`;
 }
 
@@ -516,6 +517,16 @@ function rowButtonClick(e) {
     e.preventDefault();
     e.stopPropagation();
     showLabelEditor(b.dataset.labels);
+    return true;
+  }
+  // The load order view marks this mod's rows in context rather than filtering
+  // to them: a list showing only this mod answers none of the question the
+  // button was clicked to ask. Same reason for claiming the click - the row is a
+  // <label>, so an unclaimed one toggles the mod.
+  if (b.dataset.loadorder !== undefined) {
+    e.preventDefault();
+    e.stopPropagation();
+    location.hash = `#/load-order?mark=${encodeURIComponent(b.dataset.loadorder)}`;
     return true;
   }
   return false;

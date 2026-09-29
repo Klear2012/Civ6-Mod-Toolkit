@@ -437,3 +437,85 @@ button.small { padding: 5px 10px; font-size: 12.5px; }
   .list.tall { max-height: calc(100vh - 520px); }
   .pane .list.tall { max-height: calc(100vh - 570px); }
 }
+
+/* ===== Load order =========================================================
+ *
+ * One list, three kinds of row: a value, a free run, and a headroom marker. The
+ * free runs are the reason this page exists - a gap between two actions you can
+ * see is a gap you could put something in - so they are styled to read as
+ * absence rather than as another kind of content. */
+.note {
+  color: var(--muted);
+  font-size: 13px;
+  margin: 4px 0 10px;
+  max-width: 90ch;
+}
+.note p { margin: 0 0 8px; }
+
+.lo-band {
+  border-left: 2px solid var(--panel-2);
+  padding: 2px 0 6px 10px;
+  margin-bottom: 2px;
+}
+.lo-band.lo-tie { border-left-color: var(--accent-dim, #388bfd); }
+.lo-bandhead { display: flex; align-items: baseline; gap: 10px; }
+.lo-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+  color: var(--text);
+  min-width: 9ch;
+  text-align: right;
+}
+.lo-bandnote { color: var(--muted); font-size: 12px; }
+
+.lo-band.lo-free {
+  border-left: 0;
+  border-top: 1px dashed var(--panel-2);
+  border-bottom: 1px dashed var(--panel-2);
+  padding: 6px 0 6px 10px;
+  margin: 6px 0;
+}
+.lo-band.lo-free .lo-value { color: var(--muted); font-weight: 400; }
+
+.lo-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 2px 0 2px 6px;
+  font-size: 13px;
+}
+.lo-mod { color: var(--text); min-width: 22ch; }
+.lo-type { color: var(--muted); font-size: 12px; min-width: 16ch; }
+.lo-detail { color: var(--muted); font-size: 12px; display: flex; flex-wrap: wrap; gap: 8px; align-items: baseline; }
+.lo-key { color: var(--muted); font-size: 11px; opacity: .8; }
+
+/* The mod you arrived from. Marked, not filtered: filtering to one mod would
+   remove the neighbours that are the whole point. */
+.lo-mark { background: rgba(56, 139, 253, .10); box-shadow: inset 2px 0 0 #388bfd; }
+
+.lo-tag {
+  display: inline-block;
+  border: 1px solid var(--panel-2);
+  border-radius: 4px;
+  padding: 0 5px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.lo-override { color: #3fb950; border-color: rgba(63, 185, 80, .45); }
+.lo-drift    { color: #d29922; border-color: rgba(210, 153, 34, .45); }
+.lo-lost     { color: #f85149; border-color: rgba(248, 81, 73, .45); }
+.lo-typo, .lo-unprot { color: var(--muted); }
+
+.lo-cond.lo-off { color: #f85149; }
+.lo-cond.lo-unknown { color: #d29922; }
+.lo-ov { color: var(--muted); }
+.lo-diff { font-size: 11px; }
+.lo-diff-rm { color: #d29922; }
+.lo-diff-same { opacity: .6; }
+
+.lov-row { align-items: center; padding: 6px 0; border-bottom: 1px solid var(--panel-2); }
+.lov-actions { margin-left: auto; display: flex; gap: 6px; }
+
+/* The row-level button that opens the load order view for one mod. Sits next to
+   the details button and looks the same, because it is the same kind of thing. */
+.lo-info { font-size: 12px; }

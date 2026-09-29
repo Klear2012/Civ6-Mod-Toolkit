@@ -24,6 +24,7 @@ const {
 } = require('./modsdb');
 const { gameStatus } = require('./game');
 const labelStore = require('./labels');
+const loOrder = require('./loadorder');
 
 const { version: VERSION } = require('../package.json');
 const STARTED = new Date().toISOString();
@@ -244,6 +245,28 @@ function folderStats(dir) {
 
 // -------- API ---------------------------------------------------------------
 
+// GET /api/load-order -> one profile's load order, as a flat sorted list.
+//
+// Read-only. The whole page is built from this, and there is deliberately no
+// write route anywhere near it: changing a value is problem 2 and lives at
+// /api/load-overrides, which is a different screen. phase7 asserts that this
+// route is a GET and that no POST under /api/load-order exists, because
+// "read-only" erodes quietly as features get added.
+function loadOrderResponse(modsDb, url) {
+  const num = (name) => {
+    const v = url.searchParams.get(name);
+    return v != null && /^\d+$/.test(v) ? Number(v) : null;
+  };
+  try {
+    return loOrder.profileLoadOrder(modsDb.path, { groupId: num('profile'), compareGroupId: num('compare') });
+  } catch (e) {
+    return {
+      ok: false, error: e.message, groups: [], profile: null,
+      bands: [], undeclared: [], undeclaredTotal: 0, unmatched: [], summary: {},
+    };
+  }
+}
+
 // Every label write answers with the refreshed state, so the page updates in
 // place instead of refetching 421 mods. `moved`, `merged` and `removed` are set
 // only by the rename and delete routes; JSON.stringify drops the undefined ones,
@@ -277,6 +300,99 @@ async function handleApi(req, res, url) {
       ...listConfigs(),
       installed: installed.map((m) => ({ id: m.id, idNorm: m.idNorm, name: m.name, type: m.type })),
     });
+  }
+
+  // GET /api/load-order -> the profile's load order, read-only.
+  if (req.method === 'GET' && url.pathname === '/api/load-order') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 200, { ok: false, error: 'Mod database not found.', groups: [], profile: null, bands: [], summary: {} });
+    return send(res, 200, loadOrderResponse(modsDb, url));
+  }
+
+  // ===== Load order overrides: problem 2, a separate screen =============
+  // Every route here writes, and every one of them refuses while Civ6 has the
+  // database open. loadorder does that check itself and awaits it, because a
+  // check that cannot fail is not a check - the investigation's own script read
+  // an async gameStatus() as a plain object and its guard never fired.
+
+  // GET /api/load-overrides -> every stored override and its current state
+  if (req.method === 'GET' && url.pathname === '/api/load-overrides') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 200, { ok: false, error: 'Mod database not found.', overrides: [], count: 0, groups: [] });
+    try {
+      return send(res, 200, loOrder.listOverrides(modsDb.path));
+    } catch (e) {
+      return send(res, 500, { error: e.message, overrides: [], count: 0, groups: [] });
+    }
+  }
+
+  // POST /api/load-overrides -> set one action's position
+  if (req.method === 'POST' && url.pathname === '/api/load-overrides') {
+    const body = await readBody(req);
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    try {
+      const r = await loOrder.applyOverrides(modsDb.path, [{ modId: body.modId, key: body.key, value: body.value }]);
+      return send(res, 200, {
+        ...loOrder.listOverrides(modsDb.path),
+        applied: r.applied,
+        orphans: r.orphans,
+        ambiguous: r.ambiguous,
+        unprotectable: r.unprotectable,
+        sentinels: r.sentinels,
+        backupPath: r.backupPath,
+      });
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
+
+  // POST /api/load-overrides/reset -> put one action back to the author's value,
+  // in the database and in the store.
+  if (req.method === 'POST' && url.pathname === '/api/load-overrides/reset') {
+    const body = await readBody(req);
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    try {
+      const r = await loOrder.resetOverride(modsDb.path, body.modId, body.key);
+      return send(res, 200, { ...loOrder.listOverrides(modsDb.path), restored: r.restored, backupPath: r.backupPath });
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
+
+  // POST /api/load-overrides/discard -> forget an override WITHOUT touching the
+  // database. The value stays where the last apply put it, which the client
+  // says in its confirm: discarding is not the same as resetting, and only one
+  // of them undoes what the override did.
+  if (req.method === 'POST' && url.pathname === '/api/load-overrides/discard') {
+    const body = await readBody(req);
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    try {
+      loOrder.clearOverride(loOrder.overridesFile(), body.modId, body.key);
+      return send(res, 200, loOrder.listOverrides(modsDb.path));
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
+
+  // POST /api/load-overrides/sync -> re-apply everything now, for a server that
+  // has been left running across a Steam sync.
+  if (req.method === 'POST' && url.pathname === '/api/load-overrides/sync') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    const g = await gameStatus();
+    if (g.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
+    try {
+      const r = loOrder.syncOverrides(modsDb.path);
+      return send(res, 200, {
+        ...loOrder.listOverrides(modsDb.path),
+        sync: { changed: r.changed, applied: r.applied.length, drifted: r.drifted, orphans: r.orphans, ambiguous: r.ambiguous },
+      });
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
   }
 
   // GET /api/dashboard -> counts, folder setup, game status
