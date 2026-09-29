@@ -6,6 +6,7 @@ node_modules/
 *.Civ6Save
 *.bak-*
 civ6-paths.json
+mod-labels.json
 
 # misc
 scratch_*

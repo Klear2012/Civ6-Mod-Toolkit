@@ -10,6 +10,7 @@
     "phase1": "node src/phase1-inventory.js",
     "phase2": "node src/phase2-save.js",
     "phase4": "node src/phase4-profiles.js",
+    "phase5": "node src/phase5-labels.js",
     "edit": "node src/edit-config.js"
   },
   "author": "cru121 (Steam: evzenhouzvicka), maintained by Klear2012",
