@@ -26,6 +26,7 @@ const { gameStatus } = require('./game');
 const labelStore = require('./labels');
 
 const { version: VERSION } = require('../package.json');
+const STARTED = new Date().toISOString();
 const PORT = parseInt(process.env.PORT, 10) || 8673;
 const HOST = '127.0.0.1';
 const PUBLIC = path.join(__dirname, '..', 'public');
@@ -606,6 +607,19 @@ async function handleApi(req, res, url) {
     } catch (e) {
       return send(res, 500, { error: e.message });
     }
+  }
+
+  // POST /api/ping -> does this server know about the page it just served?
+  //
+  // A stale server and a freshly reloaded page are an easy pair to end up with:
+  // the HTML and scripts are read from disk on every request, so a reload picks
+  // up new UI code while the process behind it is still running the code from
+  // whenever it started. The symptom is a bare "not found" from a route that
+  // plainly exists on disk, which looks like a bug in the feature rather than a
+  // server that needs restarting. An old server has never heard of this route,
+  // so a 404 here is the answer rather than the problem.
+  if (req.method === 'POST' && url.pathname === '/api/ping') {
+    return send(res, 200, { ok: true, version: VERSION, started: STARTED });
   }
 
   // GET /api/game -> is Civ6 running (polled by the UI)

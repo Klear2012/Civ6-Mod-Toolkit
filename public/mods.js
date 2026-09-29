@@ -261,6 +261,9 @@ function renderMods() {
   if (d.labelsError) {
     alerts.push(`<div class="alert warn"><b>Problem with your labels.</b> ${esc(d.labelsError)} Showing no labels until it is fixed.</div>`);
   }
+  if (serverIsStale) {
+    alerts.push('<div class="alert warn"><b>The toolkit needs restarting.</b> This page is newer than the program serving it, so the parts of it that need the server will fail — saving labels, for one. Close the toolkit and start it again.</div>');
+  }
   // No button here on purpose: adding mods writes to the game's database, and
   // the mod manager's only write is Apply changes. Point at the dashboard
   // instead so there is one place that adds mods, not two.
@@ -328,7 +331,24 @@ function updateModsBar() {
   $('discardMods').disabled = !(on || off);
 }
 
+// The page's files are read from disk on every request, so a browser reload
+// picks up new code while the server process may still be running whatever it
+// was started with. Nothing says so, and the first thing you meet is a bare
+// "not found" from a route that exists - which reads as a broken feature rather
+// than a server that wants restarting. A server that has never heard of /api/ping
+// is by definition an old one, so the 404 is the answer.
+let serverIsStale = false;
+async function checkServerIsCurrent() {
+  try {
+    await postJson('/api/ping', {});
+    serverIsStale = false;
+  } catch (_) {
+    serverIsStale = true;
+  }
+}
+
 async function loadMods() {
+  await checkServerIsCurrent();
   modsPage.data = await api('/api/mods');
   // Drop pending changes that the current state already satisfies.
   const all = byNorm();
@@ -592,7 +612,12 @@ async function saveLabels() {
     renderMods();
     if ($('labelDialog').open) renderLabelEditor();
   } catch (err) {
-    toast(esc(err.message), 'err');
+    // A bare "not found" here is the server's catch-all, not this route's
+    // "mod not found", so it means the route does not exist on the process
+    // answering - a toolkit that is older than this page.
+    toast(serverIsStale || err.message === 'not found'
+      ? 'The toolkit server is out of date. Close the toolkit and start it again.'
+      : esc(err.message), 'err');
     $('labelSave').disabled = false;
   }
 }
