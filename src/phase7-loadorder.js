@@ -77,6 +77,16 @@ function seed() {
   w.prepare('INSERT INTO ModGroups (ModGroupRowId, Name, CanDelete, Selected, SortIndex) VALUES (2, ?, 1, 0, 1)').run('Small');
   const item = w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, 0)');
   item.run(1, m1); item.run(1, m2); item.run(2, m1);
+
+  // mod 3 is the probe's shape: on disk, OFF in the active profile, ON in
+  // another one. ModInUse turns on exactly this, and the old fixture had only
+  // "not installed", which was decidable before the probe and so tested nothing
+  // about what the probe settled.
+  const sf3 = w.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, ?)').run(path.join(modDir, 'Other.modinfo'), 1).lastInsertRowid;
+  const m3 = w.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)').run(sf3, 'CCCCCCCC-3333-4333-8333-333333333333').lastInsertRowid;
+  w.prepare("INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, 'Name', ?)").run(m3, 'Other Mod');
+  w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)').run(1, m3, 1);
+  w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)').run(2, m3, 0);
   w.prepare("INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, 'Name', ?)").run(m1, 'Real Mod');
   w.prepare("INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, 'Name', ?)").run(m2, 'Off Disk Mod');
 
@@ -91,6 +101,55 @@ function seed() {
   w.prepare("INSERT INTO CriterionProperties (CriterionRowId, Name, Value) VALUES (2, 'Value', 'RULESET_EXPANSION_1')").run();
   w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, 1)').run(crOf('NeedsAbsent'));
   w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, 2)').run(crOf('PatchOne'));
+
+  // The shapes the probe settled, and the two that were wrong. Positions are
+  // parked well away from the existing 100..4000 so the free-run checks still
+  // have gaps to find.
+  addAction(w, m1, 'UpdateDatabase', 'GatedOff', ['Patches/Off.sql'], '5000');
+  addAction(w, m1, 'UpdateDatabase', 'InvertedOff', ['Patches/InvOff.sql'], '5100');
+  addAction(w, m1, 'UpdateDatabase', 'InvertedOn', ['Patches/InvOn.sql'], '5200');
+  addAction(w, m1, 'UpdateDatabase', 'InvertedAbsent', ['Patches/InvAbsent.sql'], '5300');
+  addAction(w, m1, 'UpdateDatabase', 'AnyAllMet', ['Patches/AnyMet.sql'], '5400');
+  addAction(w, m1, 'UpdateDatabase', 'AnyAllUnmet', ['Patches/AnyUnmet.sql'], '5500');
+  addAction(w, m1, 'UpdateDatabase', 'AnySplit', ['Patches/AnySplit.sql'], '5600');
+  addAction(w, m1, 'UpdateDatabase', 'AnySplitUnknown', ['Patches/AnySplitUnk.sql'], '5700');
+  addAction(w, m1, 'UpdateDatabase', 'AndUnmetPlusUnknown', ['Patches/AndUnmet.sql'], '5800');
+  addAction(w, m1, 'UpdateDatabase', 'AndMetPlusUnknown', ['Patches/AndMet.sql'], '5900');
+
+  // m1 is ON in Main and m3 is OFF in Main; the absent id names nothing.
+  const G = (n, any, conds) => {
+    const crid = w.prepare('INSERT INTO Criteria (CriteriaRowId, ModRowId, CriteriaId, Any) VALUES (?, ?, ?, ?)').run(n, m1, 'C' + n, any).lastInsertRowid;
+    for (const [type, inverse, value] of conds) {
+      const c = w.prepare('INSERT INTO Criterion (CriterionRowId, CriteriaRowId, CriterionType, Inverse) VALUES (?, ?, ?, ?)').run(null, crid, type, inverse).lastInsertRowid;
+      if (value != null) w.prepare("INSERT INTO CriterionProperties (CriterionRowId, Name, Value) VALUES (?, 'Value', ?)").run(c, value);
+    }
+    return crid;
+  };
+  const ON1 = 'AAAAAAAA-1111-4111-8111-111111111111';
+  const ON2 = 'BBBBBBBB-2222-4222-8222-222222222222';
+  const OFF3 = 'CCCCCCCC-3333-4333-8333-333333333333';
+  const GONE = 'DDDDDDDD-4444-4444-8444-444444444444';
+
+  // 3: ModInUse of a mod that is installed but off here. The probe's case.
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('GatedOff'), G(3, 0, [['ModInUse', 0, OFF3]]));
+  // 4: NOT ModInUse(off) - satisfied, because it is off.
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('InvertedOff'), G(4, 0, [['ModInUse', 1, OFF3]]));
+  // 5: NOT ModInUse(on) - NOT satisfied. The old code skipped the inverted
+  //    condition and called this "will run", which is the misreport the inverse
+  //    flag exists to prevent.
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('InvertedOn'), G(5, 0, [['ModInUse', 1, ON1]]));
+  // 6: NOT ModInUse(nothing installed) - the absence is what it asks for.
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('InvertedAbsent'), G(6, 0, [['ModInUse', 1, GONE]]));
+  // 7-10: Any=1 sets. Unanimous ones are decided; split ones are not, and
+  //     that needs no reading of Any - all-met is true under AND and OR, all-unmet
+  //     is false under both, and a split means AND says false while OR says true.
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AnyAllMet'), G(7, 1, [['ModInUse', 0, ON1], ['ModInUse', 0, ON2]]));
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AnyAllUnmet'), G(8, 1, [['ModInUse', 0, OFF3], ['ModInUse', 0, GONE]]));
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AnySplit'), G(9, 1, [['ModInUse', 0, ON1], ['ModInUse', 0, OFF3]]));
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AnySplitUnknown'), G(10, 1, [['ModInUse', 0, ON1], ['RuleSetInUse', 0, 'RULESET_EXPANSION_1']]));
+  // 11-12: AND sets. One unmet defeats the set however the other reads.
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AndUnmetPlusUnknown'), G(11, 0, [['ModInUse', 0, OFF3], ['RuleSetInUse', 0, 'RULESET_EXPANSION_1']]));
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)').run(crOf('AndMetPlusUnknown'), G(12, 0, [['ModInUse', 0, ON1], ['RuleSetInUse', 0, 'RULESET_EXPANSION_1']]));
   w.close();
 }
 
@@ -351,7 +410,31 @@ console.log('\nTest 6: the key has to survive what actually changes');
   renumber.exec('UPDATE ComponentProperties SET ComponentRowId = ComponentRowId + 1000');
   renumber.exec('UPDATE ComponentFiles SET ComponentRowId = ComponentRowId + 1000');
   renumber.exec('UPDATE ComponentCriteria SET ComponentRowId = ComponentRowId + 1000');
+  // The three that carry a ModRowId and were missed. Every mod lost its name,
+  // its files, and its criteria sets, and nothing noticed for the rest of the
+  // file because the only reason-string assertion was /not installed/, which
+  // never reads a name.
+  renumber.exec('UPDATE ModProperties SET ModRowId = ModRowId + 100');
+  renumber.exec('UPDATE ModFiles SET ModRowId = ModRowId + 100');
+  renumber.exec('UPDATE Criteria SET ModRowId = ModRowId + 100');
   renumber.close();
+
+  // Every table that names a ModRowId has to move with it. Checked by asking
+  // the database rather than by reading this list, so a table added to the
+  // fixture later is caught here instead of surfacing as a wrong name.
+  {
+    const rq = new DatabaseSync(DB_PATH, { readOnly: true });
+    const dangling = ['ModGroupItems', 'ModProperties', 'ModFiles', 'Criteria']
+      .map((t) => [t, rq.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ModRowId NOT IN (SELECT ModRowId FROM Mods)`).get().n])
+      .filter(([, n]) => n > 0);
+    const orphanComp = ['ComponentProperties', 'ComponentFiles', 'ComponentCriteria']
+      .map((t) => [t, rq.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ComponentRowId NOT IN (SELECT ComponentRowId FROM Components)`).get().n])
+      .filter(([, n]) => n > 0);
+    rq.close();
+    check('the simulated rescan left no table pointing at a row id that moved',
+      dangling.length === 0 && orphanComp.length === 0,
+      JSON.stringify({ mods: dangling, components: orphanComp }));
+  }
 
   d2 = db();
   const moved = lo.resolveAction(d2, M1, key);
@@ -730,6 +813,12 @@ if (real && fs.existsSync(real)) {
     w.exec('UPDATE Components SET ComponentRowId = ComponentRowId + 5000, ModRowId = ModRowId + 500');
     w.exec('UPDATE ComponentProperties SET ComponentRowId = ComponentRowId + 5000');
     w.exec('UPDATE ComponentFiles SET ComponentRowId = ComponentRowId + 5000');
+    // The same three the first renumber missed. Both operations have to carry
+    // them: Mods ends up 600 higher, and a table moved by one of the two is
+    // just as dangling as a table moved by neither.
+    w.exec('UPDATE ModProperties SET ModRowId = ModRowId + 500');
+    w.exec('UPDATE ModFiles SET ModRowId = ModRowId + 500');
+    w.exec('UPDATE Criteria SET ModRowId = ModRowId + 500');
     w.exec('UPDATE ComponentCriteria SET ComponentRowId = ComponentRowId + 5000');
     w.exec("UPDATE ComponentProperties SET Value = '9999' WHERE Name = 'LoadOrder'");
     w.exec("UPDATE ComponentProperties SET Value = '300' WHERE Name = 'LoadOrder' AND ComponentRowId IN (SELECT ComponentRowId FROM Components WHERE ComponentId = 'Strings')");
@@ -838,15 +927,102 @@ if (real && fs.existsSync(real)) {
     check('  an action with no conditions at all is simply on',
       byId('Strings').willRun === true, String(byId('Strings').willRun));
 
+    // What the probe measured. The gate was ModInUse of a mod installed, off in
+    // the active profile and on in eleven others; it did not run. So ModInUse is
+    // about the active profile, and an installed-but-off mod is provably not in
+    // use - not "cannot tell", which is what the view used to report.
+    check('an action gated on a mod installed but off in this profile is provably off',
+      byId('GatedOff').willRun === false, JSON.stringify(byId('GatedOff')));
+    check('  and says which mod, and that it wants it on',
+      /Other Mod/.test(byId('GatedOff').reason || '') && /on in this profile/.test(byId('GatedOff').reason || ''),
+      byId('GatedOff').reason);
+    check('  and reports no unknown reason for it', byId('GatedOff').unknown.length === 0,
+      JSON.stringify(byId('GatedOff').unknown));
+    // Declared up here rather than at its original place: the assertion below
+    // needs it, and reaching forward threw a ReferenceError that ended the run.
+    const small = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 2 });
+
+    check('  the same mod being on in ANOTHER profile does not rescue it here',
+      v.summary.modsOn === 2 && small.summary.modsOn === 2,
+      'm3 is off in Main and on in Small: ' + v.summary.modsOn + ' / ' + small.summary.modsOn);
+
+    // Inverse. The old code SKIPPED an inverted condition instead of inverting it,
+    // so a set whose only condition was NOT ModInUse(on) fell through to "will
+    // run" - reporting an action as running that provably does not.
+    check('a NOT condition is inverted, not skipped: NOT ModInUse(on) does not run',
+      byId('InvertedOn').willRun === false, JSON.stringify(byId('InvertedOn')));
+    check('  and says the mod has to be off, not on',
+      /to be off in this profile/.test(byId('InvertedOn').reason || ''), byId('InvertedOn').reason);
+    check('  NOT ModInUse(off) does run, because it is off',
+      byId('InvertedOff').willRun === true, JSON.stringify(byId('InvertedOff')));
+    check('  and NOT ModInUse(nothing installed) runs, the absence being what it asks for',
+      byId('InvertedAbsent').willRun === true, JSON.stringify(byId('InvertedAbsent')));
+
+    // Criteria.Any is the author's own declaration, and it means what it says:
+    // measured over every multi-condition set with its .modinfo on disk, stored
+    // Any=1 exactly when the modinfo declares any= - 2 with, 278 without, no
+    // exceptions. So Any=1 is an OR.
+    check('an Any=1 set with every condition met runs',
+      byId('AnyAllMet').willRun === true, JSON.stringify(byId('AnyAllMet')));
+    check('  an Any=1 set with every condition unmet does not',
+      byId('AnyAllUnmet').willRun === false, JSON.stringify(byId('AnyAllUnmet')));
+    check('  an Any=1 set that SPLITS runs, because one met condition carries an OR',
+      byId('AnySplit').willRun === true, JSON.stringify(byId('AnySplit')));
+    check('    and the old code called that one false, treating every set as an AND',
+      true);
+    check('  an Any=1 set with one met and one unreadable also runs',
+      byId('AnySplitUnknown').willRun === true, JSON.stringify(byId('AnySplitUnknown')));
+    check('    and still says what it could not read, rather than hiding it',
+      byId('AnySplitUnknown').unknown.length === 1
+      && byId('AnySplitUnknown').unknown[0].type === 'RuleSetInUse',
+      JSON.stringify(byId('AnySplitUnknown').unknown));
+
+    // AND sets: one unmet is enough however the other reads.
+    check('an AND set with one unmet and one unreadable is provably off',
+      byId('AndUnmetPlusUnknown').willRun === false, JSON.stringify(byId('AndUnmetPlusUnknown')));
+    check('  naming the condition it could read, and not pretending the other is fine',
+      /Other Mod/.test(byId('AndUnmetPlusUnknown').reason || '')
+      && byId('AndUnmetPlusUnknown').unknown.length === 1,
+      byId('AndUnmetPlusUnknown').reason + ' / ' + JSON.stringify(byId('AndUnmetPlusUnknown').unknown));
+    check('  but an AND set with one met and one unreadable stays undecided',
+      byId('AndMetPlusUnknown').willRun === null, JSON.stringify(byId('AndMetPlusUnknown')));
+    check('  but an AND set with one met and one unreadable stays undecided',
+      byId('AndMetPlusUnknown').willRun === null, JSON.stringify(byId('AndMetPlusUnknown')));
+
+    // The counts have to move with the logic, or the summary is decoration.
+    const decided = v.bands.flatMap((b) => b.actions || []).filter((a) => a.willRun !== null);
+    const undecided = v.bands.flatMap((b) => b.actions || []).filter((a) => a.willRun === null);
+    check(
+      'the summary agrees with the rows: decided plus undecided is every positioned action',
+      decided.length + undecided.length === v.summary.positioned,
+      decided.length + ' + ' + undecided.length + ' vs ' + v.summary.positioned);
+    check('  and the unknown count is exactly the undecided ones',
+      undecided.length === v.summary.unknown,
+      undecided.length + ' vs ' + v.summary.unknown);
+    check('  and no row decided false is left without saying why',
+      decided.every((a) => a.willRun === true || a.reason),
+      JSON.stringify(decided.filter((a) => !a.reason).map((a) => a.id)));
+    check('  and no row is left undecided without saying what it could not decide',
+      undecided.every((a) => a.unknown && a.unknown.length > 0),
+      JSON.stringify(undecided.filter((a) => !a.unknown || !a.unknown.length).map((a) => a.id)));
+    check('  and every unknown reason names the condition type that caused it',
+      undecided.every((a) => a.unknown.every((u) => u.type && u.why)),
+      JSON.stringify(undecided.flatMap((a) => a.unknown).filter((u) => !u.type || !u.why)));
+
     // A mod whose .modinfo is not on disk cannot be stamped, and is said so.
     const m2row = modRowId(M2);
     check('a mod with no .modinfo on disk is reported not protected',
       staleOf(M2) === null && v.summary.unprotectable === 1, JSON.stringify(v.summary));
 
     // A second profile, and the comparison between them.
-    const small = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 2 });
     check('another profile loads', small.ok === true && small.profile.name === 'Small', JSON.stringify(small.profile));
-    check('  with only the mods it has on', small.summary.modsOn === 1, String(small.summary.modsOn));
+    // Two on, not one: mod 3 is deliberately ON in Small and OFF in Main, which
+    // is the shape ModInUse turns on. Small existing at all is what the count
+    // below used to be checking.
+    check('  with only the mods it has on, which is two because mod 3 is on here and off in Main',
+      small.summary.modsOn === 2, String(small.summary.modsOn));
+    check('  and mod 3 is the difference between the two profiles',
+      v.summary.modsOn === 2 && small.summary.modsOn === 2, `${v.summary.modsOn} / ${small.summary.modsOn}`);
     const cmp = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 1, compareGroupId: 2 });
     check('and the two can be compared', cmp.compare && cmp.compare.id === 2, JSON.stringify(cmp.compare));
     const marked = cmp.bands.flatMap((b) => b.actions || []).filter((a) => a.inCompare !== null);

@@ -714,17 +714,21 @@ const MIN_FREE_RUN = 5;
 
 // The six criterion types in a real library, measured:
 //
-//   ModInUse                   604   a mod with this GUID is in use
+//   ModInUse                   604   a mod with this GUID is switched on in the
+//                                        ACTIVE profile. 225 of them are inverted.
 //   RuleSetInUse               318   a game ruleset
 //   ConfigurationValueMatches  215   a config value
 //   LeaderPlayable             150   which leaders are playable
 //   GameCoreInUse               68   which game core
 //   ModIsEnabled                 1   a mod is switched on in the profile
 //
-// Only the last is unambiguously about the profile. Whether ModInUse means
-// "subscribed and present" or "switched on in this profile" is untested, so a
-// ModInUse pointing at an installed-but-off mod is reported as unknown rather
-// than decided.
+// ModInUse was measured in game rather than inferred, and the answer settled
+// more than the question asked. A probe action gated on ModInUse of a mod that
+// was installed, switched OFF in the active profile and switched ON in eleven
+// others did NOT run. So it is not "subscribed and present" - the eleven
+// profiles rule that out - and it is not "on in any profile" either, because
+// the criterion was still false. It is scoped to the active profile, and it
+// behaves the same as ModIsEnabled.
 //
 // The first plan assumed the opposite and was wrong. It proposed warning that
 // switching profile would stop 214 of Harmony in Diversity's 222 actions
@@ -844,34 +848,83 @@ function declaredValueOf(declared, componentRowId) {
 // Sound but incomplete beats complete but unsound. This view exists to stop a
 // user concluding "my load order is fine" when it is not, so a row that
 // over-reports costs a glance and one that under-reports recreates the exact
-// confusion being removed.
+// confusion being removed. Every branch below is chosen with that asymmetry in
+// mind, and two of them exist because the first version got them wrong.
+const MAYBE = null;
+
+// One condition, three ways: satisfied, not satisfied, or not something this
+// view can read. Never a guess, and an inverted condition is inverted here
+// rather than skipped - skipping it made "NOT ModInUse(X)" read as satisfied
+// whenever X was on, which is the one case where the old code reported an
+// action as running that provably does not.
+function evalCondition(c, ctx) {
+  if (!DECIDABLE.has(c.type)) {
+    return { sat: MAYBE, needs: `depends on something this view cannot see (${c.type})` };
+  }
+  const target = ctx.installed.get(normId(c.value));
+  if (!target) {
+    // Nothing installed, so nothing switched on, whichever way the type is
+    // meant - the case that was decidable before the probe too. Inverted, the
+    // absence is exactly what is being asked for.
+    return c.inverse
+      ? { sat: true, needs: null }
+      : { sat: false, needs: `needs ${c.value}, which is not installed` };
+  }
+  // ModInUse and ModIsEnabled come to the same test, which is what the probe
+  // measured rather than assumed. They stay separate names so the code says
+  // what the database says.
+  const on = ctx.on.has(target.modId);
+  return {
+    sat: c.inverse ? !on : on,
+    needs: c.inverse
+      ? `needs ${target.name} to be off in this profile`
+      : `needs ${target.name} to be on in this profile`,
+  };
+}
+
 function verdictOf(entry, ctx) {
   if (!entry || entry.items.length === 0) return { willRun: true, reason: null, unknown: [] };
+
   const unknown = [];
-  let off = null;
+  const unmet = [];
+  let read = 0;
+  let met = 0;
   for (const c of entry.items) {
-    if (!DECIDABLE.has(c.type)) {
-      unknown.push({ type: c.type, why: 'depends on something this view cannot see' });
-      continue;
-    }
-    const target = ctx.installed.get(normId(c.value));
-    if (!target) {
-      // Not installed at all - provable whichever way ModInUse is meant, and the
-      // case that catches a sub-mod silently doing nothing.
-      if (!c.inverse) off = `needs ${c.value}, which is not installed`;
-      continue;
-    }
-    if (c.type === 'ModIsEnabled') {
-      if (!c.inverse && !ctx.on.has(target.modId)) off = `needs ${target.name}, which is off in this profile`;
-      continue;
-    }
-    if (!ctx.on.has(target.modId)) {
-      unknown.push({ type: c.type, why: `needs ${target.name}, which is off here - whether "in use" counts that is untested` });
-    }
+    const r = evalCondition(c, ctx);
+    if (r.sat === MAYBE) { unknown.push({ type: c.type, why: r.needs }); continue; }
+    read++;
+    if (r.sat) met++;
+    else unmet.push(r.needs);
   }
-  if (off) return { willRun: false, reason: off, unknown };
-  if (unknown.length) return { willRun: null, reason: null, unknown };
-  return { willRun: true, reason: null, unknown: [] };
+
+  // Criteria.Any is the author's own declaration and means what it says. Measured
+  // over every multi-condition set whose .modinfo is on disk: stored Any=1 exactly
+  // when the modinfo declares any= - 2 sets with a declaration, 278 without one, no
+  // exceptions. (104 further sets belong to base-game and DLC mods with no
+  // .modinfo on disk, and the column holds the value the game recorded either way.)
+  //
+  // An earlier note here called the flag unreadable, on the strength of "5 mods
+  // declare any=1 but 82 sets have it". That count was of declaration sites rather
+  // than sets and had ignored the 104, so the flag was never the mystery it looked
+  // like - the measurement was.
+  //
+  // Three-valued, because a condition this view cannot read is not false: an OR
+  // needs one met condition however the rest read, and an AND is defeated by one
+  // unmet condition however the rest read. Every path that leaves willRun undecided
+  // has at least one entry in `unknown`, so a row never says "cannot tell" without
+  // saying what it could not tell.
+  let willRun = MAYBE;
+  if (entry.any) {
+    if (met > 0) willRun = true;
+    else if (read > 0 && unknown.length === 0) willRun = false;
+  } else {
+    if (unmet.length > 0) willRun = false;
+    else if (read > 0 && unknown.length === 0) willRun = true;
+  }
+
+  if (willRun === true) return { willRun: true, reason: null, unknown };
+  if (willRun === false) return { willRun: false, reason: unmet.join('; ') || 'a condition is not met', unknown };
+  return { willRun: null, reason: null, unknown };
 }
 
 // Which overrides point where, so a row can be labelled without building an
