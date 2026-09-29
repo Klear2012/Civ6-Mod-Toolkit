@@ -720,6 +720,27 @@ if (real && fs.existsSync(real)) {
       typeof r.backupPath === 'string' && fs.existsSync(r.backupPath) && fs.statSync(r.backupPath).size > 0,
       r.backupPath);
 
+    // O10, decided without a game. Counting backup files cannot work - modsdb
+    // names them to the second, so three writes in one second reuse one name.
+    // But the question is not how many were written, it is when the one that was
+    // written was taken: a backup per override would contain the earlier ones
+    // already applied, and that is readable.
+    {
+      const b = new DatabaseSync(r.backupPath, { readOnly: true });
+      const pre = b.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'");
+      const before = [pre.get(crOne), pre.get(crTwo), pre.get(crThree)].map((x) => (x ? x.v : null));
+      const post = dbValue(crOne) + '/' + dbValue(crTwo) + '/' + dbValue(crThree);
+      b.close();
+      check('the backup is a pre-image of the whole batch, so none of the three is in it',
+        !before.includes('4242') && !before.includes('7000') && !before.includes('8000'),
+        'backup held ' + JSON.stringify(before) + ', live now ' + post);
+      check("  and it holds the author's own value where there was one",
+        before[0] === '9999' && before[2] === '300', JSON.stringify(before));
+      check('  the misspelled one has no LoadOrder row in the backup at all, because the override creates one',
+        before[1] === null && dbValue(crTwo) === '7000',
+        'backup ' + JSON.stringify(before[1]) + ', live ' + dbValue(crTwo));
+    }
+
     // The misspelled property: the write goes to a correctly spelled row and the
     // author's typo is left exactly as it was.
     const d = db();
