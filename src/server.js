@@ -227,6 +227,27 @@ function folderStats(dir) {
 
 // -------- API ---------------------------------------------------------------
 
+// Every label write answers with the refreshed state, so the page updates in
+// place instead of refetching 421 mods. `moved`, `merged` and `removed` are set
+// only by the rename and delete routes; JSON.stringify drops the undefined ones,
+// so one shape serves all three rather than three near-identical bodies.
+function labelResponse(v, game) {
+  return {
+    ok: true, game,
+    labels: v.labels, labelCounts: v.counts, labelNames: v.names, labelsError: v.error,
+    moved: v.moved, merged: v.merged, removed: v.removed,
+  };
+}
+
+// The prune set is the same question in all three write routes: only prune
+// against a mod list we can vouch for, which needs the game closed. Kept here so
+// a fourth write cannot answer it differently, and given the caller's list
+// because modList() re-reads the database and rescans the mod folders - too
+// expensive to run twice for one click.
+function labelPruneSet(list, running) {
+  return list.ok && !running ? new Set(list.mods.map((m) => m.idNorm)) : null;
+}
+
 async function handleApi(req, res, url) {
   // GET /api/state -> paths, config list, installed inventory
   if (req.method === 'GET' && url.pathname === '/api/state') {
@@ -350,20 +371,52 @@ async function handleApi(req, res, url) {
     }
 
     const game = await gameStatus();
-    // Prune against the list only when it is a complete statement about which
-    // mods exist - the same rule /api/mods follows, for the same reason.
-    const known = list.ok && !game.running ? new Set(list.mods.map((m) => m.idNorm)) : null;
     try {
-      const v = labelStore.setLabels(labelStore.labelsFile(), mod.id, body.labels, known);
-      return send(res, 200, {
-        ok: true, game,
-        labels: v.labels, labelCounts: v.counts, labelNames: v.names, labelsError: v.error,
-      });
+      const v = labelStore.setLabels(labelStore.labelsFile(), mod.id, body.labels, labelPruneSet(list, game.running));
+      return send(res, 200, labelResponse(v, game));
     } catch (e) {
       // A mod-labels.json we can no longer read is the only thing left that can
       // land here, and setLabels says so in the message rather than overwriting
       // whatever the file holds.
       return send(res, 500, { error: e.message });
+    }
+  }
+
+  // POST /api/mods/labels/rename { from, to } -> rename a label on every mod
+  // that carries it. Renaming onto a name already in use merges the two, and the
+  // answer says so rather than letting it pass unnoticed.
+  if (req.method === 'POST' && url.pathname === '/api/mods/labels/rename') {
+    const body = await readBody(req);
+    // A name the user typed is a 400 about their request; anything after this
+    // point is a 500 about ours. Same split as the route above.
+    let to;
+    try { to = labelStore.cleanLabel(body.to); } catch (e) { return send(res, 400, { error: e.message }); }
+    if (!String(body.from || '').trim()) return send(res, 400, { error: 'which label?' });
+
+    const list = modList();
+    const game = await gameStatus();
+    try {
+      const v = labelStore.renameLabel(labelStore.labelsFile(), body.from, to, labelPruneSet(list, game.running));
+      return send(res, 200, labelResponse(v, game));
+    } catch (e) {
+      return send(res, /no mod is labelled/.test(e.message) ? 404 : 500, { error: e.message });
+    }
+  }
+
+  // POST /api/mods/labels/delete { name } -> take a label off every mod that
+  // carries it. A label no mod has cannot be deleted, because there is nothing
+  // to delete and saying otherwise would be a lie about what happened.
+  if (req.method === 'POST' && url.pathname === '/api/mods/labels/delete') {
+    const body = await readBody(req);
+    if (!String(body.name || '').trim()) return send(res, 400, { error: 'which label?' });
+
+    const list = modList();
+    const game = await gameStatus();
+    try {
+      const v = labelStore.deleteLabel(labelStore.labelsFile(), body.name, labelPruneSet(list, game.running));
+      return send(res, 200, labelResponse(v, game));
+    } catch (e) {
+      return send(res, /no mod is labelled/.test(e.message) ? 404 : 500, { error: e.message });
     }
   }
 

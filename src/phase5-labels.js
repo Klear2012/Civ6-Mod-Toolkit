@@ -379,6 +379,27 @@ console.log('\nTest 10: the decisions the server makes about labels');
     matches ? matches[1].trim() : 'matchesLabels not found');
   check('  and the filter narrows the visible list rather than replacing it',
     /SRC_MATCH\[modsPage\.src\]\(m\)\s*\n\s*&& matchesLabels\(m\)/.test(page));
+  // The filter is a set, so anything holding more than one label has to compare
+  // it as a set. A plain array would still pass the union check above.
+  check('  and it is a Set, so several labels can be selected at once',
+    /labels: new Set\(\)/.test(page) && /modsPage\.labels\.(add|delete|has)\(/.test(page));
+  check('  and a label that no longer exists leaves the selection',
+    /if \(!live\.has\(k\)\) modsPage\.labels\.delete\(k\)/.test(page));
+
+  // Rename and delete change every mod at once, so they need names of their own -
+  // one mod's id is not enough to ask for either.
+  check('a label can be renamed across every mod that has it',
+    /url\.pathname === '\/api\/mods\/labels\/rename'/.test(srv) && /labelStore\.renameLabel/.test(srv));
+  check('and deleted across every mod that has it',
+    /url\.pathname === '\/api\/mods\/labels\/delete'/.test(srv) && /labelStore\.deleteLabel/.test(srv));
+  check('  and the rename reports how many mods moved, and whether it merged',
+    /moved: v\.moved, merged: v\.merged/.test(srv));
+  check('  and neither is refused while Civ6 runs, like the other label writes',
+    !/409/.test(block('/api/mods/labels/rename')) && !/409/.test(block('/api/mods/labels/delete')));
+  // A rename is read-modify-write too, so a tab labelling a mod at the same
+  // moment does not lose its change to someone renaming a label.
+  check('  and it re-reads the file rather than trusting the page',
+    /labelStore\.renameLabel\(labelStore\.labelsFile\(\), body\.from, to,/.test(srv));
 }
 
 // --- Test 11: renaming and deleting a label everywhere ---------------------

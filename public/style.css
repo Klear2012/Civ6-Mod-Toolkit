@@ -214,35 +214,55 @@ button:disabled { opacity: .45; cursor: default; }
   flex: none; color: var(--muted); font-size: 12.5px; font-weight: 600; line-height: 24px;
   text-transform: uppercase; letter-spacing: .04em;
 }
-.filter-slot { min-width: 0; }
-/* The chips wrap rather than scroll sideways, and stop after two lines.
-   Measured against a screenshot with a dozen labels: at 1440 they fit on two
-   lines, and at 390 they took six - which pushed the mod list itself off the
-   bottom of the screen. Two lines is the cap; "show all" is the way past it.
-   The chip height is stated rather than inherited so the cap is arithmetic
-   instead of a guess that a font change would silently break. */
-.label-chips-wrap { position: relative; display: flex; gap: 6px; align-items: flex-start; min-width: 0; max-height: 54px; overflow: hidden; }
-.label-chips-wrap.open { max-height: none; overflow: visible; }
-/* flex:1 so the chips take the width the "show all" button does not, and the
-   button is a sibling of the stack rather than inside it - inside, it wrapped
-   onto a third line and was clipped along with everything else. */
-.label-chips { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; flex: 1 1 auto; min-width: 0; }
-.chip.label-filter, .chip.label-more {
-  height: 24px; display: inline-flex; align-items: center; flex: none;
+.filter-slot { min-width: 0; }/* The label filter control. A dropdown rather than a row of chips: with a dozen
+   labels the chips took six lines on a phone and pushed the mod list off the
+   bottom of the screen, and the fix for that was a two-line cap and a "+N more"
+   button - which is a dropdown with extra steps. Here the menu scrolls instead,
+   so how many labels exist stops being a layout problem at all. */
+/* flex so it fills the half like the profile select does beside it, bounded so
+   it does not become a full-width bar with one word in it. The 200px floor is
+   what lets the menu's footer sit on one line. */
+.dropdown { position: relative; flex: 1 1 260px; min-width: 200px; max-width: 420px; }
+.drop-trigger {
+  display: flex; align-items: center; gap: 10px; width: 100%; min-height: 37px;
+  background: var(--panel-2); color: var(--text); border: 1px solid var(--border);
+  border-radius: 6px; padding: 8px 12px; font: inherit; font-size: 13.5px; text-align: left;
 }
-.chip.label-more { cursor: pointer; font: inherit; font-size: 12px; color: var(--accent); border-color: var(--accent); }
-.chip.label-more:hover { background: var(--accent-dim); }
-/* Named `label-filter`, not `filter`: this stylesheet already has a .filter for
-   the name-search inputs, and reusing the name gave every chip width:100% and
-   a solid fill from that rule. The same happened to .toggle below. */
-.chip.label-filter { cursor: pointer; font: inherit; font-size: 12px; }
-.chip.label-filter:hover { color: var(--accent); border-color: var(--accent); }
-.chip.label-filter.on { color: var(--accent); border-color: var(--accent); background: var(--accent-dim); font-weight: 600; }
-.chip.label-filter .n { color: var(--muted); font-weight: 400; margin-left: 5px; }
-.chip.label-filter.on .n { color: var(--accent); }
-/* Nothing to narrow by yet. The row stays: the sort control lives in the other
-   half, and a row that appears and disappears is worse than an empty one. */
-.label-chips .none { color: var(--muted); font-size: 12.5px; }
+.drop-trigger:hover { border-color: var(--accent); }
+.drop-trigger .caret { color: var(--muted); flex: none; margin-left: auto; }
+.drop-trigger-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drop-menu {
+  position: absolute; z-index: 20; left: 0; right: 0; top: calc(100% + 4px);
+  background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, .45); padding: 6px;
+}
+.drop-list { max-height: 320px; overflow-y: auto; display: flex; flex-direction: column; }
+.drop-item {
+  display: flex; align-items: center; gap: 9px; padding: 6px 8px;
+  border-radius: 6px; cursor: pointer; font-size: 13.5px;
+}
+.drop-item:hover { background: var(--panel-2); }
+.drop-item input { width: 15px; height: 15px; accent-color: var(--accent); flex: none; margin: 0; }
+.drop-item .name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.drop-item .n { color: var(--muted); font-size: 12px; flex: none; font-variant-numeric: tabular-nums; }
+.drop-item.on .name { color: var(--accent); font-weight: 600; }
+.drop-foot {
+  display: flex; align-items: center; gap: 10px; padding: 8px 8px 4px;
+  margin-top: 4px; border-top: 1px solid var(--border);
+}
+.drop-foot .meta { flex: 1; min-width: 0; white-space: nowrap; }
+/* The caption sits centred on the control rather than on a stack of chips, so
+   the line-height matches the trigger's height. */
+.filter-half { align-items: center; }
+/* On a phone the caption, the dropdown and Manage cannot share a line - at 390px
+   they came to 415px, so Manage was pushed off the right edge and took a
+   horizontal scrollbar with it. The caption takes its own line instead, which
+   leaves the two controls the whole width. */
+@media (max-width: 560px) {
+  .filter-half { flex-wrap: wrap; }
+  .filter-caption { flex-basis: 100%; line-height: 1.4; }
+  .dropdown { min-width: 0; }
+}
 @media (max-width: 820px) { .filterbar { grid-template-columns: 1fr; gap: 10px; } }
 .toolbar { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-bottom: 14px; }
 .toolbar .filter { width: auto; flex: 1; min-width: 180px; margin: 0; }

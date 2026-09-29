@@ -140,10 +140,20 @@
       </div>
       <div class="filter-half">
         <span class="filter-caption">Label filters</span>
-        <div class="label-chips-wrap" id="labelChipsWrap">
-          <div class="label-chips" id="labelChips"></div>
-          <button type="button" class="chip label-more" id="labelMore" hidden></button>
+        <div class="dropdown" id="labelFilter">
+          <button type="button" class="drop-trigger" id="labelFilterBtn" aria-haspopup="true" aria-expanded="false">
+            <span id="labelFilterText">All labels</span>
+            <span class="caret" aria-hidden="true">&#9662;</span>
+          </button>
+          <div class="drop-menu" id="labelFilterMenu" hidden>
+            <div class="drop-list" id="labelFilterList"></div>
+            <div class="drop-foot">
+              <span class="meta" id="labelFilterMeta"></span>
+              <button type="button" class="secondary small" id="labelFilterClear">Clear</button>
+            </div>
+          </div>
         </div>
+        <button type="button" class="secondary" id="labelManage">Manage&hellip;</button>
       </div>
     </div>
 
@@ -209,6 +219,11 @@
     <dialog id="labelDialog" class="dialog">
       <button type="button" class="dialog-close" id="labelDialogClose" title="Close">×</button>
       <div id="labelDialogBody"></div>
+    </dialog>
+
+    <dialog id="labelManageDialog" class="dialog">
+      <button type="button" class="dialog-close" id="labelManageClose" title="Close">×</button>
+      <div id="labelManageBody"></div>
     </dialog>
   </section>
 

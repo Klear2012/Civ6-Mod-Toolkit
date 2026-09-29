@@ -189,65 +189,61 @@ function paneRow(m, all, arrow) {
 
 // ---- render ----------------------------------------------------------------
 
-// ---- label filter chips ----------------------------------------------------
+// ---- label filter dropdown -------------------------------------------------
 
-// The chips, one per label in use, each showing how many mods carry it. The
-// count is the point: a chip that would empty the list can be seen before it is
-// clicked, which is the one thing a chip this far from the list cannot otherwise
-// tell you. The server has already ordered them most-used first.
-function renderLabelChips() {
+// A dropdown rather than a row of chips. Chips were tried first and were fine
+// with three labels and unusable with twelve: they took six lines on a phone and
+// pushed the mod list off the bottom of the screen. A cap and a "+N more" button
+// papered over that; a menu that scrolls removes the question.
+
+// The trigger says what the filter is doing without opening it. One name is
+// worth showing; several are not, and a list of twelve in a 200px-wide button
+// would be truncated into noise, so it counts them.
+function renderLabelTrigger() {
+  const n = modsPage.labels.size;
+  const names = (modsPage.data.labelCounts || [])
+    .filter((c) => modsPage.labels.has(labelKey(c.name)))
+    .map((c) => c.name);
+  $('labelFilterText').textContent = !n ? 'All labels'
+    : n === 1 ? names[0]
+    : `${n} labels selected`;
+  $('labelFilterClear').disabled = n === 0;
+}
+
+// The menu: every label in use, with how many mods carry it. The count is the
+// point - a filter that would leave you nothing is visible before it is used,
+// which is the one thing a control this far from the list cannot otherwise tell
+// you. The server has already ordered them most-used first.
+function renderLabelMenu() {
   const d = modsPage.data;
-  const box = $('labelChips');
-  if (!d || !d.labelCounts || !d.labelCounts.length) {
-    box.innerHTML = '<span class="none">No labels yet — click <b>+</b> on a mod to add one.</span>';
-    $('labelMore').hidden = true;
-    return;
-  }
-  box.innerHTML = d.labelCounts.map((c) => {
-    const on = modsPage.labels.has(labelKey(c.name));
-    return `<button type="button" class="chip label-filter${on ? ' on' : ''}" data-label-filter="${esc(c.name)}"`
-      + ` aria-pressed="${on}" title="${esc(`${on ? 'Stop filtering by' : 'Show only mods labelled'} “${c.name}”`)}">`
-      + `${esc(c.name)}<span class="n">${c.count}</span></button>`;
-  }).join('');
-  syncChipOverflow();
+  const counts = (d && d.labelCounts) || [];
+  $('labelFilterList').innerHTML = counts.length
+    ? counts.map((c) => {
+      const on = modsPage.labels.has(labelKey(c.name));
+      return `<label class="drop-item${on ? ' on' : ''}">
+        <input type="checkbox" data-label-filter="${esc(c.name)}" ${on ? 'checked' : ''} />
+        <span class="name">${esc(c.name)}</span><span class="n">${c.count}</span></label>`;
+    }).join('')
+    : '<p class="hint drop-empty">No labels yet. Click <b>+</b> on a mod to add one.</p>';
+
+  // How many mods the current selection matches, so the menu says the same thing
+  // the list is doing.
+  const shown = visibleMods().length;
+  const total = d.mods.filter(SRC_MATCH[modsPage.src]).length;
+  $('labelFilterMeta').textContent = modsPage.labels.size
+    ? `${shown} of ${total} mods shown`
+    : `${total} mod${total === 1 ? '' : 's'}`;
 }
 
-// How many chips are out of sight, and whether to say so.
-//
-// Counted from where each chip actually landed rather than from how many there
-// are: how many fit on a line depends on the window's width and on how long
-// each label happens to be, so any count computed from the number of labels
-// would be a guess. The wrapper is position:relative, so a chip's offsetTop is
-// measured from the top of the clipped area, and anything at or past its
-// clientHeight is on a line that is not shown.
-function syncChipOverflow() {
-  const wrap = $('labelChipsWrap');
-  const more = $('labelMore');
-  const chips = [...$('labelChips').children];
-  if (wrap.classList.contains('open')) {
-    more.textContent = 'Show fewer';
-    more.hidden = false;
-    return;
-  }
-  const hidden = chips.filter((c) => c.offsetTop >= wrap.clientHeight).length;
-  more.hidden = hidden === 0;
-  if (!hidden) return;
-  more.textContent = `+${hidden} more`;
-  // Showing the button narrows the chips, which can push one more chip out of
-  // sight. One more pass settles it rather than leaving "+7 more" on screen
-  // while eight are hidden.
-  const again = [...$('labelChips').children].filter((c) => c.offsetTop >= wrap.clientHeight).length;
-  if (again !== hidden) more.textContent = `+${again} more`;
+function labelMenuIsOpen() {
+  return !$('labelFilterMenu').hidden;
 }
 
-$('labelMore').addEventListener('click', () => {
-  const wrap = $('labelChipsWrap');
-  wrap.classList.toggle('open');
-  syncChipOverflow();
-});
-// The cap is in lines, so a narrower window hides more chips and the count
-// changes without anything else being re-rendered.
-window.addEventListener('resize', () => { if (modsPage.data) syncChipOverflow(); });
+function setLabelMenu(open) {
+  $('labelFilterMenu').hidden = !open;
+  $('labelFilterBtn').setAttribute('aria-expanded', String(open));
+  if (open) renderLabelMenu();
+}
 
 function renderMods() {
   const d = modsPage.data;
@@ -289,7 +285,8 @@ function renderMods() {
   $('modsHint').textContent = (group ? `Editing mod group "${group}". ` : '') +
     'Changes are saved to the game when you click Apply, and take effect the next time you start Civ6.';
 
-  renderLabelChips();
+  renderLabelTrigger();
+  if (labelMenuIsOpen()) renderLabelMenu();
 
   const panes = modsPage.view === 'panes';
   $('stateFilter').hidden = panes;
@@ -396,14 +393,30 @@ $('viewSwitch').addEventListener('click', (e) => {
 });
 $('modsFilter').addEventListener('input', () => modsPage.data && renderMods());
 
-// The filter chips are their own listener, not part of rowButtonClick: they sit
-// outside every row, so there is no row for a miss to fall through to. Claiming
-// them anyway would be the same defensive habit, and here there is nothing to
-// defend - the reason rowButtonClick must return true is that a <label> row
-// toggles a mod, and this is not one.
-$('labelChips').addEventListener('click', (e) => {
-  const b = e.target.closest('[data-label-filter]');
-  if (b) toggleLabelFilter(b.dataset.labelFilter);
+// The dropdown's own listeners, kept away from rowButtonClick: it sits outside
+// every row, so there is no row for a miss to fall through to.
+$('labelFilterBtn').addEventListener('click', () => setLabelMenu(!labelMenuIsOpen()));
+$('labelFilterClear').addEventListener('click', () => {
+  modsPage.labels.clear();
+  renderMods();
+});
+$('labelFilterList').addEventListener('change', (e) => {
+  const box = e.target.closest('[data-label-filter]');
+  if (box) toggleLabelFilter(box.dataset.labelFilter);
+});
+// A click anywhere else closes it, and so does Escape. Both are what a dropdown
+// is expected to do, and without them the menu covers the mod list with no way
+// out but the trigger again.
+document.addEventListener('click', (e) => {
+  if (!labelMenuIsOpen()) return;
+  if (e.target.closest('#labelFilter')) return;
+  setLabelMenu(false);
+});
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && labelMenuIsOpen()) {
+    setLabelMenu(false);
+    $('labelFilterBtn').focus();
+  }
 });
 
 // Buttons inside rows (both views): "Turn it on" fixes and details.
@@ -636,6 +649,93 @@ $('labelDialogBody').addEventListener('submit', (e) => {
 });
 $('labelDialogClose').addEventListener('click', () => $('labelDialog').close());
 $('labelDialog').addEventListener('click', (e) => { if (e.target === $('labelDialog')) $('labelDialog').close(); });
+
+// ---- manage labels ---------------------------------------------------------
+
+// Rename and delete reach every mod carrying the label, so both report how many
+// mods changed - "deleted" on its own says nothing about what moved. Delete asks
+// first and names the count. Rename does not ask, because a rename is reversible
+// by renaming back and a delete is not.
+function renderLabelManage() {
+  const counts = (modsPage.data && modsPage.data.labelCounts) || [];
+  $('labelManageBody').innerHTML = `<h2>Labels</h2>
+    <p class="hint">Your own labels, the same in every profile. Renaming or deleting one changes it
+      on every mod that has it — the mods themselves are never touched.</p>
+    ${counts.length
+      ? `<div class="list">${counts.map((c) => `<div class="row">
+          <span class="name"><b>${esc(c.name)}</b><small>${c.count} mod${c.count === 1 ? '' : 's'}</small></span>
+          <button type="button" class="secondary small" data-rename-label="${esc(c.name)}">Rename</button>
+          <button type="button" class="danger small" data-delete-label="${esc(c.name)}">Delete</button>
+        </div>`).join('')}</div>`
+      : '<p class="hint">No labels yet. Click <b>+</b> on a mod to add one.</p>'}`;
+}
+
+function openLabelManage() {
+  renderLabelManage();
+  if (!$('labelManageDialog').open) $('labelManageDialog').showModal();
+}
+
+// A write that changes the label set as a whole rather than one mod's share of
+// it. The response carries the refreshed state, so the rows, the filter menu and
+// the manage dialog all come from what is really on disk rather than from what
+// was asked for.
+async function labelAction(path, body, busyBtn) {
+  if (busyBtn) busyBtn.disabled = true;
+  try {
+    const r = await postJson(path, body);
+    Object.assign(modsPage.data, {
+      labels: r.labels, labelCounts: r.labelCounts, labelNames: r.labelNames, labelsError: r.labelsError,
+    });
+    for (const m of modsPage.data.mods) m.labels = r.labels[m.idNorm] || [];
+    setGameStatus(r.game);
+    // A label that has just been renamed or deleted must leave the filter
+    // selection too, or the list would narrow to nothing with no visible reason.
+    const live = new Set((r.labelNames || []).map(labelKey));
+    for (const k of [...modsPage.labels]) if (!live.has(k)) modsPage.labels.delete(k);
+    return r;
+  } catch (err) {
+    toast(esc(err.message), 'err');
+    return null;
+  } finally {
+    if (busyBtn) busyBtn.disabled = false;
+  }
+}
+
+$('labelManage').addEventListener('click', openLabelManage);
+$('labelManageClose').addEventListener('click', () => $('labelManageDialog').close());
+$('labelManageDialog').addEventListener('click', (e) => { if (e.target === $('labelManageDialog')) $('labelManageDialog').close(); });
+
+$('labelManageBody').addEventListener('click', async (e) => {
+  const rename = e.target.closest('[data-rename-label]');
+  if (rename) {
+    const from = rename.dataset.renameLabel;
+    const to = prompt(`New name for "${from}". It will change on every mod that has it.`, from);
+    if (to == null) return; // cancelled
+    if (!to.trim()) { toast('A label needs a name.', 'err'); return; }
+    const r = await labelAction('/api/mods/labels/rename', { from, to: to.trim() }, rename);
+    if (!r) return;
+    // A merge is reported rather than left to be noticed: two labels the user
+    // believed were separate are now one.
+    toast(r.merged
+      ? `Merged into "${esc(to.trim())}" — ${r.moved} mod${r.moved === 1 ? '' : 's'} changed.`
+      : `Renamed to "${esc(to.trim())}" — ${r.moved} mod${r.moved === 1 ? '' : 's'} changed.`, 'ok');
+    renderLabelManage();
+    renderMods();
+    return;
+  }
+
+  const del = e.target.closest('[data-delete-label]');
+  if (del) {
+    const name = del.dataset.deleteLabel;
+    const n = ((modsPage.data.labelCounts || []).find((c) => c.name === name) || {}).count || 0;
+    if (!confirm(`Delete the label "${name}"?\n\nIt will be taken off ${n} mod${n === 1 ? '' : 's'}. The mods themselves are not touched.`)) return;
+    const r = await labelAction('/api/mods/labels/delete', { name }, del);
+    if (!r) return;
+    toast(`Deleted "${esc(name)}" from ${r.removed} mod${r.removed === 1 ? '' : 's'}.`, 'ok');
+    renderLabelManage();
+    renderMods();
+  }
+});
 
 // ---- details dialog --------------------------------------------------------
 
