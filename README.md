@@ -81,7 +81,8 @@ auto-detected; if one shows **not found**, click **Edit paths**, fix it, and
 
 **Rescan & add new mods** picks up anything you've subscribed to since last
 time. See below — you rarely need to click it, because the toolkit does this
-when it starts.
+when it starts. It also re-registers a mod you have edited locally, which is how
+a corrected `LoadOrder` gets picked up.
 
 ### Mod manager
 
@@ -228,11 +229,19 @@ selected profile has on, in the order the game will use them, and:
   large library that is several hundred actions whose order is decided by nothing
   anyone controls - and a mod with a long list there is relying on undocumented
   ordering.
-- **Rows say what an action is gated on.** `needs Civilizations Diversity`, `not
-  in this profile`, `needs a game ruleset`. An action is marked as not running
-  only where that can be proven; where it cannot, the row says the toolkit could
-  not decide. That distinction matters: the view exists so that "my load order is
-  fine" is not a conclusion you reach by accident.
+- **Rows say what an action is gated on**, and mark it as not running only where
+  that can be proven. Where it cannot, the row says what specifically it could
+  not see rather than shrugging — `needs GAMEMODE_MONOPOLIES to be 1, a game
+  option picked in the main menu` — and, if several conditions are unreadable, how
+  many it is not showing. That distinction matters: the view exists so that "my
+  load order is fine" is not a conclusion you reach by accident, and a row that
+  cannot be decided should not look like a row that is broken.
+- **`ModInUse` is decided, and was measured rather than assumed.** It means
+  *switched on in the active profile*, not merely present on disk — established by
+  running a probe in the game, where an action gated on a mod that was installed,
+  off in the active profile and on in eleven others did not run. It is by a wide
+  margin the commonest condition in a real library (604 of 1356, against 1 for
+  `ModIsEnabled`), and all 604 were previously reported as undecidable.
 - **Compare** with a second profile marks the rows that would come and go.
 - A mod row's **arrow button** opens this list with that mod's rows **marked**,
   not filtered to. A list showing only that mod would answer none of the question

@@ -34,6 +34,23 @@ Versions are tagged, and each tag produces a Windows zip on the
   only where that can be proven. Where it cannot, the row says the toolkit could
   not decide rather than guessing. That distinction is the point: the view exists
   so that "my load order is fine" is not a conclusion you reach by accident.
+- **`ModInUse` is now decided, by measurement rather than inference.** A probe run
+  in the game established that it means *switched on in the active profile*, not
+  merely present on disk: an action gated on a mod that was installed, off in the
+  active profile and on in eleven others did not run. It was the commonest
+  condition in a real library by a wide margin — 604 of 1356, against 1 for
+  `ModIsEnabled` — and every one of those was previously reported as
+  undecidable. In Harmony in Diversity's profile, provably-off actions go from 160
+  to 331 and decided actions from 47% to 59%.
+- **An undecidable row now names the specific thing it cannot see**, instead of
+  `depends on something this view cannot see`. A row gated on Monopolies mode and
+  Expansion 2 now says both, by name, and who chooses them — which shows the row
+  is fine and merely unanswerable here, rather than looking like a fault. Where
+  several conditions are unreadable, the row says how many it is not showing.
+- **A condition with several properties is one condition, not several.** The
+  conditions query was returning one row per property, so a game-option condition
+  — which carries three — was listed as three unreadable reasons, and the row's
+  own count of hidden conditions was counting one as three.
 - **Comparing two profiles** marks the rows that would come and go. It is cheap,
   because an action's row belongs to the database rather than to a profile — two
   profiles differ only in which mods are switched on.
@@ -215,6 +232,22 @@ this one.
 
 ### Fixed
 
+- **Rescan & add new mods dropped every mod's conditions**, so a newly registered
+  mod's actions ran whether or not the mod they depend on was present — the one
+  thing this toolkit exists not to change. Two faults, both shipped:
+  `xmlActions` read a condition reference from a `criteria="NAME"` **attribute**,
+  which no real mod uses — every mod that has conditions names it with a
+  `<Criteria>NAME</Criteria>` **element** inside the action — and `writeActions`
+  never wrote the `ComponentCriteria` link at all, despite building the `Criteria`
+  rows directly above it and commenting that they were built first so actions could
+  point at one. The rows were created and nothing pointed at them.
+- **An inverted condition was skipped rather than inverted.** A set whose only
+  condition was `NOT ModInUse(X)` fell through to "will run", so an action was
+  reported as running that provably does not. 225 `ModInUse` conditions and 1
+  `GameCoreInUse` are inverted, so this was live rather than hypothetical.
+- **`Criteria.Any` was treated as AND**, so a set the author marked `any="1"`
+  could be reported as not running when one of its conditions was satisfied. 82
+  sets carry the flag and 76 hold more than one condition.
 - **Clicking the `workshop` label toggled the mod instead of opening the Workshop
   page.** The whole row is the on/off switch, and `paneClick` only spared what was
   a `<button>` or an `<a>`; the label was a `<span>`, so it was neither. It is now
