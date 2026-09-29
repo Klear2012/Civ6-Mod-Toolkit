@@ -12,6 +12,10 @@ mod-labels.json
 scratch_*
 *.log
 .DS_Store
+AGENTS.md
 
 # browser-tool screenshots taken while checking the UI
 .openchamber/
+
+# load order overrides - one file per user, and it names an action by a key we compute
+load-order-overrides.json
