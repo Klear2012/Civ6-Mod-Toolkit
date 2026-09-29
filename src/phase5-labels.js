@@ -16,7 +16,12 @@ const { scanMods } = require('./modinfo');
 // here would hide it if it ever stopped.
 const { normId } = require('./modinfo');
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'civ6-labels-'));
+// Resolved, for the same reason as phase4's: on Windows a GitHub runner's TEMP
+// is under an 8.3 short name, and anything that later compares one of these
+// paths against a path the product canonicalised would be comparing two
+// spellings of one folder. Cheap to do once here rather than to discover per
+// check.
+const TMP = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'civ6-labels-')));
 const FILE = path.join(TMP, 'mod-labels.json');
 console.log(`scratch dir: ${TMP}\n`);
 

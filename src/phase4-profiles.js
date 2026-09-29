@@ -12,7 +12,20 @@ const { DatabaseSync } = require('node:sqlite');
 const db = require('./modsdb');
 const { toNativePath } = require('./paths');
 
-const TMP = fs.mkdtempSync(path.join(os.tmpdir(), 'civ6-profiles-'));
+// Resolved through realpathSync.native, and that is the whole point.
+//
+// canonicalPath stores each mod's folder in its canonical form, and on Windows
+// that call resolves 8.3 short names to their long ones. A GitHub runner's TEMP
+// is C:\Users\RUNNER~1\AppData\Local\Temp - RUNNER~1 being the short name for
+// runneradmin - so an unresolved TMP here is a different string from the paths
+// the database ends up holding, and every check that compares one against the
+// other fails on the runner while passing on any machine whose temp directory
+// happens to have no short name. That is not hypothetical: it is what stopped
+// the v1.5.0 release from being published.
+//
+// Canonicalising the scratch root once means every path below is in the form the
+// database will hold, by construction, rather than one block at a time.
+const TMP = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'civ6-profiles-')));
 const DB_PATH = path.join(TMP, 'Mods.sqlite');
 
 seed();
@@ -804,19 +817,13 @@ console.log('\nTest 17: an unattended sync switches nothing on');
 // does not check the path carefully would delete those.
 console.log('\nTest 18: removing a mod, and refusing to remove the wrong thing');
 {
-  // The database records the canonical path, and on Windows that resolves 8.3
-  // short names to their long form. A GitHub runner's TEMP is
-  // C:\Users\RUNNER~1\AppData\Local\Temp, so the literal scratch path is the
-  // short name and the recorded one is the long name - the same folder, and two
-  // strings that agree in nothing. Every path below therefore goes through the
-  // same realpathSync.native the product uses, so the block compares like with
-  // like. Without that, "a case difference in the folder is accepted" is not a
-  // test of case at all: it is a test of short-name expansion, and it failed the
-  // v1.5.0 release build on the runner while passing on any machine whose TEMP
-  // has no 8.3 alias.
-  const rawRoot = path.join(TMP, 'mods');
-  fs.mkdirSync(path.join(rawRoot, 'Doomed Mod', 'Data'), { recursive: true });
-  const modRoot = fs.realpathSync.native(rawRoot).split('\\').join('/');
+  // TMP is already canonical, so every path built from it is in the form the
+  // database will hold. That is the fix for "a case difference in the folder is
+  // accepted" failing on the v1.5.0 release build and passing everywhere else:
+  // once the scratch root is resolved, case is the only difference left to
+  // introduce, which is what that check claims to be testing.
+  const modRoot = path.join(TMP, 'mods');
+  fs.mkdirSync(path.join(modRoot, 'Doomed Mod', 'Data'), { recursive: true });
   const sources = [{ root: modRoot, exists: true, type: 'local' }];
   const ID = '33333333-4444-5555-6666-777777777777';
   const dir = path.join(modRoot, 'Doomed Mod');
