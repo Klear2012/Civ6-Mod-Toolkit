@@ -137,8 +137,105 @@ console.log('\nTest 5: what a label may be called');
   check('so is no name at all', /cannot be empty/.test(cap(labels.cleanLabel, null)));
 }
 
-function cap(fn, arg) {
-  try { fn(arg); return ''; } catch (e) { return e.message; }
+// --- Test 6: writing --------------------------------------------------------
+console.log('\nTest 6: writing a label');
+{
+  fs.rmSync(FILE, { force: true });
+  const a = normId(ID_A);
+  const known = new Set([a, normId(ID_B)]);
+
+  const v = labels.setLabels(FILE, ID_A, ['favourite'], known);
+  check('a label is written and read back', v.labels[a] && v.labels[a][0] === 'favourite', JSON.stringify(v.labels));
+  check('the file appears on disk', fs.existsSync(FILE));
+  check('  with the version it was written as', JSON.parse(fs.readFileSync(FILE, 'utf8')).version === 1);
+  check('  and no temp file left beside it', !fs.readdirSync(TMP).some((f) => /\.tmp-/.test(f)), fs.readdirSync(TMP).join());
+
+  // Typing the same label on a second mod must not make a second label.
+  const two = labels.setLabels(FILE, ID_B, ['Favourite', '  needs-testing  '], known);
+  check('the same label on another mod counts twice',
+    two.counts.find((c) => c.name === 'favourite').count === 2, JSON.stringify(two.counts));
+  check('case-insensitive: it did not become a second label',
+    two.names.length === 2, two.names.join());
+  check('  and it took the spelling created first', !!two.labels[normId(ID_B)].includes('favourite'),
+    JSON.stringify(two.labels[normId(ID_B)]));
+  check('names are trimmed on the way in', two.labels[normId(ID_B)].includes('needs-testing'));
+  check('a mod can carry several labels', two.labels[normId(ID_B)].length === 2);
+
+  const dup = labels.setLabels(FILE, ID_B, ['favourite', 'FAVOURITE', 'favourite'], known);
+  check('the same name three times in one request is stored once',
+    dup.labels[normId(ID_B)].length === 1, JSON.stringify(dup.labels[normId(ID_B)]));
+
+  // An empty request is a removal, not a refusal: the editor sends the whole
+  // set back every time, including when the last one is unticked. At this point
+  // both A and B carry "favourite" and nothing else.
+  const afterB = labels.setLabels(FILE, ID_B, [], known);
+  check('removing a mod\'s last label leaves no empty entry', afterB.labels[normId(ID_B)] === undefined,
+    JSON.stringify(afterB.labels));
+  check('  but the label stays while another mod still carries it', afterB.names.includes('favourite'), afterB.names.join());
+  const afterA = labels.setLabels(FILE, ID_A, [], known);
+  check('once no mod carries it the label stops existing', !afterA.names.includes('favourite'), afterA.names.join());
+  check('  and nothing is left in the file', Object.keys(afterA.labels).length === 0 && afterA.counts.length === 0);
+
+  // A second tab labelling a different mod must not lose the first tab's work.
+  labels.setLabels(FILE, ID_A, ['favourite'], known);
+  labels.setLabels(FILE, ID_B, ['mp-safe'], known);
+  const both = labels.readLabels(FILE, known);
+  check('two saves to different mods both survive',
+    !!both.labels[a] && !!both.labels[normId(ID_B)] && both.labels[normId(ID_B)][0] === 'mp-safe',
+    JSON.stringify(both.labels));
+
+  check('a bad name in the request is refused whole',
+    /cannot be empty/.test(cap(labels.setLabels, FILE, ID_A, ['ok', '  '], known)));
+  check('  and nothing was written', JSON.stringify(labels.readLabels(FILE, known).labels) === JSON.stringify(both.labels));
+  check('an over-long name is refused too',
+    /longer than 100/.test(cap(labels.setLabels, FILE, ID_A, ['x'.repeat(101)], known)));
+  check('a mod id of nothing is refused', /which mod/.test(cap(labels.setLabels, FILE, '', ['a'], known)));
+}
+
+// --- Test 7: the write leaves nothing half-done ------------------------------
+console.log('\nTest 7: two saves in quick succession');
+{
+  const known = new Set([normId(ID_A), normId(ID_B)]);
+  fs.rmSync(FILE, { force: true });
+  // Back to back, so the two temp files exist at the same moment: a shared
+  // temp name would let the second write clobber the first before the rename.
+  labels.setLabels(FILE, ID_A, ['one'], known);
+  labels.setLabels(FILE, ID_B, ['two'], known);
+  labels.setLabels(FILE, ID_A, ['three'], known);
+  const v = labels.readLabels(FILE, known);
+  check('every save landed', v.labels[normId(ID_A)][0] === 'three' && v.labels[normId(ID_B)][0] === 'two',
+    JSON.stringify(v.labels));
+  check('the file is still valid JSON', (() => {
+    try { JSON.parse(fs.readFileSync(FILE, 'utf8')); return true; } catch (_) { return false; }
+  })());
+  check('and no temp file was left behind', fs.readdirSync(TMP).join() === 'mod-labels.json', fs.readdirSync(TMP).join());
+}
+
+// --- Test 8: a file that cannot be built on ---------------------------------
+console.log('\nTest 8: writing over a broken file');
+{
+  const known = new Set([normId(ID_A)]);
+  put('{ broken');
+  const msg = cap(labels.setLabels, FILE, ID_A, ['favourite'], known);
+  check('a save over a corrupt file is refused', /not valid JSON/.test(msg), msg);
+  check('  and the message says nothing was written', /nothing was written/.test(msg), msg);
+  check('  and the file is left exactly as it was', fs.readFileSync(FILE, 'utf8') === '{ broken');
+  check('  and the mod list still reads, as no labels', Object.keys(labels.readLabels(FILE).labels).length === 0);
+  check('a file of the wrong version is refused the same way', (() => {
+    put({ version: 42, labels: {} });
+    return /nothing was written/.test(cap(labels.setLabels, FILE, ID_A, ['x'], known));
+  })());
+  // The recoverable case still writes: one bad entry among good ones costs only
+  // that entry, so there is a real map to build on.
+  put({ version: 1, labels: { [ID_A]: ['keep'], bad: 'oops' } });
+  const ok = labels.setLabels(FILE, ID_A, ['keep', 'added'], known);
+  check('a file with one bad entry is still writable', ok.labels[normId(ID_A)].join() === 'keep,added',
+    JSON.stringify(ok.labels));
+  check('  and the bad entry is gone from the file', !JSON.stringify(JSON.parse(fs.readFileSync(FILE, 'utf8'))).includes('oops'));
+}
+
+function cap(fn, ...args) {
+  try { fn(...args); return ''; } catch (e) { return e.message; }
 }
 
 fs.rmSync(TMP, { recursive: true, force: true });
