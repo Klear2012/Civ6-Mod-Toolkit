@@ -168,10 +168,14 @@ useful and counts towards each one.
 - Click the **+** on a mod's row to open the editor. Every label in use is a
   one-click toggle showing how many mods carry it; type a new name to make one.
   **Save** writes all of it at once, and the row updates straight away.
-- The **Label filters** row above the filters narrows the list. Each chip shows
-  how many mods have that label, so you can see whether it would leave you
-  nothing before clicking it. Several chips combine — you get the mods carrying
-  **any** of them, not all of them. Clearing them all brings the list back.
+- The **Label filters** dropdown above the filters narrows the list. Open it and
+  tick the labels you want — several at once, and you get the mods carrying
+  **any** of them, not all of them. Each line shows how many mods have that
+  label, so you can see whether it would leave you nothing before ticking it.
+  **Clear** puts the list back.
+- **Manage…** beside it renames or deletes a label, and does so on every mod
+  that has it, saying how many mods changed. Renaming a label to one that
+  already exists merges the two.
 - Labels are **yours**, stored in `mod-labels.json` beside `civ6-paths.json`.
   They are the same in every profile, and survive Civ6 rescanning its database
   and moving a mod between the Workshop and your local folder.

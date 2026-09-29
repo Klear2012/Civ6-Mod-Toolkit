@@ -24,11 +24,15 @@ Versions are tagged, and each tag produces a Windows zip on the
   one-click toggle with a count, plus a field to make a new one, and saves the
   lot in one write. A mod can carry as many labels as are useful and counts
   towards each — capping it would force a choice nobody has a basis to make.
-- **A label filter row** under the profile bar, with a chip per label showing how
-  many mods carry it, so a chip that would empty the list can be seen before it
-  is clicked. Several chips combine as **or**, not and: you get the mods
-  carrying any of them. And-ing would show only mods carrying every one, which
-  is rarely what anyone wants and quietly returns nothing.
+- **A label filter dropdown** under the profile bar, with a **Manage…** button
+  beside it. Open the dropdown and tick the labels you want — several at once,
+  and you get the mods carrying **any** of them, not all of them. Each line
+  shows how many mods have that label, so you can see whether it would leave
+  you nothing before ticking it. And-ing would show only mods carrying every
+  one, which is rarely what anyone wants and quietly returns nothing.
+- **Labels can be renamed and deleted**, on every mod that has them, and both
+  say how many mods changed. Renaming a label to one that already exists merges
+  the two rather than refusing, so a name you want is never unreachable.
 - **`npm run phase5`**, which checks the label store against a scratch
   directory. Its centrepiece is a rescan that renumbers every `ModRowId`, plus
   a deliberately wrong file keyed by `ModRowId` that is read across the same
@@ -54,6 +58,10 @@ Versions are tagged, and each tag produces a Windows zip on the
 - The left half of the new filter row is deliberately empty. Sorting by label,
   by name, by whether it is on, or by what needs attention is the natural next
   step, and the space is already its own.
+- The label filter was a row of chips first, and it was not kept. With a dozen
+  labels the chips took six lines on a phone and pushed the mod list off the
+  bottom of the screen. A dropdown whose menu scrolls has no such problem, at
+  any number of labels.
 
 ## v1.5.0 — 28 September 2026
 
