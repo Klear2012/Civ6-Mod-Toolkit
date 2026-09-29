@@ -89,11 +89,45 @@ const MODS_SQL = `
          AND OtherModTitle IS NOT NULL AND instr(OtherModTitle, 'LOC_') = 0 LIMIT 1),
       p.Value) AS name,
     (SELECT ${resolved('t')} FROM ModProperties t WHERE t.ModRowId = m.ModRowId AND t.Name = 'Teaser') AS teaser,
-    (SELECT Value FROM ModProperties WHERE ModRowId = m.ModRowId AND Name = 'ShowInBrowser') AS showInBrowser
+    (SELECT Value FROM ModProperties WHERE ModRowId = m.ModRowId AND Name = 'ShowInBrowser') AS showInBrowser,
+    -- CAST to text, and this is not optional. LastWriteTime is 100-nanosecond
+    -- ticks since 1601 - 18 digits - and handing that to JavaScript as a number
+    -- is a RangeError. Returning it as text costs 20 bytes a row and removes the
+    -- whole class of bug; lastWriteMs does the arithmetic.
+    CAST(s.LastWriteTime AS TEXT) AS lastWriteTicks
   FROM Mods m
   JOIN ScannedFiles s ON s.ScannedFileRowId = m.ScannedFileRowId
   LEFT JOIN ModProperties p ON p.ModRowId = m.ModRowId AND p.Name = 'Name'
   LEFT JOIN ModGroupItems gi ON gi.ModRowId = m.ModRowId AND gi.ModGroupRowId = ?`;
+
+// LastWriteTime - 1601-to-1970 offset, in 100ns ticks - gives Unix milliseconds.
+//
+// The inverse of fileTimeOf, and the other half of why fileTimeOf is built the
+// way it is: the epoch constant is shared - it is declared further down, beside
+// fileTimeOf, and read here at call time - so the two cannot disagree about when
+// 1970 was. JavaScript has no BigInt arithmetic worth doing here, and the values
+// are small once converted, so the division is done in BigInt and the result
+// handed over as a Number.
+//
+// null for anything that is not a plausible timestamp, and in particular for
+// zero: a zero is a ScannedFile the toolkit never stamped, not 1601. Handing
+// that back as 0 would sort the mod as the newest thing in the list.
+const TICKS_PER_MS = 10000n;
+function lastWriteMs(ticks) {
+  if (ticks == null || ticks === '') return null;
+  let n;
+  try {
+    n = BigInt(String(ticks).trim());
+  } catch (_) {
+    return null; // not a number at all
+  }
+  if (n <= 0n) return null;
+  const ms = (n - FILETIME_EPOCH_TICKS) / TICKS_PER_MS;
+  // A file dated before 1970 lands negative. That is a real mtime, not an absent
+  // one, so it is kept - it still orders correctly against the others.
+  const out = Number(ms);
+  return Number.isFinite(out) ? out : null;
+}
 
 const REL_SQL = `
   SELECT m.ModId AS modId, r.OtherModId AS otherId, r.Relationship AS rel, r.OtherModTitle AS otherTitle
@@ -126,6 +160,7 @@ function readModState(dbPath) {
         path: r.path,
         source: classifyPath(r.path),
         disabled: r.disabled == null ? null : !!r.disabled,
+        lastChanged: lastWriteMs(r.lastWriteTicks),
         teaser: usable(r.teaser),
         hidden: r.showInBrowser === 'AlwaysHidden',
         requires: rel.requires,
@@ -1168,5 +1203,5 @@ module.exports = {
   listGroups, createGroup, duplicateGroup, renameGroup, deleteGroup, activateGroup, previewGroup,
   findUnregistered, findRemoved, removeMods, modFolderFault,
   exportGroup, importGroup, EXPORT_TOOLKIT,
-  registerMod, registerMods, readModinfoMeta, parseModinfo, fileTimeOf,
+  registerMod, registerMods, readModinfoMeta, parseModinfo, fileTimeOf, lastWriteMs,
 };

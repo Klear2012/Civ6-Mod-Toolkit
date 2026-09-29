@@ -467,6 +467,69 @@ console.log('\nTest 12: register an unscanned mod');
   check('a Name property was written', raw(`SELECT Value FROM ModProperties WHERE Name='Name' AND ModRowId =
     (SELECT ModRowId FROM Mods WHERE lower(ModId)='11111111-2222-3333-4444-555555555555')`)[0].Value === 'Test Mod');
 
+  // --- Test 20a: LastWriteTime as something JavaScript can compare ---------
+  // The value is 18 digits of 100-nanosecond ticks and returning it raw is a
+  // RangeError, which this codebase has already hit twice. The cast is in the
+  // SQL and cannot be taken out without the read throwing again, so it is
+  // asserted on the query rather than left to the conversion.
+  console.log('\nTest 20a: lastChanged, a FILETIME the browser can compare');
+  {
+    const castInSql = /CAST\(s\.LastWriteTime AS TEXT\) AS lastWriteTicks/.test(
+      require('fs').readFileSync(path.join(__dirname, 'modsdb.js'), 'utf8'));
+    check('the SQL casts LastWriteTime to text, so it cannot RangeError on the way out', castInSql);
+
+    const ms = db.lastWriteMs;
+    // The exact value registration just wrote for Test Mod, above.
+    const EPOCH = 116444736000000000n;
+    const expectedMs = Number((fileTime - EPOCH) / 10000n);
+    check('it round-trips fileTimeOf exactly, at full precision',
+      ms(fileTime.toString()) === expectedMs, `${ms(fileTime.toString())} vs ${expectedMs}`);
+    // Milliseconds are coarser than the stored 100ns ticks, so the honest claim is
+    // that converting back recovers everything above the sub-millisecond remainder -
+    // not that nothing is lost, which would be false.
+    check('  and converting back recovers every whole millisecond of it',
+      BigInt(ms(fileTime.toString())) * 10000n + EPOCH === fileTime - (fileTime % 10000n),
+      `${BigInt(ms(fileTime.toString())) * 10000n + EPOCH} vs ${fileTime - (fileTime % 10000n)}`);
+    check('  and what is lost is only the sub-millisecond remainder',
+      fileTime % 10000n < 10000n);
+
+    check('a 19-digit value does not throw and stays finite',
+      Number.isFinite(ms('9223372036854775807')));
+    check('the largest real value in the database converts without loss',
+      Number.isSafeInteger(ms('134350824316577530')));
+
+    // A zero is a file the toolkit never stamped, not the year 1601.
+    check('zero is "no timestamp", not epoch', ms('0') === null, String(ms('0')));
+    check('so is null, an empty string, and anything that is not a number',
+      ms(null) === null && ms(undefined) === null && ms('') === null
+      && ms('not a number') === null && ms('12 34') === null);
+    check('a negative tick count is no timestamp either', ms('-1') === null);
+    // A file genuinely older than 1970 is real, not absent, and still orders.
+    check('a pre-1970 file keeps its negative value rather than becoming null',
+      ms(String(116444736000000000n - 10000n)) === -1);
+
+    // The read path end to end, against the database this script built.
+    const st = db.readModState(DB_PATH);
+    check('readModState still reads', st.ok, st.error || '');
+    const testMod = st.mods.find((m) => m.modId === '11111111-2222-3333-4444-555555555555');
+    check('the mod registered above carries a lastChanged', !!testMod && typeof testMod.lastChanged === 'number',
+      testMod ? String(testMod.lastChanged) : 'mod not found');
+    check('  equal to the mtime of its .modinfo',
+      testMod && testMod.lastChanged === expectedMs,
+      testMod ? `${testMod.lastChanged} vs ${expectedMs}` : '');
+
+    // A row with no stamp at all, which is what the seeded '0' files are.
+    const unstamped = raw(`SELECT CAST(s.LastWriteTime AS TEXT) AS lwt, m.ModId AS modId
+      FROM Mods m JOIN ScannedFiles s ON s.ScannedFileRowId = m.ScannedFileRowId
+      WHERE s.LastWriteTime = 0 OR s.LastWriteTime IS NULL LIMIT 1`)[0];
+    check('a mod whose file was never stamped reads as null, not 1970',
+      !unstamped || ms(unstamped.lwt) === null, unstamped ? unstamped.lwt : 'no unstamped row to check');
+    check('  and no mod in this database got a lastChanged that is not a number or null',
+      st.mods.every((m) => m.lastChanged === null || Number.isFinite(m.lastChanged)));
+    check('  and none of them is unsafe as a Number',
+      st.mods.every((m) => m.lastChanged === null || Number.isSafeInteger(m.lastChanged)));
+  }
+
   // The toolkit now treats it as a normal mod. Registration gives it a row in
   // every profile, so it reads as a normal switchable mod here, off because
   // this call did not name a profile to switch it on in.

@@ -121,6 +121,9 @@ function modList(opts = {}) {
       // can point at Rescan rather than offering its own button.
       needsSync: needsSync.has(d.idNorm),
       teaser: d.teaser,
+      // Unix milliseconds, or null when the game never stamped the file. The
+      // browser's "Last changed" ordering sorts the nulls last.
+      lastChanged: d.lastChanged == null ? null : d.lastChanged,
       workshopId: f ? f.workshopId || null : null,
       folder: f ? f.folder : null,
       requires: d.requires,
