@@ -965,15 +965,21 @@ function profileLoadOrder(dbPath, opts = {}) {
       const misspelled = declaredValue !== null && props.LoadOrder === undefined;
       const ov = index.get(a.componentRowId);
       const v = verdictOf(conds.get(a.componentRowId), ctx);
+      // Two different values, and conflating them is how a view ends up telling
+      // the user their own override is what the mod declared. `effective` is
+      // what the game will use - it is what the list sorts by, and it is the
+      // database row. `declared` is what the author asked for, which once an
+      // override is applied is only in the store, because the database now holds
+      // ours.
       return {
         modId,
         modName: (mod && mod.name) || modId || 'unknown mod',
         componentRowId: a.componentRowId,
         type: a.type,
         id: a.id,
-        declared: declaredValue,
-        misspelled,
         effective: declaredValue,
+        declared: ov && ov.entry.declared !== undefined ? String(ov.entry.declared) : declaredValue,
+        misspelled,
         override: ov ? { value: ov.entry.value, declared: ov.entry.declared === undefined ? null : ov.entry.declared } : null,
         state: ov ? (String(props.LoadOrder) === String(ov.entry.value) ? 'overridden' : 'drifted') : 'author default',
         protected: !unprotectable.has(modId),

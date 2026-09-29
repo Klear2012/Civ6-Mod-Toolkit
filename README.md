@@ -207,6 +207,74 @@ useful and counts towards each one.
 A label that no mod carries stops being offered, and is forgotten. If you want
 to set a label up before the mods that use it, give it to one mod for now.
 
+### Load order
+
+Civ6 decides when each mod action runs from a number called `LoadOrder`, and it
+is set **per action, not per mod**. There is no display of it anywhere in the
+game, so if you are writing a sub-mod and need to know where to file something,
+you are working it out by hand.
+
+The **Load order** tab is that display. It lists every action of every mod the
+selected profile has on, in the order the game will use them, and:
+
+- **The gaps between values are rows of their own.** A gap between two actions
+  you can see is a gap you could put something in. They are computed inside the
+  profile, so a profile whose highest action is 50000000 is not told that
+  701-898 is free.
+- **Ties are shown as ties.** Where several actions claim one value the game
+  picks arbitrarily, and so does this, rather than implying a ranking that does
+  not exist.
+- **Actions that declare no position have their own block**, grouped by mod. In a
+  large library that is several hundred actions whose order is decided by nothing
+  anyone controls - and a mod with a long list there is relying on undocumented
+  ordering.
+- **Rows say what an action is gated on.** `needs Civilizations Diversity`, `not
+  in this profile`, `needs a game ruleset`. An action is marked as not running
+  only where that can be proven; where it cannot, the row says the toolkit could
+  not decide. That distinction matters: the view exists so that "my load order is
+  fine" is not a conclusion you reach by accident.
+- **Compare** with a second profile marks the rows that would come and go.
+- A mod row's **arrow button** opens this list with that mod's rows **marked**,
+  not filtered to. A list showing only that mod would answer none of the question
+  you clicked the button to ask.
+
+### Load order overrides
+
+Some mods are filed in the wrong band. **Load order overrides** lets you move one
+action's `LoadOrder` and keep it.
+
+The view above is read-only and stays that way - its button reads *Manage
+overrides* and navigates here. Finding the right place and changing it are two
+different jobs, and the load order tab is only the first.
+
+What this does:
+
+- Writes the value into the game's own database, so **Civ6 must be closed**. It
+  is refused otherwise, and the check is inside the code that writes rather than
+  something the page asks about first.
+- **Keeps working when the mod updates**, and **keeps Steam auto-updates**. You
+  do not have to make a mod local or unsubscribe it. That is the whole reason
+  it works: alongside the value it also writes the one column the game uses to
+  decide whether a mod has changed, so the game does not re-derive the value away
+  again. Both writes happen in one transaction, because a value without the
+  stamp is a value the next launch removes.
+- **Survives the toolkit being closed and a Steam sync happening.** It re-applies
+  at startup, and the mod list warns when a mod carrying an override has updated
+  since. **Re-apply all** does it on demand.
+- Records the author's own value, so **Reset** can put it back. **Discard** is a
+  different thing and says so: it forgets the intent and leaves the value where
+  the last apply put it.
+
+What it is **not**:
+
+- **Not per profile.** `LoadOrder` is a single value per action and the schema
+  has nowhere to hold two. Switching profile never rewrites anything: it changes
+  *which actions run*, not the order they run in.
+- **Not a suggestion.** The toolkit re-applies what you set. It never works out
+  a value for you, and it will not move an action whose key matches more than one
+  candidate - it reports that and stops, because a wrong guess would silently
+  move something else.
+
 ### Config editor
 
 1. Pick a **Configuration file** from the dropdown.
@@ -246,6 +314,20 @@ configuration).
   folder, a folder containing one, or anything the game recorded as base game or
   DLC. The same rules guard the folder button, and they live in one place so the
   two cannot drift.
+- **A load order override writes the game's own database**, and it writes two
+  things: the value, and the `ScannedFiles` stamp that stops the game re-deriving
+  it. Both go in one transaction, because a value committed without the stamp is
+  one the next launch removes — the game would silently undo what you just set.
+  It is refused while Civ6 is running, and the check is inside the code that
+  writes, not a question the page asks first.
+- An override is keyed by the mod's own id and by what the action *is* — its type,
+  its name and its files — never by a row number. Row numbers are replaced every
+  time the game re-registers a mod, which is exactly when you would lose the
+  override. A key that matches more than one action is reported, never guessed at.
+- A mod whose `.modinfo` is not on disk — 42 of 427 rows in a real library are
+  base-game or DLC assets like this — cannot have its stamp maintained, so an
+  override on one is re-derived on the next rescan. Those rows are marked *not
+  protected* rather than being left to look safe.
 - **Labels are the one write that is not refused while Civ6 runs, and the one
   with no backup.** Both because it writes `mod-labels.json` — a file the game
   has never heard of and cannot be holding open — rather than the game's
@@ -275,13 +357,21 @@ in `public/`. The `.Civ6Cfg` format engine is `src/civ6cfg.js`, mod discovery is
 `src/modinfo.js` + `src/paths.js`, safe saving is `src/editor.js`, the game's
 mod database, mod groups and registration are read and updated by
 `src/modsdb.js`, user-defined mod labels are stored by `src/labels.js` in
-`mod-labels.json`, and the mod list's orderings are in `public/modsort.js`.
-`npm run check:release` runs the three suites that have to pass before anything
-is published: `phase4` checks the profile and registration operations against a
-throwaway database, `phase5` checks the label store — including that labels
-survive a simulated rescan that renumbers every `ModRowId`, which is the thing
-that would silently lose them all — and `phase6` checks the six orderings, which
-are pure functions and so need no browser. The release workflow runs that same
+`mod-labels.json`, the mod list's orderings are in `public/modsort.js`, and
+load order overrides and the load order view are `src/loadorder.js` and
+`public/loadorder.js`, with your overrides in `load-order-overrides.json`.
+`npm run check:release` runs the four suites that have to pass before anything is
+published. `phase4` checks the profile and registration operations against a
+throwaway database. `phase5` checks the label store, including that labels
+survive a simulated rescan that renumbers every `ModRowId` — the thing that
+would silently lose them all. `phase6` checks the six orderings, which are pure
+functions and so need no browser. `phase7` checks the load order work: the
+override store, the action identity, the write path, the sync and the view —
+including that the view is genuinely read-only, which is the one property most
+likely to erode as features are added. Given a path to a real `Mods.sqlite` it
+also measures the identity collision rate against your own library rather than
+trusting a number written down once. The release workflow runs that same script,
+so a change that breaks any of them cannot be published.
 script, so a change that breaks any of them cannot be published.
 `npm run phase0`, `phase1` and `phase2` check the `.Civ6Cfg` format itself and
 need a real config of your own in `fixtures/`; see

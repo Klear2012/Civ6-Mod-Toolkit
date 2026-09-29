@@ -10,6 +10,69 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
+## Unreleased
+
+### Added
+
+- **A **Load order** tab**, showing one profile's load order as a single list:
+  every action of every mod that profile has on, in the order the game will use
+  them, with the gaps between values as rows of their own. Load order is declared
+  per *action* rather than per mod, so the question it answers — where does mine
+  sit — is answered by its neighbours. A gap between two actions you can see is a
+  gap you could put something in.
+- **The gaps are computed inside the profile**, not across the whole 1–1000 band.
+  A profile whose highest action is 50000000 does not care that 701–898 is free.
+- **Ties are shown as ties.** Where several actions claim one value the game picks
+  arbitrarily, and so does this, rather than listing them in an order that
+  implies a ranking which does not exist.
+- **Actions that declare no position get their own block**, grouped by mod. In a
+  real library that is several hundred actions whose order is decided by nothing
+  anyone controls, and a mod with a long list there is relying on undocumented
+  ordering.
+- **Rows say what an action is gated on** — `needs Civilizations Diversity`,
+  `not in this profile`, `needs a game ruleset` — and are marked as not running
+  only where that can be proven. Where it cannot, the row says the toolkit could
+  not decide rather than guessing. That distinction is the point: the view exists
+  so that "my load order is fine" is not a conclusion you reach by accident.
+- **Comparing two profiles** marks the rows that would come and go. It is cheap,
+  because an action's row belongs to the database rather than to a profile — two
+  profiles differ only in which mods are switched on.
+- **Your own overrides on an individual action's load order**, on a separate
+  **Load order overrides** page. The view above is read-only and stays that way:
+  its button reads *Manage overrides* and navigates. An override survives the mod
+  it is on updating, and keeps working without making that mod local or
+  unsubscribing it from Steam.
+- **A re-apply pass at startup**, and a **Re-apply all** button for a server left
+  running across a Steam sync. The mod list warns when a mod with an override has
+  updated since the last pass.
+- `npm run phase7`, which covers the store, the action identity, the write path,
+  the sync and the view — 163 checks, or 171 given a path to a real `Mods.sqlite`
+  to measure the identity collision rate against.
+- A malformed `civ6-paths.json` is now **reported** instead of silently ignored.
+  It used to fall back to the default folders with no message, so a typo made the
+  whole library look empty. The write path also honours `CIV6_PATHS_FILE` now, so
+  a test or a relocated install no longer overwrites the project root's copy, and
+  it is written atomically — a half-written file is not a partial override, it is
+  every mod gone.
+
+### Notes
+
+- An override writes the game's own database, and it writes **two** things in one
+  transaction: the value, and the `ScannedFiles` stamp that stops the game
+  re-deriving it. Without the stamp the value is removed on the next launch, so
+  the two are never written apart.
+- **Per-profile load order is not supported, and the schema cannot hold it.**
+  `ComponentProperties` carries one row per action, so there is nowhere to put two
+  values. Switching profile therefore never rewrites anything: `LoadOrder` is
+  fixed against an action, so switching changes *which actions run*, not the order
+  they run in.
+- A mod that misspells `LoadOrder` as `LaodOrder` or `LoadingOrder` is overridden
+  anyway, by writing a correctly spelled row. The mod's own row is left exactly as
+  it shipped it.
+- 42 of 427 rows in a real library are base-game or DLC assets whose `.modinfo` is
+  not on disk. Nothing can keep their stamp, so an override on one is re-derived on
+  the next rescan, and the view says *not protected* rather than implying otherwise.
+
 ## v1.6.0 — 29 September 2026
 
 Two features in the mod manager: your own labels on mods, and an order for the

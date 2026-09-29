@@ -67,9 +67,11 @@ function actionRow(a) {
   if (a.override) {
     bits.push(stateBadge(a));
     if (a.state === 'drifted') {
-      bits.push(`<span class="lo-ov">author declares ${esc(n(a.override.declared))}, the database has ${esc(n(a.declared))}</span>`);
+      // Drifted means the author changed it, or the game re-derived it. Either
+      // way the two numbers are worth seeing side by side.
+      bits.push(`<span class="lo-ov">author declares ${esc(n(a.declared))}, the database has ${esc(n(a.effective))}</span>`);
     } else {
-      bits.push(`<span class="lo-ov">author declares ${esc(n(a.override.declared))}</span>`);
+      bits.push(`<span class="lo-ov">author declares ${esc(n(a.declared))}, yours is ${esc(n(a.override.value))}</span>`);
     }
   }
   if (a.misspelled) bits.push('<span class="lo-tag lo-typo">the mod spells LoadOrder wrong</span>');
