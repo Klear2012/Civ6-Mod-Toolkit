@@ -722,8 +722,14 @@ function xmlActions(blocks) {
     while ((m = re.exec(block))) {
       const attrs = m[2] || '';
       const id = (attrs.match(/\bid\s*=\s*"([^"]*)"/i) || [])[1] || null;
-      const criteria = (attrs.match(/\bcriteria\s*=\s*"([^"]*)"/i) || [])[1] || null;
       const body = m[3] || '';
+      // A real mod names its criteria with a <Criteria>NAME</Criteria> ELEMENT
+      // inside the action. Measured across the library: not one uses a
+      // criteria="NAME" attribute, and every mod with criteria uses the element.
+      // Both are read, the attribute second, because it costs nothing and an
+      // attribute form would otherwise be dropped in silence.
+      const criteria = (body.match(/<Criteria\b[^>]*>([\s\S]*?)<\/Criteria>/i) || [])[1]
+        || (attrs.match(/\bcriteria\s*=\s*"([^"]*)"/i) || [])[1] || null;
       out.push({
         type: m[1],
         id,
@@ -887,12 +893,22 @@ function writeModContent(db, modRowId, info) {
     const link = kind === 'component'
       ? db.prepare('INSERT INTO ComponentFiles (ComponentRowId, FileRowId, Priority) VALUES (?, ?, ?)')
       : db.prepare('INSERT INTO SettingFiles (SettingRowId, FileRowId, Priority) VALUES (?, ?, ?)');
+    // The link that was missing. Without it the Criteria rows above are
+    // unreachable and the mod's conditional actions are not conditional: they
+    // run whether or not the mod they depend on is present.
+    const addCriteriaLink = db.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, ?)');
     let count = 0;
     for (const a of actions) {
       const actionId = addAction.run(modRowId, a.id, a.type).lastInsertRowid;
       count++;
       if (kind === 'component') {
         for (const prop of a.properties) addProp.run(actionId, prop.name, prop.value);
+        // A criteria set the mod never declared is skipped rather than invented:
+        // a dangling reference would be worse than an action with no condition.
+        if (a.criteria) {
+          const target = criteriaRowId.get(a.criteria);
+          if (target != null) addCriteriaLink.run(actionId, target);
+        }
       }
       for (const rel of a.files) {
         const target = fileRowId.get(rel.split('\\').join('/'));

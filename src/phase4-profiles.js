@@ -72,7 +72,8 @@ function seed() {
     CREATE TABLE SettingFiles(SettingRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, Priority INTEGER NOT NULL, PRIMARY KEY(SettingRowId, FileRowId));
     CREATE TABLE Criteria(CriteriaRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, ModRowId INTEGER NOT NULL, CriteriaId TEXT NOT NULL, Any BOOLEAN NOT NULL DEFAULT 0);
     CREATE TABLE Criterion(CriterionRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, CriteriaRowId INTEGER NOT NULL, CriterionType TEXT NOT NULL, Inverse BOOLEAN NOT NULL DEFAULT 0);
-    CREATE TABLE CriterionProperties(CriterionRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(CriterionRowId, Name));`);
+    CREATE TABLE CriterionProperties(CriterionRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(CriterionRowId, Name));
+    CREATE TABLE ComponentCriteria(ComponentRowId INTEGER NOT NULL, CriteriaRowId INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, CriteriaRowId));`);
   d.exec(`INSERT INTO ScannedFiles (Path) VALUES ('a'), ('b'), ('c'), ('d')`);
   const ids = ['mod-a', 'mod-b', 'mod-c', 'mod-d'];
   ids.forEach((id, i) => {
@@ -623,8 +624,9 @@ console.log('\nTest 14: the full registration (files, actions, criteria)');
       <Properties><LoadOrder>200</LoadOrder></Properties>
       <File>Core/Data.sql</File>
     </UpdateDatabase>
-    <UpdateText id="Text" criteria="Expansion1"><File>Core/Text.xml</File></UpdateText>
+    <UpdateText id="Text"><Criteria>Expansion1</Criteria><File>Core/Text.xml</File></UpdateText>
     <ReplaceUIScript id="NoFiles"><Properties><LuaContext>Screen</LuaContext></Properties></ReplaceUIScript>
+    <UpdateIcons id="AttrForm" criteria="Expansion1"><File>Core/Text.xml</File></UpdateIcons>
   </InGameActions>
   <FrontEndActions>
     <UpdateIcons id="Icons"><File>Core/Text.xml</File></UpdateIcons>
@@ -640,9 +642,9 @@ console.log('\nTest 14: the full registration (files, actions, criteria)');
 
   check('a ModFiles row per <Files> entry', n('SELECT count(*) n FROM ModFiles WHERE ModRowId=?', mid) === 2);
   check('paths kept relative with forward slashes', raw('SELECT Path FROM ModFiles WHERE ModRowId=?', mid).every((f) => !f.Path.includes('\\') && !/^[A-Za-z]:/.test(f.Path)));
-  check('one Component per InGameActions action', n('SELECT count(*) n FROM Components WHERE ModRowId=?', mid) === 3, String(n('SELECT count(*) n FROM Components WHERE ModRowId=?', mid)));
+check('one Component per InGameActions action', n('SELECT count(*) n FROM Components WHERE ModRowId=?', mid) === 4, String(n('SELECT count(*) n FROM Components WHERE ModRowId=?', mid)));
   check('components keep document order', JSON.stringify(raw('SELECT ComponentType t FROM Components WHERE ModRowId=? ORDER BY ComponentRowId', mid).map((r) => r.t))
-    === JSON.stringify(['UpdateDatabase', 'UpdateText', 'ReplaceUIScript']));
+=== JSON.stringify(['UpdateDatabase', 'UpdateText', 'ReplaceUIScript', 'UpdateIcons']));
   check('one Setting per FrontEndActions action', n('SELECT count(*) n FROM Settings WHERE ModRowId=?', mid) === 1);
   check('an action with no id is still recorded', raw('SELECT count(*) n FROM Components WHERE ModRowId=? AND ComponentId IS NULL', mid)[0].n === 0);
   check('the action Properties become ComponentProperties', n('SELECT count(*) n FROM ComponentProperties p JOIN Components c ON c.ComponentRowId=p.ComponentRowId WHERE c.ModRowId=?', mid) === 2,
@@ -654,10 +656,27 @@ console.log('\nTest 14: the full registration (files, actions, criteria)');
   check('the condition value is a property', n(`SELECT count(*) n FROM CriterionProperties p JOIN Criterion c ON c.CriterionRowId=p.CriterionRowId
     JOIN Criteria k ON k.CriteriaRowId=c.CriteriaRowId WHERE k.ModRowId=? AND p.Name='Value' AND p.Value='Expansion1'`, mid) === 1);
 
+  // The link the registration used to skip. Criteria rows that nothing points
+  // at mean the mod's conditional actions are not conditional.
+  const critLink = raw(`SELECT c.ComponentId id, k.CriteriaId crit FROM ComponentCriteria cc
+    JOIN Components c ON c.ComponentRowId=cc.ComponentRowId
+    JOIN Criteria k ON k.CriteriaRowId=cc.CriteriaRowId WHERE c.ModRowId=? ORDER BY c.ComponentRowId`, mid);
+  check('an action that names a criteria set is linked to it', critLink.length === 2, JSON.stringify(critLink));
+  check('  by the name the mod gave it, read from the <Criteria> ELEMENT',
+    critLink.every((l) => l.crit === 'Expansion1'), JSON.stringify(critLink.map((l) => l.crit)));
+  check('  the attribute form is understood too, since it costs nothing to read',
+    critLink.map((l) => l.id).sort().join(',') === 'AttrForm,Text', JSON.stringify(critLink.map((l) => l.id)));
+  check('  and an action that names none is not linked to anything',
+    !critLink.some((l) => l.id === 'Main'), JSON.stringify(critLink.map((l) => l.id)));
+  check('  and one naming a set the mod never declared is skipped, not invented',
+    n(`SELECT count(*) n FROM ComponentCriteria cc JOIN Components c ON c.ComponentRowId=cc.ComponentRowId WHERE c.ModRowId=? AND c.ComponentId='Main'`, mid) === 0);
+
   // Links: only the action's own <File> children, at priority 0.
   const links = raw(`SELECT c.ComponentType t, mf.Path p, cf.Priority pr FROM ComponentFiles cf
     JOIN Components c ON c.ComponentRowId=cf.ComponentRowId JOIN ModFiles mf ON mf.FileRowId=cf.FileRowId WHERE c.ModRowId=?`, mid);
-  check('one link per <File> child', links.length === 2, String(links.length));
+  // Three, not four: the FrontEnd action is a Setting, so its link lives in
+  // SettingFiles and never appears here.
+  check('one link per <File> child', links.length === 3, String(links.length));
   check('links resolve to ModFiles rows', links.every((l) => l.p === 'Core/Data.sql' || l.p === 'Core/Text.xml'));
   check('all at priority 0', links.every((l) => l.pr === 0));
   check('the action with no <File> gets no link', !links.some((l) => l.t === 'ReplaceUIScript'));
