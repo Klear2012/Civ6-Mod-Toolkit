@@ -112,6 +112,24 @@ function folderButton(m) {
   return `<button type="button" class="folder-btn" disabled title="Folder not found — it has been unsubscribed or deleted">${FOLDER_ICON}</button>`;
 }
 
+// The user's own labels on this mod. A .chip, not a .tag: these are a control,
+// not a badge, and they are the same shape as the filter chips in the row under
+// the profile bar so the two read as one idea. Every name is user-typed free
+// text, so it is escaped like any other.
+//
+// An unlabelled mod gets a bare "+" rather than the words "add a label": there
+// are 384 of these rows and almost none of them will carry a label, so the
+// empty state has to be quiet enough to be ignorable. The title says what it
+// does, and the button is always there for the row that needs it.
+function labelsChip(m) {
+  const names = m.labels || [];
+  const title = names.length
+    ? `Labels: ${names.join(', ')} — click to change`
+    : 'No labels — click to add one';
+  return `<button type="button" class="chip mod-labels${names.length ? '' : ' is-empty'}" data-labels="${esc(m.idNorm)}" title="${esc(title)}">${
+    names.length ? names.map((n) => esc(n)).join('<span class="sep">·</span>') : '+'}</button>`;
+}
+
 // Name, teaser, warnings, source tag, folder button and the details button. The
 // source tag is the Workshop link for Workshop mods, so there is no separate one.
 function rowBody(m, all) {
@@ -125,7 +143,7 @@ function rowBody(m, all) {
     ? `<span class="tag unscanned" title="Not switched on yet. Use “Rescan &amp; add new mods” on the dashboard.">not added</span>`
     : sourceTag(m);
   return `<span class="name"><b>${renderCivText(m.name)}</b>${sub}${probs}</span>
-    ${tag}${folderButton(m)}
+    ${tag}${labelsChip(m)}${folderButton(m)}
     <button type="button" class="info" data-info="${esc(m.idNorm)}" title="Details">i</button>`;
 }
 
@@ -156,6 +174,11 @@ function renderMods() {
   const alerts = [];
   if (!d.ok) alerts.push(`<div class="alert warn"><b>Can't read which mods are enabled.</b> ${esc(d.error || '')}</div>`);
   if (game.running) alerts.push('<div class="alert warn"><b>Civ6 is running.</b> You can prepare changes, but close the game before applying them.</div>');
+  // Labels are the user's own notes, not the game's state, so this never stops
+  // the list working - it says what went wrong and carries on with no labels.
+  if (d.labelsError) {
+    alerts.push(`<div class="alert warn"><b>Problem with your labels.</b> ${esc(d.labelsError)} Showing no labels until it is fixed.</div>`);
+  }
   // No button here on purpose: adding mods writes to the game's database, and
   // the mod manager's only write is Apply changes. Point at the dashboard
   // instead so there is one place that adds mods, not two.
@@ -294,6 +317,15 @@ function rowButtonClick(e) {
     showDetails(b.dataset.info);
     return true;
   }
+  // Same reason as the two above, and the same trap: in the list view the row is
+  // a <label>, so a click the handler does not claim toggles this mod's
+  // enable flag. That is exactly the bug the source-label link was fixed for.
+  if (b.dataset.labels !== undefined) {
+    e.preventDefault();
+    e.stopPropagation();
+    showLabelEditor(b.dataset.labels);
+    return true;
+  }
   return false;
 }
 
@@ -374,6 +406,117 @@ document.addEventListener('gamestatus', () => {
   lastRunning = game.running;
   if (modsPage.data && document.body.dataset.page === 'mods') renderMods();
 });
+
+// ---- label editor ----------------------------------------------------------
+
+// The mod being edited, and the labels it would end up with if saved. A working
+// copy, so cancelling really cancels: the dialog never writes as you click.
+const labelEdit = { idNorm: null, names: [] };
+
+// One click toggles a label on or off. Comparison is without regard to case,
+// the same rule the store applies, so a label the user typed as "Favourites"
+// toggles the "favourite" the store resolved it to.
+const hasLabel = (name) => labelEdit.names.some((n) => n.toLowerCase() === String(name).toLowerCase());
+
+function toggleLabel(name) {
+  if (hasLabel(name)) labelEdit.names = labelEdit.names.filter((n) => n.toLowerCase() !== String(name).toLowerCase());
+  else labelEdit.names = [...labelEdit.names, name];
+  renderLabelEditor();
+}
+
+function labelEditorHtml() {
+  const m = byNorm().get(labelEdit.idNorm);
+  const d = modsPage.data;
+  const counts = new Map((d.labelCounts || []).map((c) => [c.name, c.count]));
+  // A label this mod carries always appears in the global list, so the toggles
+  // are simply every label in use - there is no second list to merge.
+  const names = d.labelNames || [];
+  const toggles = names.length
+    ? names.map((n) => `<button type="button" class="chip toggle${hasLabel(n) ? ' on' : ''}" data-toggle="${esc(n)}">${
+        esc(n)}${counts.has(n) ? `<span class="n">${counts.get(n)}</span>` : ''}</button>`).join('')
+    : '<p class="hint">No labels yet. Type one below.</p>';
+
+  return `<h2>Labels</h2>
+    <p class="hint">${renderCivText(m ? m.name : '')} — a mod can carry as many labels as are useful, and each one is
+      counted separately. Labels are the same whichever profile is in use.</p>
+    <div class="label-toggles">${toggles}</div>
+    <p class="label-picked">This mod would be
+      <b>${labelEdit.names.length ? labelEdit.names.map(esc).join(', ') : 'unlabelled'}</b>.</p>
+    <form class="label-new" id="labelNewForm">
+      <input id="labelNew" type="text" maxlength="100" placeholder="New label…" autocomplete="off" spellcheck="false" />
+      <button type="submit" class="secondary">Add</button>
+    </form>
+    <div class="label-actions">
+      <button type="button" class="secondary" id="labelCancel">Cancel</button>
+      <button type="button" id="labelSave">Save</button>
+    </div>`;
+}
+
+function renderLabelEditor() {
+  $('labelDialogBody').innerHTML = labelEditorHtml();
+}
+
+// A typed name joins the working copy without being saved, so adding three
+// labels is still one write. The server is what resolves the spelling, so
+// nothing canonicalises here and the store stays the only place that decides.
+function addTypedLabel(value) {
+  const name = String(value == null ? '' : value).trim();
+  if (!name) return false;
+  if (hasLabel(name)) return true; // already on it; nothing to add
+  labelEdit.names = [...labelEdit.names, name];
+  renderLabelEditor();
+  return true;
+}
+
+function showLabelEditor(idNorm) {
+  const m = byNorm().get(idNorm);
+  if (!m) return;
+  labelEdit.idNorm = idNorm;
+  labelEdit.names = (m.labels || []).slice();
+  renderLabelEditor();
+  const dlg = $('labelDialog');
+  if (!dlg.open) dlg.showModal();
+}
+
+async function saveLabels() {
+  const idNorm = labelEdit.idNorm;
+  $('labelSave').disabled = true;
+  try {
+    const r = await postJson('/api/mods/labels', { id: idNorm, labels: labelEdit.names });
+    // The server sends the refreshed label state, so the rows, the counts and
+    // the editor's own list all come from what is really on disk rather than
+    // from what was asked for - one write, one truth, no refetch.
+    Object.assign(modsPage.data, {
+      labels: r.labels, labelCounts: r.labelCounts, labelNames: r.labelNames, labelsError: r.labelsError,
+    });
+    // The map the server sends is the same key the rows carry, so the rows are
+    // re-pointed at it. Assigning only data.labels leaves every mod holding the
+    // array it was built with, and the edit appears to have done nothing.
+    for (const m of modsPage.data.mods) m.labels = r.labels[m.idNorm] || [];
+    setGameStatus(r.game);
+    $('labelDialog').close();
+    renderMods();
+    if ($('labelDialog').open) renderLabelEditor();
+  } catch (err) {
+    toast(esc(err.message), 'err');
+    $('labelSave').disabled = false;
+  }
+}
+
+$('labelDialogBody').addEventListener('click', (e) => {
+  const t = e.target.closest('[data-toggle]');
+  if (t) { toggleLabel(t.dataset.toggle); return; }
+  if (e.target.closest('#labelCancel')) { $('labelDialog').close(); return; }
+  if (e.target.closest('#labelSave')) saveLabels();
+});
+$('labelDialogBody').addEventListener('submit', (e) => {
+  if (e.target.id !== 'labelNewForm') return;
+  e.preventDefault();
+  const input = $('labelNew');
+  if (addTypedLabel(input.value)) { input.value = ''; input.focus(); }
+});
+$('labelDialogClose').addEventListener('click', () => $('labelDialog').close());
+$('labelDialog').addEventListener('click', (e) => { if (e.target === $('labelDialog')) $('labelDialog').close(); });
 
 // ---- details dialog --------------------------------------------------------
 

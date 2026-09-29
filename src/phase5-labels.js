@@ -332,6 +332,43 @@ console.log('\nTest 9: labels survive a rescan');
     after2.labels[normId(GUID_1)].join() === 'favourite,mp-safe', JSON.stringify(after2.labels[normId(GUID_1)]));
 }
 
+// --- Test 10: the two decisions in server.js that nothing can assert on -----
+// Both are deliberate and both look like the kind of thing a later reader
+// "fixes" by adding a game-running check or a prune that is always on. Neither
+// has a runtime symptom to catch it, so the only place is here - the same
+// argument phase4 makes about the explorer call.
+console.log('\nTest 10: the decisions the server makes about labels');
+{
+  const srv = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+  const block = (name) => {
+    const at = srv.indexOf(`'${name}'`);
+    return at === -1 ? '' : srv.slice(at, srv.indexOf('\n  }', at));
+  };
+  const labelsRoute = block('/api/mods/labels');
+  const modsRoute = block('/api/mods');
+
+  check('there is a labels route', !!labelsRoute);
+  // The one write in the toolkit that is not refused while Civ6 runs, because
+  // it writes a file the game has never heard of. Blocking it would be copying
+  // a rule whose reason does not apply.
+  check('the labels write is NOT refused while Civ6 runs',
+    labelsRoute && !/game\.running\s*\)\s*return send\(res, 409/.test(labelsRoute), labelsRoute.slice(0, 200));
+  check('  and it does read the game status, for pruning rather than refusal',
+    /await gameStatus\(\)/.test(labelsRoute));
+  check('pruning is opt-in, so a caller that cannot vouch for its list gets no prune',
+    /modList\(opts = \{\}\)/.test(srv) && /opts\.prune \? new Set/.test(srv));
+  check('  and /api/mods only opts in when the game is closed',
+    /modList\(\{ prune: !game\.running \}\)/.test(modsRoute), modsRoute.slice(0, 200));
+  // A typed label is the user's mistake; a corrupt file is ours. The two must
+  // not both answer 500, or the UI cannot tell which one to apologise for.
+  check('a label the server will not accept is a 400', /400, \{ error: e\.message \}/.test(labelsRoute));
+  check('a file we cannot read is a 500, and says nothing was written',
+    /500, \{ error: e\.message \}/.test(labelsRoute));
+  check('the whole file is never sent by the page, only one mod id',
+    /postJson\('\/api\/mods\/labels', \{ id: idNorm, labels: labelEdit\.names \}\)/.test(
+      fs.readFileSync(path.join(__dirname, '..', 'public', 'mods.js'), 'utf8')));
+}
+
 function cap(fn, ...args) {
   try { fn(...args); return ''; } catch (e) { return e.message; }
 }

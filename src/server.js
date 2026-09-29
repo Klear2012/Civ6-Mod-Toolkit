@@ -23,6 +23,7 @@ const {
   findRemoved, removeMods, classifyPath, modFolderFault,
 } = require('./modsdb');
 const { gameStatus } = require('./game');
+const labelStore = require('./labels');
 
 const { version: VERSION } = require('../package.json');
 const PORT = parseInt(process.env.PORT, 10) || 8673;
@@ -77,7 +78,13 @@ function listConfigs() {
 // Everything the mod manager shows: the game's database joined with the mod
 // folders on disk. Mods found on disk but not yet in the database (the game
 // hasn't rescanned) are listed with scanned=false and can't be toggled.
-function modList() {
+//
+// opts.prune says whether the list below may be treated as a complete statement
+// about which mods exist. It may not be: when the database would not read, `out`
+// comes back empty, and pruning labels against an empty list would delete every
+// one the user has. Callers that know the game is closed pass true; everyone else
+// gets the labels as they are on disk.
+function modList(opts = {}) {
   const installed = scanMods(paths.getSources());
   const modsDb = paths.getModsDb();
   const st = modsDb.exists ? readModState(modsDb.path) : { ok: false, error: 'Mod database not found.', mods: [] };
@@ -122,11 +129,20 @@ function modList() {
   }
   const plain = (n) => n.replace(/\[[^\]]*\]/g, '').trim(); // sort without Civ [COLOR_*] markup
   out.sort((a, b) => plain(a.name).localeCompare(plain(b.name), undefined, { sensitivity: 'base' }));
+
+  // The user's own labels, read once per request so the page never fetches them
+  // separately. A label a mod does not carry is an empty list, not a missing
+  // field, so the client never has to ask whether a mod has labels or not.
+  const labelView = labelStore.readLabels(labelStore.labelsFile(),
+    opts.prune ? new Set(out.map((m) => m.idNorm)) : null);
+  for (const m of out) m.labels = labelView.labels[m.idNorm] || [];
+
   // A sync writes a row in every profile, so the UI needs to know how many
   // there are to describe what will happen.
   const groups = st.ok ? listGroups(modsDb.path).groups.length : 0;
   return {
     modsDb, ok: st.ok, error: st.error || null, activeGroup: st.activeGroup || null,
+    labelCounts: labelView.counts, labelNames: labelView.names, labelsError: labelView.error,
     profiles: groups, needsSync: todo.pending.length, mods: out,
   };
 }
@@ -274,8 +290,13 @@ async function handleApi(req, res, url) {
 
   // GET /api/mods -> mod manager list
   if (req.method === 'GET' && url.pathname === '/api/mods') {
-    const list = modList();
-    return send(res, 200, { ...list, game: await gameStatus() });
+    // The game status is read first so the list can decide whether it is a
+    // complete one. A rescan in progress means the database is not currently a
+    // statement about which mods exist, and a mod missing from the list for a
+    // moment must not take its labels with it.
+    const game = await gameStatus();
+    const list = modList({ prune: !game.running });
+    return send(res, 200, { ...list, game });
   }
 
   // GET /api/mods/details?id=... -> everything the details panel shows
@@ -298,6 +319,51 @@ async function handleApi(req, res, url) {
       blockedBy: list.mods.filter((m) => m.blocks.some((r) => r.id === idNorm)).map((m) => ({ id: m.idNorm, name: m.name, enabled: m.enabled })),
       inConfigs,
     });
+  }
+
+  // POST /api/mods/labels { id, labels:[...] } -> set one mod's labels.
+  //
+  // The one write in the toolkit that is NOT refused while Civ6 runs, and the
+  // one with no backup. Both follow from the same fact: it writes
+  // mod-labels.json, a file the game has never heard of and cannot be holding
+  // open. Refusing it would copy a rule whose reason does not apply, and it
+  // would make labelling impossible during a game - which is exactly when
+  // someone wants to record what they just tried.
+  //
+  // The whole set is replaced, because the editor is a set of toggles and one
+  // write should either land or not. A name the server cannot read comes back
+  // as a 400 and nothing is written.
+  if (req.method === 'POST' && url.pathname === '/api/mods/labels') {
+    const body = await readBody(req);
+    const idNorm = normId(body.id);
+    const list = modList();
+    const mod = list.mods.find((m) => m.idNorm === idNorm);
+    if (!mod) return send(res, 404, { error: 'mod not found' });
+    if (!Array.isArray(body.labels)) return send(res, 400, { error: 'labels must be a list' });
+    // Checked here rather than left to throw from the store, so that a name the
+    // user typed is a 400 about their request and anything that goes wrong
+    // after this point is a 500 about ours. The store re-checks on the way in;
+    // this is about which status the answer carries, not about trusting it.
+    for (const name of body.labels) {
+      try { labelStore.cleanLabel(name); } catch (e) { return send(res, 400, { error: e.message }); }
+    }
+
+    const game = await gameStatus();
+    // Prune against the list only when it is a complete statement about which
+    // mods exist - the same rule /api/mods follows, for the same reason.
+    const known = list.ok && !game.running ? new Set(list.mods.map((m) => m.idNorm)) : null;
+    try {
+      const v = labelStore.setLabels(labelStore.labelsFile(), mod.id, body.labels, known);
+      return send(res, 200, {
+        ok: true, game,
+        labels: v.labels, labelCounts: v.counts, labelNames: v.names, labelsError: v.error,
+      });
+    } catch (e) {
+      // A mod-labels.json we can no longer read is the only thing left that can
+      // land here, and setLabels says so in the message rather than overwriting
+      // whatever the file holds.
+      return send(res, 500, { error: e.message });
+    }
   }
 
   // POST /api/mods/apply { changes:[{ id, enabled }] } -> write enable flags
