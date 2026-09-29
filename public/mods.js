@@ -200,6 +200,7 @@ function renderLabelChips() {
   const box = $('labelChips');
   if (!d || !d.labelCounts || !d.labelCounts.length) {
     box.innerHTML = '<span class="none">No labels yet — click <b>+</b> on a mod to add one.</span>';
+    $('labelMore').hidden = true;
     return;
   }
   box.innerHTML = d.labelCounts.map((c) => {
@@ -208,7 +209,45 @@ function renderLabelChips() {
       + ` aria-pressed="${on}" title="${esc(`${on ? 'Stop filtering by' : 'Show only mods labelled'} “${c.name}”`)}">`
       + `${esc(c.name)}<span class="n">${c.count}</span></button>`;
   }).join('');
+  syncChipOverflow();
 }
+
+// How many chips are out of sight, and whether to say so.
+//
+// Counted from where each chip actually landed rather than from how many there
+// are: how many fit on a line depends on the window's width and on how long
+// each label happens to be, so any count computed from the number of labels
+// would be a guess. The wrapper is position:relative, so a chip's offsetTop is
+// measured from the top of the clipped area, and anything at or past its
+// clientHeight is on a line that is not shown.
+function syncChipOverflow() {
+  const wrap = $('labelChipsWrap');
+  const more = $('labelMore');
+  const chips = [...$('labelChips').children];
+  if (wrap.classList.contains('open')) {
+    more.textContent = 'Show fewer';
+    more.hidden = false;
+    return;
+  }
+  const hidden = chips.filter((c) => c.offsetTop >= wrap.clientHeight).length;
+  more.hidden = hidden === 0;
+  if (!hidden) return;
+  more.textContent = `+${hidden} more`;
+  // Showing the button narrows the chips, which can push one more chip out of
+  // sight. One more pass settles it rather than leaving "+7 more" on screen
+  // while eight are hidden.
+  const again = [...$('labelChips').children].filter((c) => c.offsetTop >= wrap.clientHeight).length;
+  if (again !== hidden) more.textContent = `+${again} more`;
+}
+
+$('labelMore').addEventListener('click', () => {
+  const wrap = $('labelChipsWrap');
+  wrap.classList.toggle('open');
+  syncChipOverflow();
+});
+// The cap is in lines, so a narrower window hides more chips and the count
+// changes without anything else being re-rendered.
+window.addEventListener('resize', () => { if (modsPage.data) syncChipOverflow(); });
 
 function renderMods() {
   const d = modsPage.data;
