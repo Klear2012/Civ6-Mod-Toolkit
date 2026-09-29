@@ -14,6 +14,25 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 ### Added
 
+- **The mod list can be sorted**, from a dropdown beside the label filters. Six
+  orders: **Name** (default), **State**, **Source**, **Label**, **Needs
+  attention** and **Last changed**. Your choice is remembered. Sorting only
+  changes the order, never which mods are shown, and it composes with every
+  filter rather than replacing one.
+- **Needs attention** is the one worth knowing about: it puts mods with a missing
+  dependency or an active conflict at the top, which is what you want when
+  something is broken and you are working out why.
+- **State** counts a mod you have switched on but not yet applied as on, so the
+  list agrees with the rows and the warning count rather than the last saved
+  state.
+- `npm run phase6`, which checks the six orderings. They are pure functions over
+  plain objects, so they need no browser and no DOM, and the awkward cases —
+  stability, unlabelled-last, pending-as-current — are checked rather than
+  eyeballed.
+- **Labels can be renamed and deleted**, on every mod that carries them, and
+  both report how many mods changed. Renaming a label to one that already exists
+  merges the two rather than refusing, so a name you want is never unreachable.
+
 - **Your own labels on mods** — *favourite*, *needs-testing*, *mp-safe*, whatever
   names you want. The mod list has filters for source, state and name, and
   nothing for the judgement only you can make about which mods you actually
@@ -30,9 +49,6 @@ Versions are tagged, and each tag produces a Windows zip on the
   shows how many mods have that label, so you can see whether it would leave
   you nothing before ticking it. And-ing would show only mods carrying every
   one, which is rarely what anyone wants and quietly returns nothing.
-- **Labels can be renamed and deleted**, on every mod that has them, and both
-  say how many mods changed. Renaming a label to one that already exists merges
-  the two rather than refusing, so a name you want is never unreachable.
 - **`npm run phase5`**, which checks the label store against a scratch
   directory. Its centrepiece is a rescan that renumbers every `ModRowId`, plus
   a deliberately wrong file keyed by `ModRowId` that is read across the same
@@ -55,13 +71,25 @@ Versions are tagged, and each tag produces a Windows zip on the
   with no labels — a syntax error in a file the toolkit wrote itself must not be
   able to take the mod list down. The toolkit also refuses to *write* over a file
   it cannot read, so a bad one can still be fixed by hand.
-- The left half of the new filter row is deliberately empty. Sorting by label,
-  by name, by whether it is on, or by what needs attention is the natural next
-  step, and the space is already its own.
+- The left half of the filter row is no longer reserved — it holds the sort
+  control now, and the two halves read as a pair.
 - The label filter was a row of chips first, and it was not kept. With a dozen
   labels the chips took six lines on a phone and pushed the mod list off the
   bottom of the screen. A dropdown whose menu scrolls has no such problem, at
   any number of labels.
+- **Last changed** sorts by the `.modinfo` file's timestamp, read from the
+  database rather than the disk. Measured on a real install: 4 ms from the
+  database against 1,194 ms for walking every mod folder and 28 ms for one
+  `stat` each, and only the database covers official DLC, whose stored paths are
+  relative and have nothing on disk to look at. It is therefore **not** the same
+  number as **Last changed** in a mod's details panel, which reports the newest
+  file anywhere in the folder — they matched exactly for 30 mods in 40 and
+  differed by hours otherwise.
+- That timestamp is 18 digits of 100-nanosecond ticks since 1601, which is a
+  `RangeError` in JavaScript — this codebase has hit that twice already. It is
+  cast to text in the query, and a test asserts the cast is still there, because
+  a conversion that works tells you nothing about whether the thing that throws
+  has been removed.
 
 ## v1.5.0 — 28 September 2026
 

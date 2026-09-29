@@ -87,7 +87,7 @@ when it starts.
 
 1. Pick what to show: **All mods** (Workshop + local), **Workshop**, **Local**,
    or **Official DLC**, optionally only **Enabled** / **Disabled** ones, and
-   filter by name.
+   filter by name. The **Sorting** dropdown picks the order — see below.
 2. Tick or untick mods. **Enable all shown** / **Disable all shown** work on
    whatever the current filter shows. Changed rows are highlighted.
 
@@ -158,6 +158,29 @@ shows how many mods it has on. The game must be **closed** to change them.
 
 Worth exporting a profile as a backup now and then: a game patch that changes
 the mod database format can switch every mod back on.
+
+### Sorting
+
+The **Sorting** dropdown above the filters orders the list. Your choice is
+remembered between sessions.
+
+| Order | What it means |
+|---|---|
+| **Name** | Alphabetical, ignoring Civ colour markup. The default. |
+| **State** | Enabled first. A mod you've switched on but not applied counts as on. |
+| **Source** | Workshop, then local, then official DLC. |
+| **Label** | By your first label; mods with no label go last. |
+| **Needs attention** | Mods with a missing dependency or an active conflict first — the useful one when something is broken. |
+| **Last changed** | Newest `.modinfo` file first. It means *the file changed*, not that the author released something: a Steam file repair also bumps it. |
+
+Sorting only changes the order, never which mods are shown, and it composes
+with the source, state, name and label filters — it orders whatever they left.
+
+**Last changed** is offered only when the toolkit can read a timestamp for at
+least one mod. It is also not the same number as **Last changed** in a mod's
+details panel, which reports the newest file anywhere in the folder rather than
+the `.modinfo`. They agree exactly for about three mods in four and differ by
+hours otherwise, because Steam writes a mod's files in a batch.
 
 ### Labels
 
@@ -250,11 +273,13 @@ A small Node server (`src/server.js`) exposes a JSON API used by the browser UI
 in `public/`. The `.Civ6Cfg` format engine is `src/civ6cfg.js`, mod discovery is
 `src/modinfo.js` + `src/paths.js`, safe saving is `src/editor.js`, the game's
 mod database, mod groups and registration are read and updated by
-`src/modsdb.js`, and user-defined mod labels are stored by `src/labels.js` in
-`mod-labels.json`. `npm run phase4` checks the profile and registration
-operations against a throwaway database, and `npm run phase5` checks the label
-store — including that labels survive a simulated rescan that renumbers every
-`ModRowId`, which is the thing that would silently lose them all.
+`src/modsdb.js`, user-defined mod labels are stored by `src/labels.js` in
+`mod-labels.json`, and the mod list's orderings are in `public/modsort.js`.
+`npm run phase4` checks the profile and registration operations against a
+throwaway database, `npm run phase5` checks the label store — including that
+labels survive a simulated rescan that renumbers every `ModRowId`, which is the
+thing that would silently lose them all — and `npm run phase6` checks the six
+orderings, which are pure functions and so need no browser.
 
 See [CHANGELOG.md](CHANGELOG.md) for what changed in each release, and
 `FINDINGS.md` for the reverse-engineered file format and mod database schema.
