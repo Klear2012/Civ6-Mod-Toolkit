@@ -65,10 +65,18 @@ jobs:
         run: |
           # Judge by the exit code, not by stderr, so a failure names the file.
           $PSNativeCommandUseErrorActionPreference = $false
-          Get-ChildItem src -Filter *.js | ForEach-Object {
+          # public/ as well as src/. The mod manager's whole UI is public/*.js,
+          # loaded by the browser and never required by node, so nothing else in
+          # this job would ever notice a syntax error in it - it would ship, and
+          # the page would fail to render for every user on first load. Both
+          # v1.6.0 features live there.
+          Get-ChildItem src, public -Filter *.js | ForEach-Object {
             node --check $_.FullName
-            if ($LASTEXITCODE -ne 0) { throw "syntax error in $($_.Name)" }
+            if ($LASTEXITCODE -ne 0) { throw "syntax error in $($_.FullName)" }
           }
+          $count = (Get-ChildItem src, public -Filter *.js).Count
+          Write-Host "parsed $count files"
+          if ($count -lt 10) { throw "expected at least 10 source files, found $count - has a glob stopped matching?" }
 
       - name: Verify the release gate
         # The list lives in package.json as check:release, so adding a suite to
