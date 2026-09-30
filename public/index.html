@@ -253,8 +253,9 @@
     <div class="toolbar">
       <input id="loFilter" class="filter" type="search" placeholder="Filter by mod or action&hellip;" />
       <div class="seg" id="loJump">
-        <button type="button" data-jump="next">Next free band</button>
-        <button type="button" data-jump="nextoff">Next that will not run</button>
+        <button type="button" data-jump="next" title="Scroll to the next gap nothing claims">Next free band</button>
+        <button type="button" data-jump="nextoff" aria-pressed="false" id="loOnlyOff"
+          title="Show only the actions that provably will not run. Click again to show everything.">Only what will not run</button>
       </div>
       <span class="meta" id="loShown"></span>
     </div>

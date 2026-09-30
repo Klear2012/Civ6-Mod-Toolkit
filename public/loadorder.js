@@ -21,7 +21,7 @@ const lo = {
   filter: '',
   compareWith: null,
   marked: null,   // a mod id, when arriving from the mod list
-  hideOff: false, // rows that will not run are noise unless asked for
+  onlyOff: false, // rows that will not run are noise unless asked for
 };
 
 function loMatches(a, q) {
@@ -120,14 +120,26 @@ function renderList() {
     if (b.kind === 'free' || b.kind === 'headroom') { html += bandHtml(b); continue; }
     // A filter keeps the band and its value, so the list stays a list of
     // positions rather than collapsing to a list of matching actions.
-    const keep = b.actions.filter((a) => loMatches(a, q) && (!lo.hideOff || a.willRun !== false));
-    if (q && !keep.length) continue;
-    const visible = q ? keep : b.actions;
+    //
+    // `narrowing`, not `q`: "only what will not run" narrows the list just as much
+    // as the text box does, and testing only `q` meant the button discarded its own
+    // filter and showed every row while claiming to show fewer.
+    const narrowing = q || lo.onlyOff;
+    const keep = b.actions.filter((a) => loMatches(a, q) && (!lo.onlyOff || a.willRun === false));
+    if (narrowing && !keep.length) continue;
+    const visible = narrowing ? keep : b.actions;
     shown += visible.length;
     html += bandHtml({ ...b, actions: visible, tie: visible.length > 1 });
   }
   list.innerHTML = html || '<p class="note">Nothing matches that filter.</p>';
-  $('loShown').textContent = q ? `${shown} of ${d.summary.actions} actions` : '';
+  // Both narrowings are named, not just the text one: a list that silently shows
+  // 331 rows instead of 1,762 reads as a different profile rather than a filter.
+  const bits = [];
+  if (lo.onlyOff) bits.push('only what will not run');
+  if (q) bits.push('matching the filter');
+  $('loShown').textContent = bits.length
+    ? `${shown} of ${d.summary.actions} actions - ${bits.join(', ')}`
+    : '';
 }
 
 function renderUndeclared() {
@@ -241,7 +253,15 @@ $('loCompare').addEventListener('click', () => {
 $('loJump').addEventListener('click', (e) => {
   const kind = e.target.dataset && e.target.dataset.jump;
   if (!kind) return;
-  if (kind === 'nextoff') { lo.hideOff = true; renderList(); return; }
+  if (kind === 'nextoff') {
+    // A toggle, because it was not one: the flag was only ever set to true, so a
+    // single click left the list filtered with no way back and nothing on screen
+    // saying so. Pressed state carries the answer now.
+    lo.onlyOff = !lo.onlyOff;
+    $('loOnlyOff').setAttribute('aria-pressed', lo.onlyOff ? 'true' : 'false');
+    renderList();
+    return;
+  }
   const free = document.querySelector('#loList .lo-free');
   if (free) free.scrollIntoView({ block: 'center' });
 });

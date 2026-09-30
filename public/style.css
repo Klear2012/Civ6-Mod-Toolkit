@@ -292,6 +292,10 @@ button:disabled { opacity: .45; cursor: default; }
 .seg button + button { border-left: 1px solid var(--border); }
 .seg button:hover { color: var(--text); background: var(--panel-2); }
 .seg button.active { color: var(--text); background: var(--accent-dim); }
+/* A toggle in a segmented control, using the same .active treatment the rest of
+   the page already uses for a pressed state. Without it the button gave no sign
+   of being on, and the list it narrows said nothing either. */
+.seg button[aria-pressed="true"] { color: var(--text); background: var(--accent-dim); }
 .seg button span { font-weight: 400; color: var(--muted); }
 .list.tall { max-height: calc(100vh - 290px); min-height: 200px; }
 .row .warn-line { display: block; font-size: 12px; color: #d29922; margin-top: 2px; }
