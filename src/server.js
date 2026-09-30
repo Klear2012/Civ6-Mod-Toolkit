@@ -984,4 +984,37 @@ server.listen(PORT, HOST, () => {
         (run.failed.length ? `, ${run.failed.length} could not be read` : ''));
     } else if (run.pending) console.log(`Sync: ${run.pending} mod${run.pending === 1 ? '' : 's'} could not be read.`);
   }).catch((e) => console.log(`Sync: ${e.message}`));
+
+  // Then the load order overrides, which the spec says sync on start and which
+  // until now only ran when someone clicked "Re-apply all". A mod that updated
+  // while the toolkit was closed gets the author's LoadOrder back on the next
+  // launch otherwise, and the user finds out from a broken load order rather
+  // than from a message.
+  //
+  // Ordered after syncMods deliberately: syncMods re-registers newly subscribed
+  // mods, which replaces rows, and repairing an override against row ids that are
+  // about to be replaced would be repairing the wrong thing.
+  syncLoadOrderOverrides();
 });
+
+// A missing mod database is not a reason to refuse the rest, and neither is a
+// store that cannot be read - both are reported and the server carries on, the
+// same way every other startup step does.
+async function syncLoadOrderOverrides() {
+  try {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return;
+    const g = await gameStatus();
+    const r = loOrder.syncOverrides(modsDb.path, { gameRunning: g.running });
+    if (r.deferred) {
+      console.log('Load order: overrides not re-applied, Civ6 is running. Close it and resync.');
+    } else if (r.changed) {
+      const drift = `${r.drifted.length} drift${r.drifted.length === 1 ? "" : "s"} from a mod updating`;
+      const odd = (r.orphans.length ? `, ${r.orphans.length} orphaned` : "")
+        + (r.ambiguous.length ? `, ${r.ambiguous.length} ambiguous` : "");
+      console.log(`Load order: re-applied ${r.applied.length} override${r.applied.length === 1 ? "" : "s"} (${drift}${odd})`);
+    }
+  } catch (e) {
+    console.log(`Load order: overrides not re-applied - ${e.message}`);
+  }
+}
