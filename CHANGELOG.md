@@ -10,7 +10,7 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
-## Unreleased
+## v1.7.0 — 1 October 2026
 
 ### Added
 
@@ -71,6 +71,26 @@ Versions are tagged, and each tag produces a Windows zip on the
   a test or a relocated install no longer overwrites the project root's copy, and
   it is written atomically — a half-written file is not a partial override, it is
   every mod gone.
+- **The overrides page is now a block-move editor.** Pick a mod and see its
+  positioned actions as one block with its span and width; target a value, another
+  mod, or a free band and get proposed numbers preserving the internal spread.
+  When the block does not fit, the page says how wide the gap is and offers even
+  re-spacing, overflowing below or above, or per-action manual entry — one
+  transaction, one backup, refused while Civ6 runs. A before-anchor sits snug
+  below the anchor rather than sliding to the far end of the gap.
+- **The view toolbar filters by mod or by action, separately.** The mod box
+  matches exactly — *Harmony in Diversity* no longer drags in its District
+  Expansion sibling — and the action box is a dropdown of the profile's own
+  action types rather than typed text.
+- **Action rows show the files they contribute**, on demand and collapsible, in
+  both the view and the editor. The names come from the database, never from a
+  path the page supplies, and the lookup works while Civ6 runs.
+- **Mod names display the way the mod manager shows them, everywhere.** Markup
+  renders in page rows and warnings, strips to plain text in dropdowns and
+  dialogs, and the ledger resolves localisation tags. A release-gate check names
+  any new spot that leaks raw tags or keys.
+- Expanded action blocks read as one grouped block, and bands in the view are
+  separated by a rule rather than a tint.
 
 ### Notes
 
