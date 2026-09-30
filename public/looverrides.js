@@ -33,7 +33,7 @@ function rowHtml(o) {
   const editable = o.state === 'applied' || o.state === 'drifted';
   const warn = o.state === 'drifted' ? 'lo-drift' : o.state === 'applied' ? 'lo-override' : 'lo-lost';
   return `<div class="lo-row lov-row" data-mod="${esc(o.modId)}" data-key="${esc(o.key)}">
-    <span class="lo-mod">${esc(o.modName)}</span>
+    <span class="lo-mod">${renderCivText(o.modName)}</span>
     <span class="lo-type">${esc(o.type || o.state)}</span>
     <span class="lo-detail">
       <span class="lo-tag ${warn}">${esc(STATE_TEXT[o.state] || o.state)}</span>

@@ -80,7 +80,7 @@ function actionRow(a) {
   if (!a.protected) bits.push('<span class="lo-tag lo-unprot">not protected</span>');
 
   return `<div class="lo-row${lo.marked === a.modId ? ' lo-mark' : ''}">
-    <span class="lo-mod">${esc(a.modName)}</span>
+    <span class="lo-mod">${renderCivText(a.modName)}</span>
     <span class="lo-type">${esc(a.type)}</span>
     <span class="lo-detail">${bits.filter(Boolean).join(' ')}</span>
   </div>`;

@@ -19,7 +19,7 @@ const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const { normId } = require('./modinfo');
 const { atomicWrite } = require('./editor');
-const { fileTimeOf, mutateDb } = require('./modsdb');
+const { fileTimeOf, mutateDb, MOD_NAME_SQL, prettyName } = require('./modsdb');
 const { gameStatus } = require('./game');
 
 const VERSION = 1;
@@ -747,17 +747,34 @@ function activeGroupId(db) {
   return g ? g.id : null;
 }
 
+// A resolved name, or a readable one when nothing localised the tag.
+//
+// ModProperties.Name holds a localization TAG, not text - the game resolves it
+// through LocalizedText, which MOD_NAME_SQL does. The base game and DLC rows have
+// no such entry, because they are not mods and nothing localises them, so they
+// arrive here still tagged. prettyName is modsdb's reader for that case, reused
+// rather than rewritten, so the mod manager and this view call a DLC row the same
+// thing.
+//
+// A GUID is left alone: it is not a tag, and dressing it up as one would be worse
+// than showing it.
+function displayNameOf(resolved, modId) {
+  if (resolved && !/LOC_[A-Z0-9_]+/i.test(resolved)) return resolved;
+  if (resolved) return prettyName(resolved) || resolved;
+  return modId;
+}
+
 // Every mod the game knows. Needed to say whether a criterion names a mod you
 // have, which is the difference between "will not run, ever" and "cannot tell".
 function installedMods(db) {
   const byId = new Map();
   for (const m of db.prepare(
-    `SELECT m.ModRowId AS modRowId, m.ModId AS modId, mp.Value AS name
+    `SELECT m.ModRowId AS modRowId, m.ModId AS modId, ${MOD_NAME_SQL('p')} AS name
        FROM Mods m
-       LEFT JOIN ModProperties mp ON mp.ModRowId = m.ModRowId AND mp.Name = 'Name'`
+       LEFT JOIN ModProperties p ON p.ModRowId = m.ModRowId AND p.Name = 'Name'`
   ).all()) {
     const id = normId(m.modId);
-    byId.set(id, { modRowId: m.modRowId, modId: id, name: m.name || m.modId });
+    byId.set(id, { modRowId: m.modRowId, modId: id, name: displayNameOf(m.name, m.modId) });
   }
   return byId;
 }
@@ -766,14 +783,14 @@ function enabledMods(db, groupId) {
   const on = new Map();
   const rowToNorm = new Map();
   for (const m of db.prepare(
-    `SELECT m.ModRowId AS modRowId, m.ModId AS modId, mp.Value AS name
+    `SELECT m.ModRowId AS modRowId, m.ModId AS modId, ${MOD_NAME_SQL('p')} AS name
        FROM ModGroupItems i
        JOIN Mods m ON m.ModRowId = i.ModRowId
-       LEFT JOIN ModProperties mp ON mp.ModRowId = m.ModRowId AND mp.Name = 'Name'
+       LEFT JOIN ModProperties p ON p.ModRowId = m.ModRowId AND p.Name = 'Name'
       WHERE i.ModGroupRowId = ? AND i.Disabled = 0`
   ).all(groupId)) {
     const id = normId(m.modId);
-    on.set(id, { modRowId: m.modRowId, modId: id, name: m.name || m.modId });
+    on.set(id, { modRowId: m.modRowId, modId: id, name: displayNameOf(m.name, m.modId) });
     rowToNorm.set(m.modRowId, id);
   }
   return { on, rowToNorm };

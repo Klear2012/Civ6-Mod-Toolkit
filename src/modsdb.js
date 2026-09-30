@@ -72,6 +72,19 @@ function resolved(alias) {
       ${alias}.Value)`;
 }
 
+// A mod's display name, as a SQL fragment taking the alias of a row that has both
+// a ModRowId and a Value. Same resolution and same order as MODS_SQL's name
+// expression, minus the ModRelationships fallback, which needs two mods to join.
+//
+// Exported so the load order view can use it rather than inlining a fourth copy:
+// it read ModProperties.Name directly and so printed LOC_ tags that the mod
+// manager had already resolved, and two screens disagreeing about one mod is
+// worse than either being wrong alone.
+const MOD_NAME_SQL = (alias) => `COALESCE(
+      (SELECT Text FROM LocalizedText WHERE ModRowId = ${alias}.ModRowId AND Tag = ${alias}.Value AND Locale = 'en_US'),
+      (SELECT Text FROM LocalizedText WHERE Tag = ${alias}.Value AND Locale = 'en_US' LIMIT 1),
+      ${alias}.Value)`;
+
 // A resolved text that is still a bare LOC_ key (or JSON-wrapped one) is useless to show.
 function usable(text) {
   return text && !/LOC_[A-Z0-9_]+/i.test(text) ? text : null;
@@ -1224,5 +1237,10 @@ module.exports = {
   // the post-commit check fails. Every write to the game's database goes through
   // here so those rules live in one place. It was left unexported while a
   // one-off experiment reimplemented it - correct for that, wrong for a feature.
+  MOD_NAME_SQL,
+  // A readable name for a tag nothing localised - DLC titles, mostly. The load
+  // order view needs it for the same rows this module already handles, and two
+  // screens calling a DLC row different things is the thing to avoid.
+  prettyName,
   mutateDb,
 };

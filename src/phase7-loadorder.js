@@ -45,6 +45,10 @@ function seed() {
     CREATE TABLE ModGroups(ModGroupRowId INTEGER PRIMARY KEY, Name TEXT NOT NULL, CanDelete BOOLEAN, Selected BOOLEAN, SortIndex INTEGER);
     CREATE TABLE ModGroupItems(ModGroupRowId INTEGER NOT NULL, ModRowId INTEGER NOT NULL, Disabled BOOLEAN NOT NULL, PRIMARY KEY(ModGroupRowId, ModRowId));
     CREATE TABLE ModProperties(ModRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ModRowId, Name));
+    -- The name resolution reads ModProperties.Name as a localization TAG and
+    -- looks the text up here, which is how the game stores it. Absent, the suite
+    -- failed on 'no such table' rather than on anything it checks.
+    CREATE TABLE LocalizedText(ModRowId INTEGER NOT NULL, Tag TEXT NOT NULL, Locale TEXT NOT NULL, Text TEXT NOT NULL, PRIMARY KEY(ModRowId, Tag, Locale));
     CREATE TABLE Criteria(CriteriaRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, CriteriaId TEXT NOT NULL, Any BOOLEAN);
     CREATE TABLE Criterion(CriterionRowId INTEGER PRIMARY KEY, CriteriaRowId INTEGER NOT NULL, CriterionType TEXT NOT NULL, Inverse BOOLEAN NOT NULL DEFAULT 0);
     CREATE TABLE CriterionProperties(CriterionRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(CriterionRowId, Name));
@@ -84,7 +88,11 @@ function seed() {
   // about what the probe settled.
   const sf3 = w.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, ?)').run(path.join(modDir, 'Other.modinfo'), 1).lastInsertRowid;
   const m3 = w.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)').run(sf3, 'CCCCCCCC-3333-4333-8333-333333333333').lastInsertRowid;
+  // A Name that is a localization TAG rather than text, which is how the game stores
+  // one, with the English text beside it. The load order view printed the tag.
   w.prepare("INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, 'Name', ?)").run(m3, 'Other Mod');
+  w.prepare("UPDATE ModProperties SET Value = 'LOC_OTHER_MOD_NAME' WHERE ModRowId = ? AND Name = 'Name'").run(m3);
+  w.prepare("INSERT INTO LocalizedText (ModRowId, Tag, Locale, Text) VALUES (?, 'LOC_OTHER_MOD_NAME', 'en_US', 'Other Mod')").run(m3);
   w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)').run(1, m3, 1);
   w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)').run(2, m3, 0);
   w.prepare("INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, 'Name', ?)").run(m1, 'Real Mod');
@@ -432,6 +440,8 @@ console.log('\nTest 6: the key has to survive what actually changes');
   renumber.exec('UPDATE ModProperties SET ModRowId = ModRowId + 100');
   renumber.exec('UPDATE ModFiles SET ModRowId = ModRowId + 100');
   renumber.exec('UPDATE Criteria SET ModRowId = ModRowId + 100');
+  renumber.exec('UPDATE LocalizedText SET ModRowId = ModRowId + 100');
+  // Also a ModRowId. Missed here first, and the guard below is what found it.
   renumber.close();
 
   // Every table that names a ModRowId has to move with it. Checked by asking
@@ -439,7 +449,8 @@ console.log('\nTest 6: the key has to survive what actually changes');
   // fixture later is caught here instead of surfacing as a wrong name.
   {
     const rq = new DatabaseSync(DB_PATH, { readOnly: true });
-    const dangling = ['ModGroupItems', 'ModProperties', 'ModFiles', 'Criteria']
+    const dangling = ['ModGroupItems', 'ModProperties', 'ModFiles', 'Criteria', 'LocalizedText']
+
       .map((t) => [t, rq.prepare(`SELECT COUNT(*) AS n FROM ${t} WHERE ModRowId NOT IN (SELECT ModRowId FROM Mods)`).get().n])
       .filter(([, n]) => n > 0);
     const orphanComp = ['ComponentProperties', 'ComponentFiles', 'ComponentCriteria']
@@ -855,6 +866,7 @@ if (real && fs.existsSync(real)) {
     w.exec('UPDATE ModProperties SET ModRowId = ModRowId + 500');
     w.exec('UPDATE ModFiles SET ModRowId = ModRowId + 500');
     w.exec('UPDATE Criteria SET ModRowId = ModRowId + 500');
+    w.exec('UPDATE LocalizedText SET ModRowId = ModRowId + 500');
     w.exec('UPDATE ComponentCriteria SET ComponentRowId = ComponentRowId + 5000');
     w.exec("UPDATE ComponentProperties SET Value = '9999' WHERE Name = 'LoadOrder'");
     w.exec("UPDATE ComponentProperties SET Value = '300' WHERE Name = 'LoadOrder' AND ComponentRowId IN (SELECT ComponentRowId FROM Components WHERE ComponentId = 'Strings')");
@@ -974,6 +986,19 @@ if (real && fs.existsSync(real)) {
       byId('GatedOff').reason);
     check('  and reports no unknown reason for it', byId('GatedOff').unknown.length === 0,
       JSON.stringify(byId('GatedOff').unknown));
+
+    // Mod 3's Name is the tag LOC_OTHER_MOD_NAME with its English text beside it,
+    // which is how the game stores one. The view used to print the tag.
+    check('a mod whose Name is a localization tag is shown as its text, not the tag',
+      /Other Mod/.test(byId('GatedOff').reason || '')
+      && !/LOC_OTHER_MOD_NAME/.test(byId('GatedOff').reason || ''),
+      byId('GatedOff').reason);
+    check('  and every row naming a mod shows no bare LOC_ tag at all',
+      v.bands.flatMap((b) => b.actions || []).every((a) => !/LOC_[A-Z0-9_]+/.test(a.modName)),
+      JSON.stringify(v.bands.flatMap((b) => b.actions || []).map((a) => a.modName).filter((x) => /LOC_[A-Z0-9_]+/.test(x))));
+    check('  and the undeclared block groups by that same name',
+      v.undeclared.every((u) => !/LOC_[A-Z0-9_]+/.test(u.name)),
+      JSON.stringify(v.undeclared.map((u) => u.name)));
     // Declared up here rather than at its original place: the assertion below
     // needs it, and reaching forward threw a ReferenceError that ended the run.
     const small = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 2 });
