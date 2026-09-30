@@ -1015,7 +1015,7 @@ $('modDialogBody').addEventListener('click', async (e) => {
   const folder = (await api('/api/mods/details?id=' + encodeURIComponent(idNorm)).catch(() => null))?.disk?.folder;
 
   const what = [
-    `Remove **${m.name}** from the game and from every profile?`,
+    `Remove **${stripCivText(m.name)}** from the game and from every profile?`,
     folder ? `Its folder will be deleted:\n\n<code>${esc(folder)}</code>` : 'Its folder is already gone.',
     'This cannot be undone.',
   ].join('\n\n');
@@ -1030,8 +1030,8 @@ $('modDialogBody').addEventListener('click', async (e) => {
     toast(bits.join('  ·  '), 'ok');
     // A folder that would not go is worth saying out loud: the game will find
     // it again on its next scan and put the mod back.
-    for (const k of r.kept || []) toast(`Could not delete ${k.name || k.modId}: ${k.error}`, 'err');
-    for (const x of r.refused || []) toast(`Not removed: ${x.name || x.modId} — ${x.reason}`, 'err');
+    for (const k of r.kept || []) toast(`Could not delete ${renderCivText(k.name || k.modId)}: ${k.error}`, 'err');
+    for (const x of r.refused || []) toast(`Not removed: ${renderCivText(x.name || x.modId)} — ${x.reason}`, 'err');
     $('modDialog').close();
     await loadMods();
   } catch (err) {

@@ -251,9 +251,11 @@
     </div>
 
     <div class="toolbar">
-      <input id="loFilter" class="filter" type="search" placeholder="Filter by mod or action&hellip;" />
+      <input id="loFilter" class="filter" type="search" placeholder="Mod name (exact)&hellip;" title="Shows only the mod named exactly this" />
+      <select id="loTypeFilter" class="filter" hidden title="Shows only actions of this component type"></select>
       <div class="seg" id="loJump">
-        <button type="button" data-jump="next" title="Scroll to the next gap nothing claims">Next free band</button>
+        <button type="button" data-lomode="mod" id="loModeMod" aria-pressed="true" title="Filter by exact mod name">Mod</button>
+        <button type="button" data-lomode="action" id="loModeAction" aria-pressed="false" title="Filter by component type">Action</button>
         <button type="button" data-jump="nextoff" aria-pressed="false" id="loOnlyOff"
           title="Show only the actions that provably will not run. Click again to show everything.">Only what will not run</button>
       </div>
@@ -296,13 +298,59 @@
   <!-- ===== Load order overrides (problem 2 - a separate screen) ===== -->
   <section class="page" id="page-load-overrides" hidden>
     <div id="lovAlerts"></div>
+    <div class="alert warn"><b>Global edit.</b> Moving a mod&rsquo;s block changes its LoadOrder in every profile. The profile picker below only filters what you see &mdash; switching it writes nothing.</div>
 
     <div class="toolbar">
+      <label class="profile-label" for="lovProfile">Profile</label>
+      <select id="lovProfile" title="Subset filter only — switching profile writes nothing"></select>
+      <span class="meta" id="lovProfileMeta"></span>
       <span class="meta" id="lovMeta"></span>
       <div class="profile-actions">
         <button id="lovSync" type="button" class="secondary">Re-apply all</button>
       </div>
     </div>
+
+    <section class="panel">
+      <div class="panel-head">
+        <h2>Move a mod&rsquo;s block <span id="lovEditCount" class="count"></span></h2>
+      </div>
+      <div class="panel-body">
+        <p class="note">Mods start collapsed: each row shows positioned actions, min, max, width, ties, undeclared (never moved), and protection. Expanding a mod selects it for the move. Undeclared actions get no value unless you name one explicitly in manual mode.</p>
+        <input id="lovModFilter" class="filter" type="search" placeholder="Filter by mod&hellip;" />
+        <div id="lovPicker" class="list tall"></div>
+        <h3>Target</h3>
+        <div class="toolbar">
+          <select id="lovTargetMode" title="How to place the block">
+            <option value="after-value">After a value</option>
+            <option value="before-value">Before a value</option>
+            <option value="after-mod">After a mod&rsquo;s band</option>
+            <option value="before-mod">Before a mod&rsquo;s band</option>
+            <option value="free">Into a free band</option>
+          </select>
+          <input id="lovAnchorValue" type="text" inputmode="numeric" placeholder="value&hellip;" title="Whole-number anchor value" />
+          <select id="lovAnchorMod" title="Anchor mod band"></select>
+          <select id="lovFreeBand" title="Free band"></select>
+          <button id="lovPropose" type="button" class="secondary">Preview proposal</button>
+        </div>
+        <div id="lovNofit" class="toolbar" hidden>
+          <span class="meta">Too wide for the gap:</span>
+          <div class="seg" id="lovNofitSeg">
+            <button type="button" data-nofit="even">Even re-space</button>
+            <button type="button" data-nofit="overflow-below">Overflow below min</button>
+            <button type="button" data-nofit="overflow-above">Overflow above max</button>
+            <button type="button" data-nofit="manual">Manual</button>
+          </div>
+        </div>
+        <div id="lovNeedGap" class="note"></div>
+        <div id="lovWarnings"></div>
+        <div id="lovPreview" class="list"></div>
+        <div id="lovManual" class="list"></div>
+        <div class="toolbar">
+          <button id="lovApply" type="button" disabled>Apply block move</button>
+          <span class="meta" id="lovApplyMeta"></span>
+        </div>
+      </div>
+    </section>
 
     <section class="panel">
       <div class="panel-head">

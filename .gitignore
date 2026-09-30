@@ -8,6 +8,12 @@ node_modules/
 civ6-paths.json
 mod-labels.json
 
+# AI agent environment - planning artifacts and session state, never shipped
+openspec/
+.opencode/
+.agents/
+.openchamber/
+
 # misc
 scratch_*
 *.log
@@ -15,7 +21,6 @@ scratch_*
 AGENTS.md
 
 # browser-tool screenshots taken while checking the UI
-.openchamber/
 
 # load order overrides - one file per user, and it names an action by a key we compute
 load-order-overrides.json

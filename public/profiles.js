@@ -101,7 +101,7 @@ function setAfterSwitch(p) {
 }
 
 const modNames = (ids, all, limit) => {
-  const names = ids.map((id) => (all.get(id) || {}).name).filter(Boolean);
+  const names = ids.map((id) => stripCivText((all.get(id) || {}).name)).filter(Boolean);
   const shown = names.slice(0, limit).join(', ');
   return names.length > limit ? `${shown} and ${names.length - limit} more` : shown;
 };
@@ -122,7 +122,7 @@ function switchPreview(p) {
 
   const problems = [];
   for (const m of all.values()) {
-    for (const pr of problemsOf(m, all, on)) problems.push(`${m.name} — ${pr.text}`);
+    for (const pr of problemsOf(m, all, on)) problems.push(`${stripCivText(m.name)} — ${pr.text}`);
   }
   if (problems.length) {
     lines.push(`\n${problems.length} problem${problems.length === 1 ? '' : 's'} with what would be loaded:`);
@@ -252,7 +252,7 @@ async function importProfile(file) {
     // Prefer a name the player recognises over the bare id.
     const known = new Map((modsPage.data ? modsPage.data.mods : []).map((m) => [m.idNorm, m.name]));
     const names = r.skipped.map((id) => known.get(String(id).toLowerCase()) || id);
-    const shown = names.slice(0, 5).map(esc).join(', ');
+    const shown = names.slice(0, 5).map(renderCivText).join(', ');
     toast(`${r.skipped.length} mod${r.skipped.length === 1 ? '' : 's'} in the file ` +
       `${r.skipped.length === 1 ? 'is' : 'are'} not installed here and ${r.skipped.length === 1 ? 'was' : 'were'} left out.`,
       'err', shown + (names.length > 5 ? `, +${names.length - 5} more` : ''));

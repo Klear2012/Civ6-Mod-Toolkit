@@ -30,7 +30,9 @@ const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
 
-const PUB = path.join(__dirname, '..', 'public');
+// CIV6_PUBLIC_DIR points the suite at a scratch copy of public/, so the mod-name
+// gate below can be shown failing on a planted leak without touching the tree.
+const PUB = process.env.CIV6_PUBLIC_DIR || path.join(__dirname, '..', 'public');
 const html = fs.readFileSync(path.join(PUB, 'index.html'), 'utf8');
 
 let pass = true;
@@ -139,6 +141,61 @@ console.log('\nTest 5: every route the navigation offers is registered by some s
   const unreachable = [...new Set(registered)].filter((n) => !navs.includes(n));
   console.log(`  note: ${[...new Set(registered)].length} pages registered, ${navs.length} in the navigation`);
   console.log(`        reachable only by link: ${unreachable.join(', ') || 'none'}`);
+}
+
+console.log('\nTest 6: mod names render in page HTML and strip in dialogs/options');
+{
+  // Convention (mod-name-display): a mod name can carry Civ markup
+  // ([COLOR_...]...[ENDCOLOR]) that only renders through renderCivText. Page
+  // HTML must render it; <option> text and native confirm()/prompt() dialogs
+  // must strip it with stripCivText. A bare esc() leaks literal bracket tags.
+  // A mod-name-shaped expression is the modName property or .name on a
+  // mod-ish receiver (m/o/a). Group, config, label and file names (g.name,
+  // c.name, file.name) are not mod names and keep using esc(). A line that
+  // already renders or strips is fine (config.js renders the name and escapes
+  // the id on one line).
+  const MODNAME = /\bmodName\b|(?:^|[^\w$])[moa]\.name\b/;
+  const bad = [];
+  for (const s of scriptSrcs) {
+    fs.readFileSync(path.join(PUB, s), 'utf8').replace(/\r\n/g, '\n').split('\n').forEach((line, i) => {
+      const t = line.trim();
+      if (!t || t.startsWith('//') || t.startsWith('*')) return;
+      if (/esc\s*\(/.test(line) && MODNAME.test(line) && !/renderCivText|stripCivText/.test(line)) {
+        bad.push(`${s}:${i + 1} esc() around a mod name: ${t}`);
+      }
+      if (/confirm\s*\(|prompt\s*\(|<option/.test(line) && /\$\{/.test(line)
+        && MODNAME.test(line) && !/stripCivText/.test(line)) {
+        bad.push(`${s}:${i + 1} raw mod name in a dialog/option string: ${t}`);
+      }
+    });
+  }
+  check('no template escapes a mod name instead of rendering it', bad.length === 0, bad.join('; '));
+  // The fixed dialog sites build their strings away from the confirm()/prompt()
+  // call, so the line scan above cannot see them: assert they still strip.
+  const lov = fs.readFileSync(path.join(PUB, 'looverrides.js'), 'utf8');
+  const pro = fs.readFileSync(path.join(PUB, 'profiles.js'), 'utf8');
+  const cfg = fs.readFileSync(path.join(PUB, 'config.js'), 'utf8');
+  const mod = fs.readFileSync(path.join(PUB, 'mods.js'), 'utf8');
+  const lord = fs.readFileSync(path.join(PUB, 'loadorder.js'), 'utf8');
+  check('  the override prompt still strips the mod name', /stripCivText\(o\.modName\)/.test(lov));
+  check('  the profile switch preview still strips mod names',
+    /stripCivText\(\(all\.get\(id\)/.test(pro) && /stripCivText\(m\.name\)/.test(pro));
+  check('  the config delete confirm still strips the name', /stripCivText\(name\)/.test(cfg));
+  // Both build their strings away from the toast()/confirm() call, so the
+  // line scan above cannot see them either: the import-skipped names travel
+  // as the `names`/`shown` aliases into the toast detail (innerHTML), and
+  // the remove-mod `what` travels into confirm(). A generic alias pattern
+  // is disproportionate - `names` also holds label names that keep esc()
+  // (mods.js label chips, label-edit dialog) - so pin the fixed sites.
+  check('  the import-skipped toast detail still renders mod names',
+    /names\.slice\(0,\s*5\)\.map\(renderCivText\)/.test(pro));
+  check('  the remove-mod confirm still strips the mod name', /stripCivText\(m\.name\)/.test(mod));
+  check('  condition reason/why text renders civ markup',
+    /renderCivText\(a\.reason\)/.test(lord) && /renderCivText\(a\.unknown\[0\]\.why\)/.test(lord));
+  // And the scan is not vacuous: the convention helpers are actually in use.
+  const uses = scriptSrcs.map((s) => fs.readFileSync(path.join(PUB, s), 'utf8'))
+    .join('\n').match(/(?:render|strip)CivText\(/g) || [];
+  check('  and the scan saw the helpers in use', uses.length >= 10, `${uses.length} render/strip call sites`);
 }
 
 console.log(`\n${'='.repeat(60)}`);

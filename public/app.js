@@ -101,6 +101,13 @@ function renderCivText(s) {
   return out;
 }
 
+// Plain-text form of renderCivText for contexts where HTML cannot render
+// (<option> text, native confirm()/prompt() dialogs). Drops the same [...]
+// markup runs renderCivText handles, decodes entities, collapses whitespace.
+function stripCivText(s) {
+  return decodeXml(String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ' ')).replace(/\s+/g, ' ').trim();
+}
+
 // ---- router ----------------------------------------------------------------
 
 function parseRoute() {

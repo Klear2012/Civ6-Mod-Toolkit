@@ -19,14 +19,19 @@
 const lo = {
   data: null,
   filter: '',
+  mode: 'mod',      // 'mod': exact-name text field; 'action': component-type dropdown
+  typeFilter: '',   // component type in action mode; '' means all types
   compareWith: null,
   marked: null,   // a mod id, when arriving from the mod list
   onlyOff: false, // rows that will not run are noise unless asked for
+  fileCache: {},  // componentRowId -> [basename]; fetched on demand, never in the list payload
+  filesOpen: {},  // componentRowId -> true when its +N more is expanded
 };
 
-function loMatches(a, q) {
+function loMatches(a, q, t) {
+  if (t) return a.type === t;
   if (!q) return true;
-  return `${a.modName} ${a.type} ${a.id || ''}`.toLowerCase().includes(q);
+  return String(a.modName || '').toLowerCase() === q;
 }
 
 // The note explaining the shape of the list. It is here rather than in a dialog
@@ -48,17 +53,64 @@ function stateBadge(a) {
 }
 
 function conditionLine(a) {
-  if (a.willRun === false) return `<span class="lo-cond lo-off">not run &mdash; ${esc(a.reason)}</span>`;
+  if (a.willRun === false) return `<span class="lo-cond lo-off">not run &mdash; ${renderCivText(a.reason)}</span>`;
   if (a.willRun === null && a.unknown && a.unknown.length) {
     // Name the first thing it could not decide, and say how many others there
     // are. Showing only the first reads as "this is the one thing", which is a
     // claim the row has not earned when a set gates on four unreadable conditions.
     const more = a.unknown.length - 1;
-    return `<span class="lo-cond lo-unknown">? ${esc(a.unknown[0].why)}`
+    return `<span class="lo-cond lo-unknown">? ${renderCivText(a.unknown[0].why)}`
       + (more > 0 ? ` <span class="lo-cond-more">and ${n(more)} more it cannot see</span>` : '')
       + '</span>';
   }
   return '';
+}
+
+// The one control on this page that reaches toward editing, and it does not
+// edit: it navigates to #/load-overrides carrying the action's identity
+// (modId + componentRowId), which the editor resolves server-side via
+// actionKey/resolveAction. View rows deliberately carry no action key -
+// building one per action would cost a key build per row per request - so the
+// row id is what crosses the handoff. No POST, no value mutation.
+function loOverrideControl(a) {
+  if (a.modId == null || a.componentRowId == null) return '';
+  return `<span class="lov-actions"><button type="button" class="secondary small" data-lo-override="${esc(a.modId)}" data-lo-action="${esc(a.componentRowId)}">Override&hellip;</button></span>`;
+}
+
+// Action file lists, fetched on demand per row and cached above: the list
+// payload carries no per-action file joins. Up to two basenames inline, the
+// rest behind +N more; an action with no files says so.
+function loFilesHtml(files, expanded, rowId) {
+  if (!files || !files.length) return '<span class="lo-files">no files</span>';
+  if (files.length <= 2 || expanded) {
+    return `<span class="lo-files">${files.map((f) => esc(f)).join(', ')}</span>`
+      + (files.length > 2 ? ` <button type="button" class="secondary small" data-lo-files-toggle="${esc(rowId == null ? '' : rowId)}">show less</button>` : '');
+  }
+  return `<span class="lo-files">${files.slice(0, 2).map((f) => esc(f)).join(', ')}`
+    + ` <button type="button" class="secondary small" data-lo-files-toggle="${esc(rowId == null ? '' : rowId)}">+${n(files.length - 2)} more</button></span>`;
+}
+
+function loFilesSlot(a) {
+  if (a.componentRowId == null) return '';
+  const hit = lo.fileCache[a.componentRowId];
+  if (!hit) return `<span class="lo-fileslot"><button type="button" class="secondary small" data-lo-files="${esc(a.componentRowId)}">files</button></span>`;
+  return `<span class="lo-fileslot">${loFilesHtml(hit, !!lo.filesOpen[a.componentRowId], a.componentRowId)}</span>`;
+}
+
+async function loFilesLoad(rowId, slot) {
+  try {
+    const d = await api(`/api/action-files?componentRowId=${encodeURIComponent(rowId)}`);
+    lo.fileCache[rowId] = d.files || [];
+  } catch (err) {
+    slot.innerHTML = `<span class="lo-cond">${esc(err.message)}</span>`;
+    return;
+  }
+  slot.innerHTML = loFilesHtml(lo.fileCache[rowId], !!lo.filesOpen[rowId], rowId);
+}
+
+function loOverrideHash(modId, componentRowId) {
+  const q = new URLSearchParams({ modId: String(modId), componentRowId: String(componentRowId) });
+  return `#/load-overrides?${q}`;
 }
 
 function actionRow(a) {
@@ -82,7 +134,9 @@ function actionRow(a) {
   return `<div class="lo-row${lo.marked === a.modId ? ' lo-mark' : ''}">
     <span class="lo-mod">${renderCivText(a.modName)}</span>
     <span class="lo-type">${esc(a.type)}</span>
+    ${loFilesSlot(a)}
     <span class="lo-detail">${bits.filter(Boolean).join(' ')}</span>
+    ${loOverrideControl(a)}
   </div>`;
 }
 
@@ -112,7 +166,9 @@ function renderList() {
   const d = lo.data;
   const list = $('loList');
   if (!d || !d.ok) { list.innerHTML = ''; return; }
-  const q = lo.filter.trim().toLowerCase();
+  const loModMode = lo.mode !== 'action';
+  const q = loModMode ? lo.filter.trim().toLowerCase() : '';
+  const loType = loModMode ? '' : lo.typeFilter;
 
   let html = '';
   let shown = 0;
@@ -124,19 +180,27 @@ function renderList() {
     // `narrowing`, not `q`: "only what will not run" narrows the list just as much
     // as the text box does, and testing only `q` meant the button discarded its own
     // filter and showed every row while claiming to show fewer.
-    const narrowing = q || lo.onlyOff;
-    const keep = b.actions.filter((a) => loMatches(a, q) && (!lo.onlyOff || a.willRun === false));
+    const narrowing = q || loType || lo.onlyOff;
+    const keep = b.actions.filter((a) => loMatches(a, q, loType) && (!lo.onlyOff || a.willRun === false));
     if (narrowing && !keep.length) continue;
     const visible = narrowing ? keep : b.actions;
     shown += visible.length;
     html += bandHtml({ ...b, actions: visible, tie: visible.length > 1 });
   }
-  list.innerHTML = html || '<p class="note">Nothing matches that filter.</p>';
+  // A text or type filter that matches no action is an empty state, not a list
+  // of gaps: the free rows always render, so `html` is never empty for that.
+  const loEmpty = (q || loType) && !shown;
+  list.innerHTML = loEmpty
+    ? (q
+      ? '<p class="note">No mod is named exactly that — the mod filter matches whole names only.</p>'
+      : '<p class="note">Nothing matches that filter.</p>')
+    : (html || '<p class="note">Nothing matches that filter.</p>');
   // Both narrowings are named, not just the text one: a list that silently shows
   // 331 rows instead of 1,762 reads as a different profile rather than a filter.
   const bits = [];
   if (lo.onlyOff) bits.push('only what will not run');
   if (q) bits.push('matching the filter');
+  else if (loType) bits.push(`of type ${loType}`);
   $('loShown').textContent = bits.length
     ? `${shown} of ${d.summary.actions} actions - ${bits.join(', ')}`
     : '';
@@ -152,9 +216,13 @@ function renderUndeclared() {
        decides &mdash; not yours, and not ours. A mod with a long list here is relying on
        ordering nobody controls.</p>`
     : '';
-  $('loUndeclared').innerHTML = ok && d.undeclared.length
-    ? d.undeclared.map((m) => `<div class="lo-row"><span class="lo-mod">${esc(m.name)}</span><span class="lo-detail">${esc(n(m.count))} actions</span></div>`).join('')
-    : '<p class="note">Every action in this profile declares a position.</p>';
+  const uq = ok && lo.mode !== 'action' ? lo.filter.trim().toLowerCase() : '';
+  const urows = !ok ? [] : (uq ? d.undeclared.filter((m) => String(m.name || '').toLowerCase() === uq) : d.undeclared);
+  $('loUndeclared').innerHTML = !ok || !d.undeclared.length
+    ? '<p class="note">Every action in this profile declares a position.</p>'
+    : urows.length
+      ? urows.map((m) => `<div class="lo-row"><span class="lo-mod">${renderCivText(m.name)}</span><span class="lo-detail">${esc(n(m.count))} actions</span></div>`).join('')
+      : '<p class="note">No mod is named exactly that — the mod filter matches whole names only.</p>';
 }
 
 function renderUnmatched() {
@@ -206,9 +274,31 @@ function renderHeader() {
   $('loCompare').textContent = cmp ? `Comparing with "${cmp.name}" — clear` : 'Clear comparison';
 }
 
+// Component types for the action-mode dropdown, derived from the loaded
+// profile's own band data rather than a server route: the bands already
+// carry every positioned action's type.
+function loSyncTypeOptions() {
+  const sel = $('loTypeFilter');
+  if (!sel) return;
+  const seen = new Set();
+  const d = lo.data;
+  if (d && d.ok) {
+    for (const b of d.bands) {
+      if (!b || b.kind !== 'value' || !b.actions) continue;
+      for (const a of b.actions) if (a && a.type) seen.add(a.type);
+    }
+  }
+  const prev = lo.typeFilter || '';
+  sel.innerHTML = ['<option value="">All types</option>',
+    ...[...seen].sort().map((t) => `<option value="${esc(t)}"${t === prev ? ' selected' : ''}>${esc(t)}</option>`)].join('');
+  if (prev && !seen.has(prev)) lo.typeFilter = '';
+  sel.value = lo.typeFilter || '';
+}
+
 function renderLoOrder() {
   renderAlerts();
   renderHeader();
+  loSyncTypeOptions();
   renderList();
   renderUndeclared();
   renderUnmatched();
@@ -235,7 +325,29 @@ async function loadLoOrder() {
   renderLoOrder();
 }
 
-$('loFilter').addEventListener('input', (e) => { lo.filter = e.target.value; renderList(); });
+$('loFilter').addEventListener('input', (e) => { lo.filter = e.target.value; renderList(); renderUndeclared(); });
+$('loTypeFilter').addEventListener('change', (e) => { lo.typeFilter = e.target.value; renderList(); });
+// Navigation only. This handler carries identity into the hash and writes
+// nothing: the view stays read-only by construction, asserted in phase7.
+$('loList').addEventListener('click', (e) => {
+  const fbtn = e.target.closest('button[data-lo-files]');
+  if (fbtn) {
+    const slot = fbtn.closest('.lo-fileslot');
+    if (slot) loFilesLoad(fbtn.dataset.loFiles, slot).catch((err) => toast(err.message, 'err'));
+    return;
+  }
+  const tbtn = e.target.closest('button[data-lo-files-toggle]');
+  if (tbtn) {
+    const id = tbtn.dataset.loFilesToggle;
+    lo.filesOpen[id] = !lo.filesOpen[id];
+    const slot = tbtn.closest('.lo-fileslot');
+    if (slot) slot.innerHTML = loFilesHtml(lo.fileCache[id] || [], !!lo.filesOpen[id], id);
+    return;
+  }
+  const btn = e.target.closest('button[data-lo-override]');
+  if (!btn) return;
+  location.hash = loOverrideHash(btn.dataset.loOverride, btn.dataset.loAction);
+});
 $('loProfile').addEventListener('change', (e) => {
   const q = new URLSearchParams({ profile: e.target.value });
   if (lo.compareWith != null) q.set('compare', lo.compareWith);
@@ -251,6 +363,17 @@ $('loCompare').addEventListener('click', () => {
   location.hash = `#/load-order${q.toString() ? `?${q}` : ''}`;
 });
 $('loJump').addEventListener('click', (e) => {
+  const modeBtn = e.target.closest('button[data-lomode]');
+  if (modeBtn) {
+    lo.mode = modeBtn.dataset.lomode === 'action' ? 'action' : 'mod';
+    $('loModeMod').setAttribute('aria-pressed', lo.mode === 'mod' ? 'true' : 'false');
+    $('loModeAction').setAttribute('aria-pressed', lo.mode === 'action' ? 'true' : 'false');
+    $('loFilter').hidden = lo.mode !== 'mod';
+    $('loTypeFilter').hidden = lo.mode !== 'action';
+    renderList();
+    renderUndeclared();
+    return;
+  }
   const kind = e.target.dataset && e.target.dataset.jump;
   if (!kind) return;
   if (kind === 'nextoff') {
@@ -262,8 +385,6 @@ $('loJump').addEventListener('click', (e) => {
     renderList();
     return;
   }
-  const free = document.querySelector('#loList .lo-free');
-  if (free) free.scrollIntoView({ block: 'center' });
 });
 
 pages['load-order'] = {
@@ -272,7 +393,14 @@ pages['load-order'] = {
     const cmp = params.get('compare');
     lo.compareWith = cmp != null && /^\d+$/.test(cmp) ? Number(cmp) : null;
     lo.filter = '';
+    lo.mode = 'mod';
+    lo.typeFilter = '';
     $('loFilter').value = '';
+    $('loFilter').hidden = false;
+    $('loTypeFilter').value = '';
+    $('loTypeFilter').hidden = true;
+    $('loModeMod').setAttribute('aria-pressed', 'true');
+    $('loModeAction').setAttribute('aria-pressed', 'false');
     return loadLoOrder();
   },
 };

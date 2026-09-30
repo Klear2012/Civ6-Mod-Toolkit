@@ -497,6 +497,21 @@ button.small { padding: 5px 10px; font-size: 12.5px; }
    remove the neighbours that are the whole point. */
 .lo-mark { background: rgba(56, 139, 253, .10); box-shadow: inset 2px 0 0 #388bfd; }
 
+/* A 2px rule between bands separates blocks; ties keep the accent bar.
+   Same divider on free rows so every block boundary reads the same. */
+.lo-band { border-bottom: 2px solid var(--border); padding-bottom: 8px; margin-bottom: 8px; }
+
+/* Expanded picker group: the open mod row and its action block read as one.
+   Same inset-bar + tint language as .lo-mark, quieter so the handoff mark
+   still wins. The cap/tie/undeclared notes stay inside .lov-expand. */
+.lov-pick.lov-open { background: rgba(56, 139, 253, .10); box-shadow: inset 2px 0 0 #388bfd; }
+.lov-expand {
+  background: rgba(56, 139, 253, .06);
+  box-shadow: inset 2px 0 0 #388bfd;
+  margin: 0 0 8px 10px;
+  padding: 4px 0 6px 14px;
+}
+
 .lo-tag {
   display: inline-block;
   border: 1px solid var(--panel-2);

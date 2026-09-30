@@ -12,6 +12,10 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
+const http = require('http');
+const net = require('net');
+const vm = require('vm');
+const { spawn } = require('child_process');
 const lo = require('./loadorder');
 const { fileTimeOf } = require('./modsdb');
 const { normId } = require('./modinfo');
@@ -1155,8 +1159,10 @@ if (real && fs.existsSync(real)) {
     check('the view route is a GET', /req.method === 'GET' && url.pathname === '\/api\/load-order'/.test(srv));
     check('  and no POST writes to it', !/req.method === 'POST' && url.pathname === '\/api\/load-order'/.test(srv));
     const loadWrites = (srv.match(/url.pathname === '\/api\/load-overrides[^']*'/g) || []).length;
-    check('every write route is under /api/load-overrides, and there are five of them',
-      loadWrites === 5, String(loadWrites));
+    check('every write route is under /api/load-overrides, and there are at least five of them',
+      // Five, or six once the block-move bulk route (2.2) lands. Either way the
+      // point stands: every write route lives here, never under /api/load-order.
+      loadWrites >= 5, String(loadWrites));
     check('the view page has no button that posts anything', !/postJson|\bfetch\(|<form/.test(view));
     // The page does have an input - the text filter. What it must not have is
     // anything that could carry a load order into the database.
@@ -1172,7 +1178,586 @@ if (real && fs.existsSync(real)) {
       /id="page-load-order"/.test(html) && /id="page-load-overrides"/.test(html));
   }
 
-  console.log('\nTest 16: nothing was left open');
+    console.log('\nTest 16: block-move proposal and bulk apply (load-order-edit 2.3)');
+  {
+    // Setup is scratch-DB-only: Test 12's rescan parked every LoadOrder at
+    // 9999, which would leave the M2 pair tied at one value and PatchTwo with
+    // both spellings at once - neither exercises anything. Restore the pair,
+    // strip PatchTwo back to its bare typo, and give NoPosition the second
+    // real misspelling, LoadingOrder.
+    const d0 = db();
+    const crTwo = crOfIn(d0, 'PatchTwo');
+    const crNoPos = crOfIn(d0, 'NoPosition');
+    const crLonely = firstCrIn(d0, 'Lonely');
+    d0.close();
+    const w0 = new DatabaseSync(DB_PATH);
+    const pair = w0.prepare("SELECT ComponentRowId AS cr FROM Components WHERE ComponentId = 'NewAction' ORDER BY ComponentRowId").all();
+    w0.prepare("UPDATE ComponentProperties SET Value = '500' WHERE ComponentRowId = ? AND Name = 'LoadOrder'").run(pair[0].cr);
+    w0.prepare("UPDATE ComponentProperties SET Value = '600' WHERE ComponentRowId = ? AND Name = 'LoadOrder'").run(pair[1].cr);
+    w0.prepare("DELETE FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'").run(crTwo);
+    // Lonely took a value in Test 10 and the rescan parked it at 9999: put it
+    // back to undeclared so the pair below is the whole block again.
+    w0.prepare("DELETE FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'").run(crLonely);
+    w0.prepare("INSERT INTO ComponentProperties (ComponentRowId, Name, Value) VALUES (?, 'LoadingOrder', '450')").run(crNoPos);
+    w0.close();
+
+    // Hand-built bands, so nothing here depends on what Tests 10-14 left in
+    // the store. OTHER holds 1000, 1010 and 5000; the moving block's own
+    // values free up once it moves and never count as occupied.
+    const OTHER = 'dddddddd-4444-4444-8444-444444444444';
+    const bands = [
+      { kind: 'value', value: 1000, actions: [{ modId: OTHER, modName: 'Other' }] },
+      { kind: 'value', value: 1010, actions: [{ modId: OTHER, modName: 'Other' }] },
+      { kind: 'free', from: 1011, to: 1200, count: 190 },
+      { kind: 'value', value: 5000, actions: [{ modId: OTHER, modName: 'Other' }] },
+      { kind: 'headroom', from: 5001, to: null, count: null },
+    ];
+
+    const dd = db();
+    const block = lo.describeBlock(dd, M2);
+    const block1 = lo.describeBlock(dd, M1);
+    dd.close();
+    eq('the block counts positioned actions only', block.count, 2);
+    eq('  min', block.min, 500);
+    eq('  max', block.max, 600);
+    eq('  width', block.width, 100);
+    check('  no tie in the pair', block.tie === false);
+    eq('  undeclared counted aside', block.undeclaredCount, 1);
+    check('  and excluded from the move list',
+      block.actions.every((a) => a.componentRowId !== crLonely));
+    check('  offsets measured from min',
+      block.actions[0].offset === 0 && block.actions[1].offset === 100);
+    check('  an off-disk mod is marked unprotectable, like the base/DLC rows',
+      block.protectable === false);
+    check('a typo-only action reads LaodOrder as its position',
+      block1.actions.some((a) => a.componentRowId === crTwo && a.effective === 200 && a.misspelled === 'LaodOrder'),
+      JSON.stringify(block1.actions.filter((a) => a.componentRowId === crTwo)));
+    check('  and LoadingOrder, the second spelling, reads the same way',
+      block1.actions.some((a) => a.componentRowId === crNoPos && a.effective === 450 && a.misspelled === 'LoadingOrder'));
+
+    const kTwo = keyOf('PatchTwo');
+    const dd2 = db();
+    const res2 = lo.resolveAction(dd2, M1, kTwo);
+    dd2.close();
+    check('  and still resolves by content key, spelling not being identity',
+      res2.state === lo.FIND && res2.componentRowId === crTwo);
+
+    // Fit: width 100 into a 190-wide gap preserves offsets.
+    const d1 = db();
+    const fit = lo.proposeBlock(d1, M2, { gap: { from: 1011, to: 1200 } }, { bands });
+    const nofit = lo.proposeBlock(d1, M2, { gap: { from: 1011, to: 1050 } }, { bands });
+    d1.close();
+    check('a width-100 block fits a 190-wide gap', fit.fits === true,
+      JSON.stringify({ fits: fit.fits, need: fit.need, gap: fit.gap }));
+    eq('  need is the width', fit.need, 100);
+    eq('  gap is the free run', fit.gap, 190);
+    eq('  first lands on the base', fit.mapping[0].to, 1011);
+    eq('  second keeps its offset: new = base + offset', fit.mapping[1].to, 1111);
+    check('  order unchanged',
+      fit.mapping[0].from < fit.mapping[1].from && fit.mapping[0].to < fit.mapping[1].to);
+    check('  undeclared actions are never proposed a value',
+      fit.mapping.every((m) => m.componentRowId !== crLonely));
+    check('  the off-disk block warns unprotectable rather than claiming safety',
+      fit.warnings.some((w) => w.kind === 'unprotectable'));
+
+    // No-fit: need-vs-gap with the three options, and nothing proposed.
+    check('a width-100 block does not fit a 40-wide gap', nofit.fits === false);
+    eq('  need states the width', nofit.need, 100);
+    eq('  gap states the free run', nofit.gap, 40);
+    check('  the three no-fit paths are offered and nothing is proposed',
+      JSON.stringify(nofit.options) === '["even","overflow","manual"]' && nofit.mapping.length === 0,
+      JSON.stringify(nofit.options));
+
+    // The three paths, all pure mappings with an old-to-new table.
+    const even = lo.buildEvenSpacing(block, bands, { from: 1011, to: 1050 });
+    check('even re-space distributes order-preserving inside the gap',
+      even.strategy === 'even'
+      && even.mapping.find((m) => m.from === 500).to === 1011
+      && even.mapping.find((m) => m.from === 600).to === 1050,
+      JSON.stringify(even.mapping));
+    const over = lo.buildOverflow(block, bands, 'above');
+    check('overflow above starts past the max and preserves offsets',
+      over.base === 5001
+      && over.mapping.find((m) => m.from === 500).to === 5001
+      && over.mapping.find((m) => m.from === 600).to === 5101,
+      JSON.stringify(over.mapping));
+    const under = lo.buildOverflow(block, bands, 'below');
+    check('overflow below ends at the global min minus one',
+      under.base === 899 && under.mapping.find((m) => m.from === 600).to === 999,
+      JSON.stringify(under.mapping));
+    const manUn = lo.buildManual(block, bands, { [crLonely]: 1100 });
+    check('only manual may place an undeclared action, and only when picked',
+      manUn.mapping.length === 1 && manUn.mapping[0].from === null && manUn.mapping[0].to === 1100);
+
+    // Warnings describe; they never block. Sentinel warns, never refuses.
+    const manSent = lo.buildManual(block1, bands, { [crTwo]: 10000001 });
+    check('a sentinel value maps, with a load-last warning rather than a refusal',
+      manSent.mapping.length === 1 && manSent.invalid.length === 0
+      && manSent.warnings.some((w) => w.kind === 'sentinel'),
+      JSON.stringify(manSent.warnings.map((w) => w.kind)));
+    check('  and the misspelling is warned, not blocking',
+      manSent.warnings.some((w) => w.kind === 'misspelling'));
+    const manTie = lo.buildManual(block1, bands, { [crTwo]: 1000 });
+    check('landing on an occupied value warns of a tie the game picks arbitrarily',
+      manTie.warnings.some((w) => w.kind === 'tie' && /arbitrarily/.test(w.message)),
+      JSON.stringify(manTie.warnings));
+
+    // Test 16b: client/server preview parity (task 3.2). The editor previews
+    // client-side (lovEditBuildMapping in public/looverrides.js) what the
+    // server proposes (src/loadorder.js): same fixture, identical mappings.
+    console.log('\nTest 16b: client/server preview parity');
+    const clientSrc = fs.readFileSync(path.join(__dirname, '..', 'public', 'looverrides.js'), 'utf8');
+    let cxP = null;
+    let clientErr = '';
+    try {
+      // Whole-file load: top level only registers listeners and one pages[]
+      // entry, so a $ stub plus pages and the number formatter load it headless.
+      cxP = vm.createContext({ $: () => ({ addEventListener() {} }), pages: {}, n: (x) => String(x) });
+      vm.runInContext(clientSrc, cxP, { filename: 'looverrides.js' });
+    } catch (e) { clientErr = e.message; }
+    check('the client preview source loads headless under stubs', cxP !== null, clientErr);
+    const cRows = block.actions.map((a) => ({ componentRowId: a.componentRowId, effective: a.effective }));
+    const cMod = { min: block.min, max: block.max, width: block.width };
+    const sameMap = (a, b) => a.length === b.length
+      && a.every((m, i) => m.componentRowId === b[i].componentRowId && m.from === b[i].from && m.to === b[i].to);
+    const clientMap = (mode, base, gap) => JSON.parse(vm.runInContext(
+      `JSON.stringify(lovEditBuildMapping(${JSON.stringify(cRows)}, ${JSON.stringify(cMod)}, ${JSON.stringify(mode)}, ${JSON.stringify(base)}, ${JSON.stringify(gap)}))`, cxP))
+      .map((r) => ({ componentRowId: r.action.componentRowId, from: r.old, to: r.proposed }));
+    if (cxP) {
+      check('fit preview matches the server proposal identically',
+        sameMap(clientMap('fit', 1011, { from: 1011, to: 1200, count: 190 }), fit.mapping),
+        JSON.stringify(clientMap('fit', 1011, { from: 1011, to: 1200, count: 190 })));
+      check('even re-space preview matches the server builder',
+        sameMap(clientMap('even', 1011, { from: 1011, to: 1050, count: 40 }), even.mapping),
+        JSON.stringify(clientMap('even', 1011, { from: 1011, to: 1050, count: 40 })));
+      // Overflow reads the global min/max through lov.bands, like the page.
+      vm.runInContext(`lov.bands = { ok: true, bands: ${JSON.stringify(bands)} }`, cxP);
+      check('overflow-above preview matches the server builder',
+        sameMap(clientMap('overflow-above', null, null), over.mapping), `base ${over.base}`);
+      check('overflow-below preview matches the server builder',
+        sameMap(clientMap('overflow-below', null, null), under.mapping), `base ${under.base}`);
+      // Before-anchor parity: snug below the anchor like the server
+      // {before} (base = (V-1) - width, ending right below the anchor).
+      const dB = db();
+      const srvFit = lo.proposeBlock(dB, M2, { before: 5000 }, { bands });
+      const srvClash = lo.proposeBlock(dB, M2, { before: 1060 }, { bands });
+      const srvEdge = lo.proposeBlock(dB, M2, { before: 1111 }, { bands });
+      dB.close();
+      const cModR = { width: block.width, rows: block.actions.map((a) => ({ componentRowId: a.componentRowId })) };
+      const cBefore = (V) => {
+        vm.runInContext(`lov.targetMode = 'before-value'; lov.anchorValue = '${V}';`, cxP);
+        return JSON.parse(vm.runInContext(`JSON.stringify(lovEditResolveTarget(${JSON.stringify(cModR)}))`, cxP));
+      };
+      const rFit = cBefore(5000);
+      check('before-anchor fit ends snug below the anchor, like the server',
+        rFit.base === 4899 && rFit.base === srvFit.base
+        && sameMap(clientMap('fit', rFit.base, rFit.gap), srvFit.mapping),
+        JSON.stringify({ base: rFit.base, server: srvFit.base }));
+      check('  and reports the same free run below the anchor',
+        rFit.gap && rFit.gap.count === srvFit.gap, JSON.stringify(rFit.gap));
+      const rClash = cBefore(1060);
+      check('before-anchor clash is no-fit on both sides, never a far jump',
+        srvClash.fits === false && (cMod.width > rClash.gap.count || rClash.clash === true)
+        && JSON.stringify(srvClash.options) === '["even","overflow","manual"]',
+        JSON.stringify({ gap: rClash.gap, clash: rClash.clash }));
+      const rEdge = cBefore(1111);
+      check('  even when the free run is exactly as wide as the block',
+        srvEdge.fits === false && rEdge.clash === true && !(cMod.width <= rEdge.gap.count && !rEdge.clash),
+        JSON.stringify({ gap: rEdge.gap, clash: rEdge.clash }));
+      // Warning vocabularies differ (client strings vs server kinds), so the
+      // parity here is on kinds: tie on an occupied value, sentinel past last.
+      const kindOf = (s) => (/tie at/.test(s) ? 'tie' : /sentinel/.test(s) ? 'sentinel'
+        : /drifted/.test(s) ? 'drifted' : /misspell/.test(s) ? 'misspelling'
+        : /unprotectable/.test(s) ? 'unprotectable' : s);
+      const wRow = (cr, eff) => ({ componentRowId: cr, effective: eff, modId: M2, protected: false });
+      const cKinds = (to) => JSON.parse(vm.runInContext(
+        `JSON.stringify(lovEditWarningsFor(${JSON.stringify([{ action: wRow(pair[0].cr, 500), old: 500, proposed: to }])}))`, cxP))
+        .map(kindOf).sort();
+      const sKinds = (to) => lo.buildManual(block, bands, { [pair[0].cr]: to }).warnings.map((w) => w.kind).sort();
+      check('tie warning kinds match between preview and server',
+        JSON.stringify(cKinds(1000)) === JSON.stringify(sKinds(1000)), JSON.stringify(cKinds(1000)));
+      check('sentinel warning kinds match between preview and server',
+        JSON.stringify(cKinds(10000001)) === JSON.stringify(sKinds(10000001)), JSON.stringify(cKinds(10000001)));
+      // Manual entry reads DOM inputs, so no headless load can drive it:
+      // recorded here, not faked. The server side is asserted twice instead,
+      // once via the builder and once by hand.
+      check('client manual entry is DOM-bound, recorded rather than faked',
+        /function lovEditReadManual[\s\S]{0,400}querySelector/.test(clientSrc));
+      const manVals = { [pair[0].cr]: 1050, [pair[1].cr]: 1060 };
+      const manTwice = lo.buildManual(block, bands, manVals);
+      const manHand = Object.entries(manVals).map(([k, v]) => {
+        const a = block.actions.find((x) => x.componentRowId === Number(k));
+        return { componentRowId: Number(k), from: a.effective, to: v };
+      }).sort((a, b) => a.componentRowId - b.componentRowId);
+      check('manual mapping asserted twice via independent construction',
+        sameMap(manTwice.mapping, manHand) && manTwice.invalid.length === 0,
+        JSON.stringify(manTwice.mapping));
+    }
+    if (!cxP) {
+      // Headless load failed: say so and re-derive the server fit by hand.
+      const handFit = [...block.actions].sort((a, b) => a.effective - b.effective)
+        .map((a) => ({ componentRowId: a.componentRowId, from: a.effective, to: 1011 + a.offset }));
+      check('client would not load headless - server fit re-derived by hand instead',
+        sameMap(fit.mapping, handFit), clientErr);
+    }
+
+    // Bulk apply, when present: one transaction, one backup, game-guarded.
+    check('bulk apply exists', typeof lo.applyBulk === 'function');
+    if (typeof lo.applyBulk === 'function') {
+      try { fs.unlinkSync(OV_PATH); } catch (_) { /* absent */ }
+      const beforeBulk = newestBackup();
+      let bmsg = '';
+      try {
+        await lo.applyBulk(DB_PATH, [{ modId: M1, componentRowId: crTwo, value: 7000 }],
+          { file: OV_PATH, statusFn: RUNNING });
+      } catch (e) { bmsg = e.message; }
+      check('bulk refuses while Civilization VI is running', /close Civilization VI/.test(bmsg), bmsg);
+      check('  and wrote nothing: no LoadOrder row created',
+        dbValue(crTwo) === null);
+      const dT = db();
+      const typoRow = dT.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LaodOrder'").get(crTwo);
+      dT.close();
+      check('  the typo row untouched', !!typoRow && String(typoRow.v) === '200', JSON.stringify(typoRow));
+      check('  and took no backup', newestBackup() === beforeBulk);
+      check('  and stored no intent', lo.readOverrides(OV_PATH).count === 0);
+
+      // Mixed shapes: a stored key and an editor row id, a sentinel, and an
+      // off-disk row - one call, one backup.
+      const kOne = keyOf('PatchOne');
+      const kLonely = (() => { const d = db(); try { return lo.actionKey(d, crLonely); } finally { d.close(); } })();
+      const r = await lo.applyBulk(DB_PATH, [
+        { modId: M1, key: kOne, value: 4242 },
+        { modId: M1, componentRowId: crTwo, value: 10000001 },
+        { modId: M2, key: kLonely, value: 999 },
+      ], { file: OV_PATH, statusFn: OPEN });
+      check('bulk lands every entry in one call', r.applied.length === 3,
+        `applied ${r.applied.length}`);
+      check('  the typo action takes the value on a correctly spelled row',
+        dbValue(crTwo) === '10000001');
+      const dT2 = db();
+      const typoRow2 = dT2.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LaodOrder'").get(crTwo);
+      dT2.close();
+      check("  leaving the mod's own misspelled row untouched",
+        !!typoRow2 && String(typoRow2.v) === '200', JSON.stringify(typoRow2));
+      check("  the author's typo value is recorded, so reset is possible",
+        stored(M1, kTwo) && stored(M1, kTwo).declared === 200, JSON.stringify(stored(M1, kTwo)));
+      check('  a sentinel is applied and reported, never refused',
+        r.sentinels.length === 1 && r.sentinels[0].value === 10000001, JSON.stringify(r.sentinels));
+      check('  an off-disk row is reported unprotectable rather than treated as safe',
+        r.unprotectable.includes(normId(M2)), JSON.stringify(r.unprotectable));
+      check('  and a backup exists and is a real file',
+        typeof r.backupPath === 'string' && fs.existsSync(r.backupPath) && fs.statSync(r.backupPath).size > 0,
+        String(r.backupPath));
+      {
+        const b = new DatabaseSync(r.backupPath, { readOnly: true });
+        const pre = b.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'");
+        const vals = [pre.get(crOf('PatchOne')), pre.get(crTwo)].map((x) => (x ? x.v : null));
+        b.close();
+        check('  the backup is a pre-image of the whole batch, so the write was one transaction',
+          !vals.includes('4242') && !vals.includes('10000001'), JSON.stringify(vals));
+      }
+
+      // Stale keys report, never write.
+      const bad = await lo.applyBulk(DB_PATH, [
+        { modId: M1, key: 'UpdateDatabase\nnope\nno.sql', value: 1 },
+        { modId: M1, componentRowId: 999999999, value: 2 },
+      ], { file: OV_PATH, statusFn: OPEN });
+      check('bulk reports stale keys as orphaned and writes nothing',
+        bad.applied.length === 0 && bad.orphans.length === 2,
+        `applied ${bad.applied.length} orphans ${bad.orphans.length}`);
+      check('  and stores nothing for them', lo.readOverrides(OV_PATH).count === 3,
+        String(lo.readOverrides(OV_PATH).count));
+
+      // Oversized batch: refused up front, before any write, so a runaway
+      // packet costs nothing. Mirrors the game-guard refusal above.
+      {
+        const beforeLimit = newestBackup();
+        const valueBefore = dbValue(crOf('PatchOne'));
+        const countBefore = lo.readOverrides(OV_PATH).count;
+        const huge = Array.from({ length: 1001 }, () => ({ modId: M1, key: kOne, value: 1 }));
+        let lmsg = '';
+        try {
+          await lo.applyBulk(DB_PATH, huge, { file: OV_PATH, statusFn: OPEN });
+        } catch (e) { lmsg = e.message; }
+        check('bulk refuses an oversized batch', /limit 1000/.test(lmsg), lmsg);
+        check('  and wrote nothing', dbValue(crOf('PatchOne')) === valueBefore,
+          `${valueBefore} vs ${dbValue(crOf('PatchOne'))}`);
+        check('  and took no backup', newestBackup() === beforeLimit,
+          `${newestBackup()} vs ${beforeLimit}`);
+        check('  and stored no intent', lo.readOverrides(OV_PATH).count === countBefore,
+          String(lo.readOverrides(OV_PATH).count));
+      }
+    }
+
+    // Test 16c: the bulk route at the HTTP layer (task 2.2's criterion).
+    // Scratch servers on test ports against a scratch copy or a missing
+    // database; the live database is never named here.
+    console.log('\nTest 16c: the bulk route over HTTP');
+    const postJson = (port, p, body) => new Promise((resolve, reject) => {
+      const payload = JSON.stringify(body == null ? {} : body);
+      const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: p, agent: false,
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } },
+      (res) => {
+        let t = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { t += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: t ? JSON.parse(t) : null }));
+      });
+      req.on('error', reject);
+      req.write(payload);
+      req.end();
+    });
+    const freePort = () => new Promise((resolve, reject) => {
+      const s = net.createServer();
+      s.on('error', reject);
+      s.listen(0, '127.0.0.1', () => { const a = s.address(); s.close(() => resolve(a.port)); });
+    });
+    const waitUp = async (port, child) => {
+      const t0 = Date.now();
+      for (;;) {
+        if (child.exitCode != null) throw new Error(`scratch server exited early (${child.exitCode})`);
+        try {
+          const r = await postJson(port, '/api/ping', {});
+          if (r.status === 200 && r.body && r.body.ok) return;
+        } catch (_) { /* not yet */ }
+        if (Date.now() - t0 > 20000) throw new Error('scratch server never came up');
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+    const boxDb = path.join(TMP, 'http-copy.sqlite');
+    fs.copyFileSync(DB_PATH, boxDb);
+    const boxOv = path.join(TMP, 'http-overrides.json');
+    try { fs.unlinkSync(boxOv); } catch (_) { /* fresh */ }
+    for (const d of ['http-mods', 'http-ws', 'http-saves'].map((x) => path.join(TMP, x))) {
+      fs.mkdirSync(d, { recursive: true });
+    }
+    const runBox = async (modsDb) => {
+      const port = await freePort();
+      const child = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
+        env: { ...process.env, CIV6_PATHS_FILE: path.join(TMP, 'no-such-paths.json'),
+          CIV6_LOCAL_MODS: path.join(TMP, 'http-mods'), CIV6_WORKSHOP: path.join(TMP, 'http-ws'),
+          CIV6_SAVES: path.join(TMP, 'http-saves'), CIV6_MODS_DB: modsDb,
+          CIV6_LABELS_FILE: path.join(TMP, 'http-labels.json'), CIV6_LOADORDER_FILE: boxOv,
+          PORT: String(port), NO_OPEN: '1' },
+        stdio: ['ignore', 'pipe', 'pipe'],
+      });
+      await waitUp(port, child);
+      return { port, stop: async () => {
+        if (child.exitCode == null) { child.kill(); await new Promise((r) => child.once('exit', r)); }
+      } };
+    };
+    {
+      const s = await runBox(path.join(TMP, 'no-such-db.sqlite'));
+      try {
+        const r = await postJson(s.port, '/api/load-overrides/bulk', { entries: [{ modId: M1, key: 'k', value: 1 }] });
+        check('bulk with no database is a 400', r.status === 400 && /Mod database not found/.test(r.body.error),
+          `${r.status} ${r.body && r.body.error}`);
+      } finally { await s.stop(); }
+    }
+    {
+      const s = await runBox(boxDb);
+      try {
+        let r = await postJson(s.port, '/api/load-overrides/bulk', {});
+        check('bulk with no entries is a 400', r.status === 400 && /no overrides/.test(r.body.error),
+          `${r.status} ${r.body && r.body.error}`);
+        r = await postJson(s.port, '/api/load-overrides/bulk', { entries: [] });
+        check('bulk with an empty list is a 400', r.status === 400, String(r.status));
+        r = await postJson(s.port, '/api/load-overrides/bulk', { entries: [{ modId: 'nope', key: 'k', value: 1 }] });
+        check('bulk with a bad mod id is a 400', r.status === 400, `${r.status} ${r.body && r.body.error}`);
+        r = await postJson(s.port, '/api/load-overrides/bulk', { entries: [{ modId: M1, key: 'k', value: 1.5 }] });
+        check('bulk with a fractional value is a 400', r.status === 400, `${r.status} ${r.body && r.body.error}`);
+        const kHttp = keyOf('Strings');
+        r = await postJson(s.port, '/api/load-overrides/bulk', { entries: [{ modId: M1, key: kHttp, value: 5555 }] });
+        check('bulk with one good entry is a 200 with one applied',
+          r.status === 200 && r.body.applied.length === 1, `${r.status} applied=${r.body.applied && r.body.applied.length}`);
+        const vd = new DatabaseSync(boxDb, { readOnly: true });
+        const got = vd.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'")
+          .get(crOf('Strings'));
+        vd.close();
+        check('  the value landed in the scratch copy', got && String(got.v) === '5555', JSON.stringify(got));
+        check('  and the intent reached the scratch overrides file',
+          JSON.parse(fs.readFileSync(boxOv, 'utf8')).overrides[normId(M1)][kHttp].value === 5555);
+        r = await postJson(s.port, '/api/load-overrides', { modId: M1, key: kHttp, value: 5556 });
+        check('single apply still answers 200, unchanged', r.status === 200 && r.body.applied.length === 1, String(r.status));
+        r = await postJson(s.port, '/api/load-overrides/sync', {});
+        check('sync still answers 200, unchanged', r.status === 200, String(r.status));
+        const srvSrc = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+        const bulkBranch = srvSrc.split("load-overrides/bulk')")[1].split('/api/load-overrides/reset')[0];
+        // The HTTP layer takes no statusFn: its 409 comes from the live
+        // gameStatus guard, so a live 409 needs the game itself. Asserted is
+        // the wiring: guard awaited, 409 mapped, work delegated to applyBulk,
+        // whose refusal with an injected running status is covered in Test 16.
+        check('the bulk branch awaits the game guard and maps it to 409',
+          /await gameStatus\(\)/.test(bulkBranch) && /409/.test(bulkBranch) && /close Civilization VI first/.test(bulkBranch));
+        check('  and delegates the write to applyBulk', /loOrder\.applyBulk/.test(bulkBranch));
+        check('  and reset/discard routes are still present',
+          srvSrc.includes('/api/load-overrides/reset') && srvSrc.includes('/api/load-overrides/discard'));
+      } finally { await s.stop(); }
+    }
+  }
+
+  console.log('\nTest 18: action file lists (view tab + override editor tab)');
+  {
+    // A multi-file action, so +N more has something to hide. Written straight
+    // into the scratch database: the fixture's own actions carry one file each.
+    const wAf = new DatabaseSync(DB_PATH);
+    const m1rowAf = wAf.prepare('SELECT ModRowId FROM Mods WHERE lower(ModId) = lower(?)').get(M1).ModRowId;
+    const multiAf = wAf.prepare('INSERT INTO Components (ModRowId, ComponentId, ComponentType) VALUES (?, ?, ?)')
+      .run(m1rowAf, 'MultiFile', 'UpdateDatabase').lastInsertRowid;
+    wAf.prepare("INSERT INTO ComponentProperties (ComponentRowId, Name, Value) VALUES (?, 'LoadOrder', '6100')").run(multiAf);
+    for (const f of ['Patches/Alpha.sql', 'Patches/Beta.sql', 'Text\\Gamma.xml']) {
+      let row = wAf.prepare('SELECT FileRowId FROM ModFiles WHERE ModRowId = ? AND Path = ?').get(m1rowAf, f);
+      if (!row) row = { FileRowId: wAf.prepare('INSERT INTO ModFiles (ModRowId, Path) VALUES (?, ?)').run(m1rowAf, f).lastInsertRowid };
+      wAf.prepare('INSERT INTO ComponentFiles (ComponentRowId, FileRowId, Priority) VALUES (?, ?, 0)').run(multiAf, row.FileRowId);
+    }
+    wAf.close();
+
+    // Server side: basenames only, resolved strictly from the database.
+    const dAf = db();
+    check('one action resolves to its basenames, sorted',
+      JSON.stringify(lo.actionFiles(dAf, multiAf)) === JSON.stringify(['Alpha.sql', 'Beta.sql', 'Gamma.xml']),
+      JSON.stringify(lo.actionFiles(dAf, multiAf)));
+    check('a single-file action answers one basename',
+      JSON.stringify(lo.actionFiles(dAf, crOf('PatchOne'))) === JSON.stringify(['One.sql']),
+      JSON.stringify(lo.actionFiles(dAf, crOf('PatchOne'))));
+    check('an unknown row id answers null, so the route can 404', lo.actionFiles(dAf, 999999999) === null);
+    dAf.close();
+
+    const batchAf = lo.modActionFilesOf(DB_PATH, M1);
+    check('the batch names the mod and every action',
+      batchAf.modId === normId(M1) && batchAf.actions.length > 0, `actions=${batchAf.actions.length}`);
+    const bmAf = batchAf.actions.find((a) => a.componentRowId === multiAf);
+    check('  with the multi-file action carrying three basenames',
+      !!bmAf && bmAf.files.length === 3, JSON.stringify(bmAf && bmAf.files));
+    check('  and no path segment anywhere in the batch',
+      batchAf.actions.every((a) => a.files.every((f) => !/[/\\]/.test(f))));
+    check('a malformed row id is refused', fails(() => lo.actionFilesOf(DB_PATH, 'abc')));
+    let af404 = '';
+    try { lo.actionFilesOf(DB_PATH, 999999999); } catch (e) { af404 = e.code; }
+    check('an unknown row id carries NOT_FOUND for the route 404', af404 === 'NOT_FOUND', af404);
+    let afMod400 = '';
+    try { lo.modActionFilesOf(DB_PATH, 'nope'); } catch (e) { afMod400 = e.code || e.message; }
+    check('a malformed mod id is a plain error, not NOT_FOUND', afMod400 !== 'NOT_FOUND', afMod400);
+    let afMod404 = '';
+    try { lo.modActionFilesOf(DB_PATH, 'dddddddd-4444-4444-8444-444444444444'); } catch (e) { afMod404 = e.code; }
+    check('an unknown mod id carries NOT_FOUND', afMod404 === 'NOT_FOUND', afMod404);
+
+    // List payloads unchanged: no per-action file joins on the view or picker.
+    const pvAf = lo.profileLoadOrder(DB_PATH, { file: OV_PATH });
+    check('list payloads carry no per-action file joins',
+      pvAf.bands.flatMap((b) => b.actions || []).every((a) => !('files' in a)));
+    // Client side, stubbed DOM: both tabs render two basenames plus +N more,
+    // expand reveals the rest, no files says so, markup is escaped.
+    const escAf = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+      { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+    const stubAf = { $: () => ({ addEventListener() {} }), pages: {},
+      n: (x) => String(x), esc: escAf, renderCivText: (s) => String(s),
+      stripCivText: (s) => String(s), window: {} };
+    let viewCxAf = null; let viewErrAf = '';
+    try {
+      viewCxAf = vm.createContext({ ...stubAf });
+      vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'loadorder.js'), 'utf8'),
+        viewCxAf, { filename: 'loadorder.js' });
+    } catch (e) { viewErrAf = e.message; }
+    check('the view script loads headless under stubs', viewCxAf !== null, viewErrAf);
+    if (viewCxAf) {
+      const hAf = vm.runInContext("loFilesHtml(['Data.sql','Text.xml','Icons.dds'], false, 7)", viewCxAf);
+      check('a multi-file action renders two basenames plus +N more',
+        /Data\.sql/.test(hAf) && /Text\.xml/.test(hAf) && /\+1 more/.test(hAf) && !/Icons\.dds/.test(hAf), hAf);
+      const oAf = vm.runInContext("loFilesHtml(['Data.sql','Text.xml','Icons.dds'], true, 7)", viewCxAf);
+      check('  expand reveals the rest', /Icons\.dds/.test(oAf) && !/more/.test(oAf), oAf);
+      const nAf = vm.runInContext('loFilesHtml([], false, 7)', viewCxAf);
+      check('  an action with no files says so', /no files/.test(nAf), nAf);
+      const xAf = vm.runInContext("loFilesHtml(['<b>.sql'], false, 7)", viewCxAf);
+      check('  markup in a name is escaped, never literal', /&lt;b&gt;\.sql/.test(xAf) && !/<b>/.test(xAf), xAf);
+    }
+    let edCxAf = null; let edErrAf = '';
+    try {
+      edCxAf = vm.createContext({ ...stubAf });
+      vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'public', 'looverrides.js'), 'utf8'),
+        edCxAf, { filename: 'looverrides.js' });
+    } catch (e) { edErrAf = e.message; }
+    check('the editor script loads headless under stubs', edCxAf !== null, edErrAf);
+    if (edCxAf) {
+      const hAf = vm.runInContext("lovEditFilesHtml(['Data.sql','Text.xml','Icons.dds'], false, 7)", edCxAf);
+      check('the picker renders two basenames plus +N more',
+        /Data\.sql/.test(hAf) && /\+1 more/.test(hAf) && !/Icons\.dds/.test(hAf), hAf);
+      const oAf = vm.runInContext("lovEditFilesHtml(['Data.sql','Text.xml','Icons.dds'], true, 7)", edCxAf);
+      check('  and its expand reveals the rest', /Icons\.dds/.test(oAf), oAf);
+      const nAf = vm.runInContext('lovEditFilesHtml([], false, 7)', edCxAf);
+      check('  and its no-file action says so', /no files/.test(nAf), nAf);
+    }
+    // Endpoint, over HTTP against a scratch server on a scratch copy.
+    const afGet = (port, p) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: p, agent: false }, (res) => {
+        let t = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { t += c; });
+        res.on('end', () => resolve({ status: res.statusCode, body: t ? JSON.parse(t) : null }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    const afPort = () => new Promise((resolve, reject) => {
+      const s = net.createServer();
+      s.on('error', reject);
+      s.listen(0, '127.0.0.1', () => { const a = s.address(); s.close(() => resolve(a.port)); });
+    });
+    const afUp = async (port, child) => {
+      const t0 = Date.now();
+      for (;;) {
+        if (child.exitCode != null) throw new Error(`scratch server exited early (${child.exitCode})`);
+        try {
+          const r = await afGet(port, '/api/game');
+          if (r.status === 200) return;
+        } catch (_) { /* not yet */ }
+        if (Date.now() - t0 > 20000) throw new Error('scratch server never came up');
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+    const afDb = path.join(TMP, 'af-copy.sqlite');
+    fs.copyFileSync(DB_PATH, afDb);
+    const bxAf = new DatabaseSync(afDb, { readOnly: true });
+    const bxCrAf = bxAf.prepare("SELECT ComponentRowId AS c FROM Components WHERE ComponentId = 'Strings'").get().c;
+    bxAf.close();
+    const afPortN = await afPort();
+    const afChild = spawn(process.execPath, [path.join(__dirname, 'server.js')], {
+      env: { ...process.env, CIV6_PATHS_FILE: path.join(TMP, 'no-such-paths.json'),
+        CIV6_LOCAL_MODS: path.join(TMP, 'http-mods'), CIV6_WORKSHOP: path.join(TMP, 'http-ws'),
+        CIV6_SAVES: path.join(TMP, 'http-saves'), CIV6_MODS_DB: afDb,
+        CIV6_LABELS_FILE: path.join(TMP, 'http-labels.json'),
+        CIV6_LOADORDER_FILE: path.join(TMP, 'af-overrides.json'),
+        PORT: String(afPortN), NO_OPEN: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    await afUp(afPortN, afChild);
+    try {
+      let r = await afGet(afPortN, '/api/action-files?componentRowId=abc');
+      check('a malformed row id is a 400', r.status === 400, `${r.status} ${r.body && r.body.error}`);
+      r = await afGet(afPortN, '/api/action-files?componentRowId=999999999');
+      check('an unknown row id is a 404', r.status === 404, `${r.status} ${r.body && r.body.error}`);
+      r = await afGet(afPortN, `/api/action-files?componentRowId=${bxCrAf}`);
+      check('a known action answers 200 with basenames only',
+        r.status === 200 && r.body.componentRowId === bxCrAf && Array.isArray(r.body.files)
+        && r.body.files.every((f) => !/[/\\]/.test(f)), `${r.status} ${JSON.stringify(r.body)}`);
+      r = await afGet(afPortN, '/api/action-files');
+      check('naming neither action nor mod is a 400', r.status === 400, String(r.status));
+      r = await afGet(afPortN, '/api/action-files?modId=nope');
+      check('a malformed mod id is a 400', r.status === 400, `${r.status} ${r.body && r.body.error}`);
+      r = await afGet(afPortN, '/api/action-files?modId=dddddddd-4444-4444-8444-444444444444');
+      check('an unknown mod id is a 404', r.status === 404, `${r.status} ${r.body && r.body.error}`);
+      r = await afGet(afPortN, `/api/action-files?modId=${M1}`);
+      check('a known mod answers one batch with basenames only',
+        r.status === 200 && r.body.modId === normId(M1) && Array.isArray(r.body.actions)
+        && r.body.actions.length > 0 && r.body.actions.every((a) => Number.isInteger(a.componentRowId)
+          && a.files.every((f) => !/[/\\]/.test(f))),
+        `${r.status} actions=${r.body.actions && r.body.actions.length}`);
+    } finally {
+      if (afChild.exitCode == null) { afChild.kill(); await new Promise((res2) => afChild.once('exit', res2)); }
+    }
+  }
+
+  console.log('\nTest 17: nothing was left open');
   check('every read connection was closed', liveConns.size === 0, `${liveConns.size} still open`);
 
   // The cleanup must never decide whether the suite passed. maxRetries because

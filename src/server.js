@@ -309,6 +309,26 @@ async function handleApi(req, res, url) {
     return send(res, 200, loadOrderResponse(modsDb, url));
   }
 
+  // GET /api/action-files -> one action's file list (?componentRowId=N) or one
+  // mod's actions with theirs (?modId=<guid>). Read-only: resolved strictly
+  // from the database (ComponentFiles -> ModFiles), basenames only, and like
+  // every other GET it works while Civ6 runs. No path parameter is accepted
+  // and none is ever echoed.
+  if (req.method === 'GET' && url.pathname === '/api/action-files') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    const cr = url.searchParams.get('componentRowId');
+    const mid = url.searchParams.get('modId');
+    try {
+      if (cr !== null) return send(res, 200, loOrder.actionFilesOf(modsDb.path, cr));
+      if (mid !== null) return send(res, 200, loOrder.modActionFilesOf(modsDb.path, mid));
+      return send(res, 400, { error: 'which action?' });
+    } catch (e) {
+      if (e.code === 'NOT_FOUND') return send(res, 404, { error: e.message });
+      return send(res, 400, { error: e.message });
+    }
+  }
+
   // ===== Load order overrides: problem 2, a separate screen =============
   // Every route here writes, and every one of them refuses while Civ6 has the
   // database open. loadorder does that check itself and awaits it, because a
@@ -343,6 +363,35 @@ async function handleApi(req, res, url) {
         backupPath: r.backupPath,
       });
     } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
+
+  // POST /api/load-overrides/bulk -> apply a block move: one entry per action,
+  // each { modId, key?, componentRowId?, value }. Entries naming a
+  // componentRowId are resolved server-side via resolveAction inside applyBulk,
+  // so a stale row reports orphaned and twins report ambiguous, never written.
+  // One mutateDb transaction, one backup; refused while Civ6 runs.
+  if (req.method === 'POST' && url.pathname === '/api/load-overrides/bulk') {
+    const body = await readBody(req);
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    if (!Array.isArray(body.entries) || !body.entries.length) return send(res, 400, { error: 'no overrides to apply' });
+    const g = await gameStatus();
+    if (g.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
+    try {
+      const r = await loOrder.applyBulk(modsDb.path, body.entries);
+      return send(res, 200, {
+        ...loOrder.listOverrides(modsDb.path),
+        applied: r.applied,
+        orphans: r.orphans,
+        ambiguous: r.ambiguous,
+        unprotectable: r.unprotectable,
+        sentinels: r.sentinels,
+        backupPath: r.backupPath,
+      });
+    } catch (e) {
+      if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
       return send(res, 400, { error: e.message });
     }
   }

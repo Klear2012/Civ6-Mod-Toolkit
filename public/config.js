@@ -168,7 +168,7 @@ $('saveNew').addEventListener('click', () => doSave('new'));
 $('deleteConfig').addEventListener('click', async () => {
   if (!state.configPath) return;
   const name = state.view ? state.view.name : state.configPath;
-  if (!confirm(`Delete "${name}"?\n\nA timestamped backup is kept so it can be restored.`)) return;
+  if (!confirm(`Delete "${stripCivText(name)}"?\n\nA timestamped backup is kept so it can be restored.`)) return;
   try {
     const r = await postJson('/api/delete', { path: state.configPath });
     toast('Configuration deleted.', 'ok', r.backupPath ? `backup: ${r.backupPath}` : '');
