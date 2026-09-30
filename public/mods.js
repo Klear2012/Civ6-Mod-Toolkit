@@ -46,6 +46,7 @@ const SRC_MATCH = {
 };
 
 function byNorm() {
+  if (!modsPage.data) return new Map();
   return new Map(modsPage.data.mods.map((m) => [m.idNorm, m]));
 }
 
@@ -86,6 +87,11 @@ function problemsOf(m, all, on = isOn) {
 }
 
 function visibleMods() {
+  // Empty rather than throwing when the list has not loaded. This is called from
+  // the bulk buttons, and modsPage.data is null until the first /api/mods
+  // resolves - so clicking one in that window raised a TypeError, changed nothing,
+  // said nothing, and left the reason in the console where nobody looks.
+  if (!modsPage.data) return [];
   const q = $('modsFilter').value.trim().toLowerCase();
   const shown = modsPage.data.mods.filter((m) => SRC_MATCH[modsPage.src](m)
     && matchesLabels(m)
@@ -185,7 +191,11 @@ function rowBody(m, all) {
     : sourceTag(m);
   return `<span class="name"><b>${renderCivText(m.name)}</b>${sub}${probs}</span>
     ${tag}${labelsChip(m)}${folderButton(m)}
-    <button type="button" class="info lo-info" data-loadorder="${esc(m.idNorm)}" title="See this mod in the load order">&#8646;</button>
+    <!-- Not on every row. A DLC the game does not list in the profile has no
+         actions in the load order view, so the button navigated to a page with
+         nothing marked on it - and it sits close enough to the toggle to be hit
+         by accident, which is how turning a DLC on appeared to open this tab. -->
+    ${canToggle(m) ? `<button type="button" class="info lo-info" data-loadorder="${esc(m.idNorm)}" title="See this mod in the load order">&#8646;</button>` : ''}
     <button type="button" class="info" data-info="${esc(m.idNorm)}" title="Details">i</button>`;
 }
 
@@ -305,6 +315,14 @@ $('sortSelect').addEventListener('change', (e) => {
 
 function renderMods() {
   const d = modsPage.data;
+  // Nothing has loaded yet. The next line reads d.ok and the one after calls
+  // byNorm(), so this is the only place that can be safe about it - and the bulk
+  // buttons, which are enabled below, would otherwise be live against no list.
+  if (!modsPage.data) {
+    $('modsList').innerHTML = '';
+    for (const b of ['enableShown', 'disableShown', 'applyMods', 'discardMods']) $(b).disabled = true;
+    return;
+  }
   const all = byNorm();
 
   const alerts = [];
@@ -358,6 +376,11 @@ function renderMods() {
   $('stateFilter').hidden = panes;
   $('enableShown').hidden = panes;
   $('disableShown').hidden = panes;
+  // Disabled, not merely inert, while the list is empty because it has not loaded.
+  // A button that can be pressed and does nothing is worse than one that cannot.
+  const nothingYet = !d || !d.mods;
+  $('enableShown').disabled = nothingYet;
+  $('disableShown').disabled = nothingYet;
   $('modsList').hidden = panes;
   $('modsPanes').hidden = !panes;
 
@@ -575,9 +598,28 @@ for (const id of ['paneOff', 'paneOn']) {
 }
 
 function setShown(on) {
-  for (const m of visibleMods()) setWanted(m, on);
+  // Reports what it did, in one shape, always. "Enable all shown" on a list of
+  // rows that cannot be toggled changed nothing and said nothing, which reads as
+  // a broken button; the first attempt at fixing that counted rows that merely
+  // COULD change and reported "6 of 37 changed" when nothing changed. So: count
+  // rows whose state actually flips, and show both numbers.
+  const shown = visibleMods();
+  const changeable = shown.filter(canToggle);
+  for (const m of changeable) setWanted(m, on);
+  const byId = new Map(shown.map((m) => [m.idNorm, m]));
+  const flipped = [...modsPage.pending].filter(([id, want]) => (byId.get(id) || {}).enabled !== want).length;
+  const skipped = shown.length - changeable.length;
   renderMods();
+
+  if (!shown.length) return;
+
+  const parts = [flipped
+    ? `${n(flipped)} of ${n(changeable.length)} changed`
+    : `${n(changeable.length)} already in that state`];
+  if (skipped) parts.push(`${n(skipped)} not listed by the game in this profile`);
+  toast(parts.join('; '), flipped ? undefined : 'err');
 }
+
 $('enableShown').addEventListener('click', () => setShown(true));
 $('disableShown').addEventListener('click', () => setShown(false));
 $('enableAllPane').addEventListener('click', () => setShown(true));
