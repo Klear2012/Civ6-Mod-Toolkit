@@ -47,8 +47,8 @@ function noteHtml(s) {
 }
 
 function stateBadge(a) {
-  if (a.state === 'overridden') return '<span class="lo-tag lo-override">overridden</span>';
-  if (a.state === 'drifted') return '<span class="lo-tag lo-drift">drifted</span>';
+  if (a.state === 'overridden') return '<span class="lo-tag lo-override">changed by you</span>';
+  if (a.state === 'drifted') return '<span class="lo-tag lo-drift">changed elsewhere</span>';
   return '';
 }
 
@@ -128,8 +128,8 @@ function actionRow(a) {
       bits.push(`<span class="lo-ov">author declares ${esc(n(a.declared))}, yours is ${esc(n(a.override.value))}</span>`);
     }
   }
-  if (a.misspelled) bits.push('<span class="lo-tag lo-typo">the mod spells LoadOrder wrong</span>');
-  if (!a.protected) bits.push('<span class="lo-tag lo-unprot">not protected</span>');
+  if (a.misspelled) bits.push('<span class="lo-tag lo-typo">spells LoadOrder wrong</span>');
+  if (!a.protected) bits.push('<span class="lo-tag lo-unprot">can’t be kept safe</span>');
 
   return `<div class="lo-row${lo.marked === a.modId ? ' lo-mark' : ''}">
     <span class="lo-mod">${renderCivText(a.modName)}</span>
@@ -200,7 +200,7 @@ function renderList() {
   const bits = [];
   if (lo.onlyOff) bits.push('only what will not run');
   if (q) bits.push('matching the filter');
-  else if (loType) bits.push(`of type ${loType}`);
+  else if (loType) bits.push(`of kind ${loType}`);
   $('loShown').textContent = bits.length
     ? `${shown} of ${d.summary.actions} actions - ${bits.join(', ')}`
     : '';
@@ -289,7 +289,7 @@ function loSyncTypeOptions() {
     }
   }
   const prev = lo.typeFilter || '';
-  sel.innerHTML = ['<option value="">All types</option>',
+  sel.innerHTML = ['<option value="">All kinds</option>',
     ...[...seen].sort().map((t) => `<option value="${esc(t)}"${t === prev ? ' selected' : ''}>${esc(t)}</option>`)].join('');
   if (prev && !seen.has(prev)) lo.typeFilter = '';
   sel.value = lo.typeFilter || '';

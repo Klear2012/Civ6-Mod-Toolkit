@@ -10,6 +10,29 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
+## v1.8.0 — 1 October 2026
+
+### Added
+
+- **Conflict diagnosis** on a new **Conflicts** page, read-only throughout. A
+  **DB collision replay** runs your mods' database writes in load order against
+  a disposable copy and names the winning and losing file per contested
+  row and column; a **UI file-shadowing** pass lists every interface file
+  claimed by more than one mod with its winner or an honest *undefined*; and a
+  **Database.log differential** shows where the replay and the game agree and
+  where each saw what the other missed. The game database is never written and
+  the reports run only when you click.
+- The replay finds the game's `Cache` folder and `Database.log` on both sides
+  of its two homes (Documents and Local AppData), with folder overrides still
+  winning when set.
+- The block editor's before-anchor sits snug below the anchor instead of
+  jumping to the far end of a wide gap; spill-above is gone (headroom targeting
+  covers it); overrides entries show their files; whole-mod reset-all and
+  discard-all arrive on the ledger.
+- The load order view filters by exact mod name or by action-type dropdown,
+  condition lines render mod names instead of raw tags, and bands are divided
+  by rules while expanded editor blocks read as one group.
+
 ## v1.7.0 — 1 October 2026
 
 ### Added

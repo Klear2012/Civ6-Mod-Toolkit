@@ -784,6 +784,68 @@ async function resetOverride(dbPath, modId, key, opts = {}) {
   return { ...result, restored: entry.declared, backupPath };
 }
 
+// Put every override of one mod back to its recorded author value, in the
+// database and in the store. One transaction, one backup, whatever the size
+// of the set: the entries are folded into a single planMod so a value and
+// its mod's stamp land together or not at all, reusing the single-entry
+// write path (planMod/writeAll/summarise).
+//
+// Refuses when any entry lacks a recorded declared value, before any write,
+// so nothing is half-done: neither the database nor the store is touched.
+async function resetModOverrides(dbPath, modId, opts = {}) {
+  const file = opts.file || overridesFile();
+  const status = opts.statusFn || gameStatus;
+  const id = cleanModId(modId);
+
+  const game = await status();
+  if (game.running) throw new Error('close Civilization VI first - it has the mod database open');
+
+  const stored = readOverrides(file);
+  if (stored.unusable) throw new Error(`${stored.error} - nothing was written`);
+  const set = stored.overrides[id];
+  if (!set || !Object.keys(set).length) throw new Error('no overrides are stored for that mod');
+  const entries = Object.entries(set);
+  const missing = entries.filter(([, e]) => e.declared === undefined);
+  if (missing.length) {
+    throw new Error(`the author's value for ${missing.length} action${missing.length === 1 ? '' : 's'} was never recorded, so there is nothing to go back to - nothing was written`);
+  }
+
+  const { result, backupPath } = mutateDb(dbPath, (db) => {
+    const wanted = Object.fromEntries(entries.map(([k, e]) => [k, { value: e.declared }]));
+    const mods = [planMod(db, id, wanted)];
+    return summarise(mods, writeAll(db, mods), null);
+  });
+  const current = readForWrite(file, null);
+  const next = { ...current.overrides };
+  delete next[id];
+  writeOverrides(file, next);
+  return { ...result, restored: entries.map(([k, e]) => ({ key: k, value: e.declared })), backupPath };
+}
+
+// Forget every override of one mod WITHOUT touching the database. The values
+// stay where the last apply put them, which the client says in its confirm:
+// discarding is not the same as resetting, and only one of them undoes what
+// the override did. One file write, reusing the single-entry clear path's
+// read-and-write shape. Refused while Civ6 runs like all writes.
+async function discardModOverrides(dbPath, modId, opts = {}) {
+  const file = opts.file || overridesFile();
+  const status = opts.statusFn || gameStatus;
+  const id = cleanModId(modId);
+
+  const game = await status();
+  if (game.running) throw new Error('close Civilization VI first - it has the mod database open');
+
+  const current = readForWrite(file, null);
+  if (!current.overrides[id] || !Object.keys(current.overrides[id]).length) {
+    throw new Error('no overrides are stored for that mod');
+  }
+  const count = Object.keys(current.overrides[id]).length;
+  const next = { ...current.overrides };
+  delete next[id];
+  writeOverrides(file, next);
+  return { discarded: count, modId: id };
+}
+
 // Run on server start, before the mod list is served. That is what makes an
 // override correct on the FIRST launch after a mod update, which is the only
 // launch that matters.
@@ -1577,19 +1639,18 @@ function buildEvenSpacing(block, bands, gap, opts = {}) {
   return { strategy: 'even', gap: { from, to: gap.to == null ? null : Math.trunc(gap.to) },
     mapping, warnings: collectWarnings(block, bands, mapping, opts) };
 }
-// No-fit path 2: outside the occupied range, preserving offsets. Below
-// ends at globalMin - 1, above starts at globalMax + 1; both ends are
-// unbounded and negatives are allowed (the library ships -200).
-// In: (block, bands, 'below'|'above', opts). Out: {strategy:'overflow', direction, base, mapping, warnings}.
-function buildOverflow(block, bands, direction, opts = {}) {
+// No-fit path 2: below the occupied range, preserving offsets. The block ends
+// at globalMin - 1; the end is unbounded and negatives are allowed (the
+// library ships -200). Spill is below-only; the open-ended free band covers
+// the other end explicitly.
+// In: (block, bands, opts). Out: {strategy:'overflow', direction:'below', base, mapping, warnings}.
+function buildOverflow(block, bands, opts = {}) {
   if (!block || !block.actions.length) throw new Error('that mod has no positioned actions to move');
-  if (direction !== 'below' && direction !== 'above') throw new Error('overflow goes "below" or "above"');
+  if (typeof opts === 'string' || typeof bands === 'string') throw new Error('spill is below-only - target the open-ended free band for the other end');
   const { all } = occupiedOf(bands, block);
-  let base;
-  if (!all.length) base = direction === 'below' ? -(block.width + 1) : 0;
-  else base = direction === 'below' ? all[0] - 1 - block.width : all[all.length - 1] + 1;
+  const base = !all.length ? -(block.width + 1) : all[0] - 1 - block.width;
   const mapping = fitMapping(block, base);
-  return { strategy: 'overflow', direction, base, mapping,
+  return { strategy: 'overflow', direction: 'below', base, mapping,
     warnings: collectWarnings(block, bands, mapping, opts) };
 }
 // No-fit path 3: per-action whole numbers. Undeclared actions are
@@ -1700,7 +1761,7 @@ module.exports = {
   keyFor, actionKey, resolveAction, isModId,
   readOverrides, writeOverrides, setOverride, clearOverride,
   modFile, stampFor, stampIsStale,
-  applyOverrides, applyBulk, resetOverride, syncOverrides, staleMods, listOverrides,
+  applyOverrides, applyBulk, resetOverride, resetModOverrides, discardModOverrides, syncOverrides, staleMods, listOverrides,
   profileLoadOrder,
   actionFiles, actionFilesOf, modActionFilesOf,
   describeBlock, proposeBlock, occupiedOf,

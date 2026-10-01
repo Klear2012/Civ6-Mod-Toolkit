@@ -25,6 +25,8 @@ const {
 const { gameStatus } = require('./game');
 const labelStore = require('./labels');
 const loOrder = require('./loadorder');
+const shadowing = require('./shadowing');
+const conflictReplay = require('./phase9-conflict-replay');
 
 const { version: VERSION } = require('../package.json');
 const STARTED = new Date().toISOString();
@@ -288,6 +290,340 @@ function labelPruneSet(list, running) {
   return list.ok && !running ? new Set(list.mods.map((m) => m.idNorm)) : null;
 }
 
+// -------- Conflict diagnosis (read-only reports) ----------------------------------
+//
+// Scope: the ACTIVE profile only. The shadowing backend scopes itself to the
+// active group internally (enabledModRowIds(activeGroupId)), so a per-profile
+// parameter would need a second enumeration implementation to honour - this
+// keeps one honest scope instead of two half-matching ones.
+//
+// Shadowing opens Mods.sqlite read-only and works while Civ6 runs, like every
+// other GET. Replay copies DebugGameplay.sqlite into the OS temp dir and
+// replays there; the live file's bytes and mtime are never touched, and the
+// report names the temp copy used.
+
+// The active profile's id and name, or null when the database names none.
+function conflictActiveProfile(db) {
+  try {
+    const g = db.prepare('SELECT ModGroupRowId AS id, Name AS name FROM ModGroups WHERE Selected = 1 LIMIT 1').get();
+    return g ? { id: g.id, name: g.name } : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function conflictShadowing(modsDbPath) {
+  const db = loOrder.openDb(modsDbPath);
+  try {
+    const profile = conflictActiveProfile(db);
+    if (!profile) return { ok: false, error: 'the mod database has no active profile' };
+    const contested = shadowing.enumerateContested(db);
+    const results = shadowing.resolveWinners(db, contested);
+    const envelope = shadowing.buildEnvelope(db);
+    return {
+      ok: true,
+      profile,
+      envelope,
+      envelopeLine: shadowing.formatEnvelope(envelope),
+      contested: results,
+    };
+  } finally {
+    db.close();
+  }
+}
+
+// Where the game keeps the database replay copies, and the log it is
+// validated against. Both overridable for tests and relocated installs.
+function debugGameplayCandidates() {
+  const out = [];
+  if (process.env.CIV6_DEBUG_GAMEPLAY) out.push(process.env.CIV6_DEBUG_GAMEPLAY);
+  const root = paths.myGamesRoot();
+  if (root) {
+    out.push(path.join(root, 'Cache', 'DebugGameplay.sqlite'));
+    out.push(path.join(root, 'DebugGameplay.sqlite'));
+  }
+  const localRoot = paths.localGamesRoot ? paths.localGamesRoot() : null;
+  if (localRoot) {
+    out.push(path.join(localRoot, 'Cache', 'DebugGameplay.sqlite'));
+    out.push(path.join(localRoot, 'DebugGameplay.sqlite'));
+  }
+  return out;
+}
+
+function findDebugGameplay() {
+  for (const p of debugGameplayCandidates()) {
+    try { if (p && fs.statSync(p).isFile()) return p; } catch (_) { /* next */ }
+  }
+  return null;
+}
+
+// Where the game keeps Database.log, overridable for tests and relocated
+// installs. Mirrors debugGameplayCandidates: env first, then the
+// Documents-side root, then the Local-side root
+// (%LOCALAPPDATA%\Firaxis Games\<GAME_DIR>), Logs dir before the bare root.
+function databaseLogCandidates() {
+  const out = [];
+  if (process.env.CIV6_DATABASE_LOG) out.push(process.env.CIV6_DATABASE_LOG);
+  const root = paths.myGamesRoot();
+  if (root) out.push(path.join(root, 'Logs', 'Database.log'));
+  const localRoot = paths.localGamesRoot ? paths.localGamesRoot() : null;
+  if (localRoot) {
+    out.push(path.join(localRoot, 'Logs', 'Database.log'));
+    out.push(path.join(localRoot, 'Database.log'));
+  }
+  return out;
+}
+
+function findDatabaseLog() {
+  for (const p of databaseLogCandidates()) {
+    try { if (p && fs.statSync(p).isFile()) return p; } catch (_) { /* next */ }
+  }
+  return null;
+}
+
+// Caps so one click cannot replay the whole Steam library into a temp copy.
+// Counted BEFORE anything runs: over the cap is a 400 naming the counts,
+// never a truncated report that reads as complete.
+const MAX_CONFLICT_FILES = 2000;
+const MAX_CONFLICT_STATEMENTS = 100000;
+// Database.log is read whole for the differential; past this it is a log
+// archive, not a diagnosis input.
+const MAX_CONFLICT_LOG_BYTES = 10 * 1024 * 1024;
+
+// One component's gate in the replay backend's shape. Merges every linked
+// criteria set the way readProfile does (items accumulate, Any comes from
+// the first set); a component with no sets is ungated and replays.
+function conflictGateOf(db, componentRowId) {
+  const links = db.prepare('SELECT CriteriaRowId AS id FROM ComponentCriteria WHERE ComponentRowId = ? ORDER BY CriteriaRowId')
+    .all(componentRowId);
+  if (!links.length) return null;
+  const sets = [];
+  for (const l of links) {
+    const k = db.prepare('SELECT Any AS any FROM Criteria WHERE CriteriaRowId = ?').get(l.id);
+    if (k) sets.push({ any: !!k.any, id: l.id });
+  }
+  if (!sets.length) return null;
+  const conditions = [];
+  for (const s of sets) {
+    for (const c of db.prepare('SELECT CriterionRowId AS id, CriterionType AS type, Inverse AS inverse FROM Criterion WHERE CriteriaRowId = ? ORDER BY CriterionRowId').all(s.id)) {
+      const props = db.prepare('SELECT Name AS name, Value AS value FROM CriterionProperties WHERE CriterionRowId = ?').all(c.id);
+      const byName = {};
+      for (const p of props) byName[p.name] = p.value;
+      conditions.push({ type: c.type, value: byName.Value === undefined ? null : byName.Value, inverse: !!c.inverse });
+    }
+  }
+  if (!conditions.length) return null;
+  return { any: sets[0].any, conditions };
+}
+
+// The author's position for ordering: the correctly spelled row, else a
+// misspelling, else null (undeclared sorts last - its order is uncontrolled).
+// Mirrors currentValue/declaredValueOf so replay and the load-order view
+// cannot disagree about what a mod asked for.
+function conflictEffectiveOf(db, componentRowId) {
+  const row = db.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'")
+    .get(componentRowId);
+  const raw = row ? row.v : null;
+  if (raw === null || raw === undefined) {
+    for (const name of ['LaodOrder', 'LoadingOrder']) {
+      const alt = db.prepare('SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = ?')
+        .get(componentRowId, name);
+      if (alt) return alt.v;
+    }
+    return null;
+  }
+  return raw;
+}
+
+// The mod set replay executes: enabled UpdateDatabase/UpdateText actions of
+// the active profile, mods ordered by their smallest declared value
+// (undeclared mods last - nothing controls their order), files in row order,
+// statements in file order. Only .sql/.xml ride along; anything else the
+// action carries is counted as skipped-non-db, never executed. Files that
+// cannot be read are listed as unreadable with their reason and skipped.
+function collectConflictModSet(db) {
+  const profile = conflictActiveProfile(db);
+  if (!profile) throw new Error('the mod database has no active profile');
+  const enabled = new Set(db.prepare(
+    'SELECT ModRowId AS id FROM ModGroupItems WHERE ModGroupRowId = ? AND Disabled = 0'
+  ).all(profile.id).map((r) => r.id));
+  const installed = db.prepare('SELECT ModId AS id FROM Mods').all().map((r) => String(r.id));
+  const modRow = new Map(db.prepare('SELECT ModRowId AS rowId, ModId AS modId FROM Mods').all()
+    .map((r) => [r.rowId, String(r.modId)]));
+  const modDir = new Map();
+  for (const [rowId] of modRow) {
+    const f = loOrder.modFile(db, rowId);
+    modDir.set(rowId, f ? path.dirname(f.path) : null);
+  }
+
+  const comps = db.prepare(
+    `SELECT c.ComponentRowId AS cr, c.ModRowId AS modRowId, c.ComponentType AS type
+       FROM Components c
+      WHERE c.ComponentType IN ('UpdateDatabase', 'UpdateText')
+      ORDER BY c.ComponentRowId`
+  ).all().filter((c) => enabled.has(c.modRowId));
+
+  const byMod = new Map();
+  const unreadable = [];
+  let skippedNonDb = 0;
+  for (const c of comps) {
+    const modId = modRow.get(c.modRowId);
+    const dir = modDir.get(c.modRowId);
+    const files = db.prepare(
+      `SELECT f.Path AS rel, f.FileRowId AS fr
+         FROM ComponentFiles cf
+         JOIN ModFiles f ON f.FileRowId = cf.FileRowId
+        WHERE cf.ComponentRowId = ?
+        ORDER BY f.FileRowId`
+    ).all(c.cr);
+    const eff = conflictEffectiveOf(db, c.cr);
+    const num = eff === null || eff === undefined || String(eff).trim() === '' || !Number.isInteger(Number(String(eff).trim()))
+      ? null : Number(String(eff).trim());
+    const gate = conflictGateOf(db, c.cr);
+    for (const f of files) {
+      const rel = String(f.rel || '').replace(/\\/g, '/');
+      if (!/\.(sql|xml)$/i.test(rel)) { skippedNonDb += 1; continue; }
+      if (!dir) {
+        unreadable.push({ modId, file: rel, reason: 'the mod folder is not on disk' });
+        continue;
+      }
+      const full = path.normalize(path.join(dir, rel));
+      const inside = path.resolve(full).toLowerCase().startsWith(path.resolve(dir).toLowerCase() + path.sep)
+        || path.resolve(full).toLowerCase() === path.resolve(dir).toLowerCase();
+      if (!inside) {
+        unreadable.push({ modId, file: rel, reason: 'the file points outside the mod folder' });
+        continue;
+      }
+      let isFile = false;
+      try { isFile = fs.statSync(full).isFile(); } catch (_) { /* absent */ }
+      if (!isFile) {
+        unreadable.push({ modId, file: rel, reason: 'the file is not on disk' });
+        continue;
+      }
+      if (!byMod.has(modId)) byMod.set(modId, { modId, min: null, files: [] });
+      const entry = byMod.get(modId);
+      if (num !== null && (entry.min === null || num < entry.min)) entry.min = num;
+      entry.files.push({ label: rel, filePath: full, gate });
+    }
+  }
+  const modSet = [...byMod.values()]
+    .filter((m) => m.files.length > 0)
+    .sort((a, b) => {
+      const am = a.min === null ? Infinity : a.min;
+      const bm = b.min === null ? Infinity : b.min;
+      if (am !== bm) return am - bm;
+      return a.modId < b.modId ? -1 : a.modId > b.modId ? 1 : 0;
+    })
+    .map((m) => ({ modId: m.modId, files: m.files.map(({ label, filePath, gate }) => ({ label, filePath, gate })) }));
+  return {
+    profile,
+    modSet,
+    gates: { enabled: installed.filter((id) => [...enabled].some((rowId) => modRow.get(rowId) === id)), installed },
+    unreadable,
+    skippedNonDb,
+  };
+}
+
+function conflictStageTotals(collected) {
+  const totals = { xmlToSql: 0, doubleQuoteRewrite: 0, makeHashStub: 0, triggerAwareSplit: 0 };
+  for (const f of (collected && collected.files) || []) {
+    for (const s of f.stages || []) {
+      if (s.stage === 'xml-to-sql' && s.outcome === 'transformed') totals.xmlToSql += 1;
+      else if (s.stage === 'double-quote-rewrite' && s.outcome === 'transformed') totals.doubleQuoteRewrite += 1;
+      else if (s.stage === 'make-hash-stub' && s.outcome === 'installed-at-replay') totals.makeHashStub += 1;
+      else if (s.stage === 'splitter' && s.outcome === 'transformed') totals.triggerAwareSplit += 1;
+    }
+  }
+  return totals;
+}
+
+async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
+  const debugPath = findDebugGameplay();
+  if (!debugPath) {
+    throw new Error('DebugGameplay.sqlite was not found (looked in the game Cache folder; set CIV6_DEBUG_GAMEPLAY to point at it)');
+  }
+  const db = loOrder.openDb(modsDbPath);
+  let collected;
+  let scope;
+  try {
+    scope = collectConflictModSet(db);
+  } finally {
+    db.close();
+  }
+  if (!scope.modSet.length) {
+    throw new Error('the active profile has no database files to replay');
+  }
+  collected = conflictReplay.collectStatements(scope.modSet, { preprocess: true });
+  const fileCount = collected.files.length;
+  if (fileCount > MAX_CONFLICT_FILES || collected.total > MAX_CONFLICT_STATEMENTS) {
+    throw new Error(`that profile is too large to replay here (${collected.total} statements in ${fileCount} files; limits are ${MAX_CONFLICT_STATEMENTS} statements / ${MAX_CONFLICT_FILES} files)`);
+  }
+  const { tmpDir, tempDbPath } = conflictReplay.createTempCopy(debugPath);
+  let report;
+  try {
+    report = conflictReplay.replayOrdered(tempDbPath, collected, {
+      foreignKeys,
+      gates: scope.gates,
+      provenance: true,
+    });
+  } finally {
+    conflictReplay.destroyTempCopy(tmpDir);
+  }
+  const envelope = conflictReplay.buildReplayEnvelope(report);
+  const perFile = report.perFile.map((f) => ({
+    modId: f.modId,
+    fileLabel: f.fileLabel,
+    statements: f.statements,
+    executed: f.executed,
+    status: f.status,
+    error: f.error,
+    failedAt: f.failedAt,
+    gate: f.gate || null,
+    gateUnknown: !!f.gateUnknown,
+    flags: conflictReplay.fileLimitationFlags(
+      (collected.files.find((c) => c.modId === f.modId && c.fileLabel === f.fileLabel) || {}).stages),
+  }));
+  const limitationFlags = [...new Set((report.provenance.collisions || []).flatMap((c) => c.fidelityLimited))].sort();
+
+  // Differential validation against Database.log, when the log is there to
+  // read. Absent or oversized is reported, never silent and never fatal.
+  let differential;
+  const logPath = findDatabaseLog();
+  if (!logPath) {
+    differential = { available: false, reason: 'Database.log was not found (looked in the game Logs folder; set CIV6_DATABASE_LOG to point at it)' };
+  } else if (fs.statSync(logPath).size > MAX_CONFLICT_LOG_BYTES) {
+    differential = { available: false, reason: `Database.log is larger than ${MAX_CONFLICT_LOG_BYTES} bytes`, logPath };
+  } else {
+    const entries = conflictReplay.parseDatabaseLog(fs.readFileSync(logPath, 'utf8'));
+    const diff = conflictReplay.differentialValidate(report, entries, collected);
+    differential = { available: true, logPath, ...diff };
+  }
+
+  return {
+    ok: true,
+    profile: scope.profile,
+    modsOn: scope.gates.enabled.length,
+    tempCopy: tempDbPath,
+    fkMode: report.fkMode,
+    makeHashStub: report.makeHashStub,
+    total: report.total,
+    executed: report.executed,
+    rolledBack: report.rolledBack,
+    skippedGated: report.skippedGated,
+    envelope,
+    envelopeLine: conflictReplay.formatReplayEnvelope(envelope),
+    collisions: report.provenance.collisions,
+    limitationFlags,
+    stages: conflictStageTotals(collected),
+    gatedOut: report.gatedOut,
+    gatedUnknown: report.gatedUnknown,
+    unreadable: scope.unreadable,
+    skippedNonDb: scope.skippedNonDb,
+    perFile,
+    differential,
+  };
+}
+
 async function handleApi(req, res, url) {
   // GET /api/state -> paths, config list, installed inventory
   if (req.method === 'GET' && url.pathname === '/api/state') {
@@ -325,6 +661,44 @@ async function handleApi(req, res, url) {
       return send(res, 400, { error: 'which action?' });
     } catch (e) {
       if (e.code === 'NOT_FOUND') return send(res, 404, { error: e.message });
+      return send(res, 400, { error: e.message });
+    }
+  }
+
+  // ===== Conflict diagnosis: read-only reports (no .Civ6Cfg writes, ======
+  // no live game-DB writes) =================================================
+  //
+  // Both reports reuse the phase backends and reimplement nothing:
+  // shadowing enumerates contested UI paths from Mods.sqlite (read-only
+  // open), and replay runs ordered statements into a TEMP COPY of
+  // DebugGameplay.sqlite (the live game DB is only read, via the copy).
+  // Both routes are GETs served only when the Conflicts page's buttons are
+  // clicked - never on page load and never at server start. There is
+  // deliberately no POST anywhere under /api/conflicts.
+
+  // GET /api/conflicts/shadowing -> contested UI paths for the active
+  // profile, with winners decided only by max declared LoadOrder.
+  if (req.method === 'GET' && url.pathname === '/api/conflicts/shadowing') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    try {
+      return send(res, 200, conflictShadowing(modsDb.path));
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
+  }
+
+  // GET /api/conflicts/replay?fk=off|on -> ordered DB-collision replay for
+  // the active profile into a temp copy, with provenance collisions and a
+  // Database.log differential. Expensive: the page runs it only on click.
+  if (req.method === 'GET' && url.pathname === '/api/conflicts/replay') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    const fk = url.searchParams.get('fk');
+    if (fk !== null && fk !== 'off' && fk !== 'on') return send(res, 400, { error: 'fk must be off or on' });
+    try {
+      return send(res, 200, await conflictReplayReport(modsDb.path, { foreignKeys: fk === 'on' }));
+    } catch (e) {
       return send(res, 400, { error: e.message });
     }
   }
@@ -422,6 +796,44 @@ async function handleApi(req, res, url) {
       loOrder.clearOverride(loOrder.overridesFile(), body.modId, body.key);
       return send(res, 200, loOrder.listOverrides(modsDb.path));
     } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+  }
+
+  // POST /api/load-overrides/reset-mod -> put every override of one mod back
+  // to its recorded author value, in the database and in the store. One
+  // transaction, one backup; refused when any entry lacks a recorded value
+  // with nothing half-done. Refused while Civ6 runs like all writes.
+  if (req.method === 'POST' && url.pathname === '/api/load-overrides/reset-mod') {
+    const body = await readBody(req);
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    const gResetMod = await gameStatus();
+    if (gResetMod.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
+    try {
+      const r = await loOrder.resetModOverrides(modsDb.path, body.modId);
+      return send(res, 200, { ...loOrder.listOverrides(modsDb.path), restored: r.restored, backupPath: r.backupPath });
+    } catch (e) {
+      if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
+      return send(res, 400, { error: e.message });
+    }
+  }
+
+  // POST /api/load-overrides/discard-mod -> forget every override of one mod
+  // WITHOUT touching the database. The values stay where the last apply put
+  // them, which the client says in its confirm. Refused while Civ6 runs like
+  // all writes.
+  if (req.method === 'POST' && url.pathname === '/api/load-overrides/discard-mod') {
+    const body = await readBody(req);
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    const gDiscardMod = await gameStatus();
+    if (gDiscardMod.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
+    try {
+      const r = await loOrder.discardModOverrides(modsDb.path, body.modId);
+      return send(res, 200, { ...loOrder.listOverrides(modsDb.path), discarded: r.discarded });
+    } catch (e) {
+      if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
       return send(res, 400, { error: e.message });
     }
   }
@@ -1016,6 +1428,13 @@ server.on('error', (err) => {
   process.exit(1);
 });
 
+if (process.argv.includes('--selfcheck')) {
+  // No process.exit: the loop drains on its own once the scratch server is
+  // closed (fetch-style pooled sockets would break that, so the selfcheck
+  // uses agent:false above). The exit code carries the verdict.
+  runConflictSelfcheck().then((ok) => { process.exitCode = ok ? 0 : 1; },
+    (e) => { console.error(e); process.exitCode = 1; });
+} else {
 server.listen(PORT, HOST, () => {
   console.log(`Civ6 Mod Toolkit running at ${addr}`);
   if (!process.env.CIV6_LAUNCHER) console.log('Press Ctrl+C to stop.'); // the launcher has its own menu
@@ -1045,6 +1464,368 @@ server.listen(PORT, HOST, () => {
   // about to be replaced would be repairing the wrong thing.
   syncLoadOrderOverrides();
 });
+}
+
+// -------- Conflict diagnosis selfcheck (task 4.1) ----------------------------------
+//
+// node src/server.js --selfcheck: a scratch server on an ephemeral test port
+// against fake DBs in the OS temp dir - never the live DB. Exercises both new
+// routes over HTTP plus the static read-only guards, then exits.
+
+function conflictSelfcheckSeed(dir) {
+  const fsSc = require('fs');
+  const pathSc = require('path');
+  const { DatabaseSync: DbSc } = require('node:sqlite');
+  const MOD_A = 'aaaaaaaa-1111-4111-8111-111111111111';
+  const MOD_B = 'bbbbbbbb-2222-4222-8222-222222222222';
+  const GONE = 'dddddddd-4444-4444-8444-444444444444';
+  const modsDir = pathSc.join(dir, 'Mods');
+  fsSc.mkdirSync(pathSc.join(modsDir, 'ModA', 'data'), { recursive: true });
+  fsSc.mkdirSync(pathSc.join(modsDir, 'ModB', 'data'), { recursive: true });
+  const modinfoA = pathSc.join(modsDir, 'ModA', 'ModA.modinfo');
+  const modinfoB = pathSc.join(modsDir, 'ModB', 'ModB.modinfo');
+  fsSc.writeFileSync(modinfoA, '<Mod></Mod>');
+  fsSc.writeFileSync(modinfoB, '<Mod></Mod>');
+  fsSc.writeFileSync(pathSc.join(modsDir, 'ModA', 'data', 'a.sql'), "UPDATE ProvCheck SET Value = 1 WHERE Id = 'hero';\n");
+  fsSc.writeFileSync(pathSc.join(modsDir, 'ModA', 'data', 'gated.sql'), "INSERT INTO ProvCheck VALUES('gated', 7);\n");
+  fsSc.writeFileSync(pathSc.join(modsDir, 'ModB', 'data', 'b.sql'), "UPDATE ProvCheck SET Value = 2 WHERE Id = 'hero';\n");
+  fsSc.writeFileSync(pathSc.join(modsDir, 'ModB', 'data', 'bad1.sql'), 'INSERT INTO NoSuchB1 VALUES(1);\n');
+  fsSc.writeFileSync(pathSc.join(modsDir, 'ModB', 'data', 'bad2.sql'), 'INSERT INTO NoSuchB2 VALUES(1);\n');
+  // missing.sql is referenced by the database but absent on disk (unreadable).
+
+  const modsDb = pathSc.join(dir, 'Mods.sqlite');
+  const w = new DbSc(modsDb);
+  w.exec(`CREATE TABLE ScannedFiles(ScannedFileRowId INTEGER PRIMARY KEY, Path TEXT UNIQUE, LastWriteTime INTEGER NOT NULL);
+    CREATE TABLE Mods(ModRowId INTEGER PRIMARY KEY, ScannedFileRowId INTEGER NOT NULL, ModId TEXT NOT NULL, Version INTEGER NOT NULL);
+    CREATE TABLE Components(ComponentRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, ComponentId TEXT, ComponentType TEXT NOT NULL);
+    CREATE TABLE ComponentProperties(ComponentRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ComponentRowId, Name));
+    CREATE TABLE ModFiles(FileRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, Path TEXT NOT NULL);
+    CREATE TABLE ComponentFiles(ComponentRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, FileRowId));
+    CREATE TABLE ModGroups(ModGroupRowId INTEGER PRIMARY KEY, Name TEXT NOT NULL, CanDelete BOOLEAN, Selected BOOLEAN, SortIndex INTEGER);
+    CREATE TABLE ModGroupItems(ModGroupRowId INTEGER NOT NULL, ModRowId INTEGER NOT NULL, Disabled BOOLEAN NOT NULL, PRIMARY KEY(ModGroupRowId, ModRowId));
+    CREATE TABLE ModProperties(ModRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ModRowId, Name));
+    CREATE TABLE LocalizedText(ModRowId INTEGER NOT NULL, Tag TEXT NOT NULL, Locale TEXT NOT NULL, Text TEXT NOT NULL, PRIMARY KEY(ModRowId, Tag, Locale));
+    CREATE TABLE Criteria(CriteriaRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, CriteriaId TEXT NOT NULL, Any BOOLEAN);
+    CREATE TABLE Criterion(CriterionRowId INTEGER PRIMARY KEY, CriteriaRowId INTEGER NOT NULL, CriterionType TEXT NOT NULL, Inverse BOOLEAN NOT NULL DEFAULT 0);
+    CREATE TABLE CriterionProperties(CriterionRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(CriterionRowId, Name));
+    CREATE TABLE ComponentCriteria(ComponentRowId INTEGER NOT NULL, CriteriaRowId INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, CriteriaRowId));`);
+  const sfA = w.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, 1)').run(modinfoA).lastInsertRowid;
+  const sfB = w.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, 1)').run(modinfoB).lastInsertRowid;
+  const mA = w.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)').run(sfA, MOD_A).lastInsertRowid;
+  const mB = w.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)').run(sfB, MOD_B).lastInsertRowid;
+  w.prepare('INSERT INTO ModGroups (ModGroupRowId, Name, CanDelete, Selected, SortIndex) VALUES (1, ?, 0, 1, 0)').run('Main');
+  w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (1, ?, 0)').run(mA);
+  w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (1, ?, 0)').run(mB);
+  const addAction = (modRowId, type, id, files, props) => {
+    const cr = w.prepare('INSERT INTO Components (ModRowId, ComponentId, ComponentType) VALUES (?, ?, ?)')
+      .run(modRowId, id, type).lastInsertRowid;
+    for (const [k, v] of Object.entries(props || {})) {
+      w.prepare('INSERT INTO ComponentProperties (ComponentRowId, Name, Value) VALUES (?, ?, ?)').run(cr, k, v);
+    }
+    for (const f of files) {
+      const fr = w.prepare('INSERT INTO ModFiles (ModRowId, Path) VALUES (?, ?)').run(modRowId, f).lastInsertRowid;
+      w.prepare('INSERT INTO ComponentFiles (ComponentRowId, FileRowId) VALUES (?, ?)').run(cr, fr);
+    }
+    return cr;
+  };
+  // UI contests: file-vs-LuaReplace with no declared order, file-vs-file with
+  // a single max, a genuine tie, and one solo path that must be omitted.
+  addAction(mA, 'AddUIScript', 'ShipPanel', ['UI/Panel.lua']);
+  addAction(mA, 'AddUIScript', 'BothA', ['UI/Both.lua'], { LoadOrder: '100' });
+  addAction(mA, 'AddUIScript', 'TieA', ['UI/Tie.lua'], { LoadOrder: '300' });
+  addAction(mA, 'AddUIScript', 'SoloA', ['UI/Solo.lua']);
+  addAction(mB, 'ReplaceUIScript', 'PanelReplace', [], { LuaContext: 'Screen', LuaReplace: 'UI/Panel.lua' });
+  addAction(mB, 'AddUIScript', 'BothB', ['UI/Both.lua'], { LoadOrder: '200' });
+  addAction(mB, 'AddUIScript', 'TieB', ['UI/Tie.lua'], { LoadOrder: '300' });
+  // DB files: A(100) writes hero=1, B(200) writes hero=2, so B wins in order.
+  addAction(mA, 'UpdateDatabase', 'GoodA', ['data/a.sql'], { LoadOrder: '100' });
+  const gatedCr = addAction(mA, 'UpdateDatabase', 'GatedA', ['data/gated.sql']);
+  addAction(mA, 'UpdateDatabase', 'MissA', ['data/missing.sql']);
+  addAction(mB, 'UpdateDatabase', 'GoodB', ['data/b.sql'], { LoadOrder: '200' });
+  addAction(mB, 'UpdateDatabase', 'BadB1', ['data/bad1.sql']);
+  addAction(mB, 'UpdateDatabase', 'BadB2', ['data/bad2.sql']);
+  // GatedA runs only with a mod that is not installed: skipped with reason.
+  w.prepare('INSERT INTO Criteria (CriteriaRowId, ModRowId, CriteriaId, Any) VALUES (1, ?, ?, 0)').run(mA, 'GateOff');
+  w.prepare('INSERT INTO Criterion (CriterionRowId, CriteriaRowId, CriterionType, Inverse) VALUES (1, 1, ?, 0)').run('ModInUse');
+  w.prepare("INSERT INTO CriterionProperties (CriterionRowId, Name, Value) VALUES (1, 'Value', ?)").run(GONE);
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, 1)').run(gatedCr);
+  w.close();
+
+  const debugDb = pathSc.join(dir, 'DebugGameplay.sqlite');
+  const seed = new DbSc(debugDb);
+  try {
+    seed.exec("CREATE TABLE ProvCheck(Id TEXT PRIMARY KEY, Value INTEGER); INSERT INTO ProvCheck VALUES('hero', 0);");
+  } finally {
+    seed.close();
+  }
+  return { modsDb, debugDb, logPath: pathSc.join(dir, 'Database.log'), MOD_A, MOD_B, GONE };
+}
+
+async function runConflictSelfcheck() {
+  const fsSc = require('fs');
+  const osSc = require('os');
+  const pathSc = require('path');
+  const cryptoSc = require('crypto');
+  let pass = true;
+  const check = (label, cond, extra = '') => {
+    console.log(`  [${cond ? 'PASS' : 'FAIL'}] ${label}${extra ? ` :: ${extra}` : ''}`);
+    if (!cond) pass = false;
+  };
+  console.log('conflict-diagnosis --selfcheck (task 4.1)');
+  const scratch = fsSc.realpathSync.native(fsSc.mkdtempSync(pathSc.join(osSc.tmpdir(), 'civ6-conflict-selfcheck-')));
+  console.log(`scratch dir: ${scratch}`);
+  const fx = conflictSelfcheckSeed(scratch);
+  const sha = (p) => cryptoSc.createHash('sha256').update(fsSc.readFileSync(p)).digest('hex');
+  const modsBefore = sha(fx.modsDb);
+  const debugBefore = sha(fx.debugDb);
+  const debugMtime = fsSc.statSync(fx.debugDb).mtimeMs;
+  // Config files present before the run, so the run can prove it wrote none.
+  const cfgBefore = fsSc.readdirSync(pathSc.join(__dirname, '..'))
+    .filter((f) => /\.Civ6Cfg$/i.test(f))
+    .map((f) => [f, fsSc.statSync(pathSc.join(__dirname, '..', f)).mtimeMs]);
+
+  // Isolate: a paths file that does not exist, so env vars below win and no
+  // real Steam/library path is ever consulted.
+  process.env.CIV6_PATHS_FILE = pathSc.join(scratch, 'no-such-civ6-paths.json');
+  process.env.CIV6_MODS_DB = fx.modsDb;
+  process.env.CIV6_DEBUG_GAMEPLAY = fx.debugDb;
+  process.env.CIV6_DATABASE_LOG = fx.logPath;
+
+  // Learn the exact replay error text first (in-process, same code the route
+  // calls), so the fixture Database.log carries one matching error plus one
+  // ghost error no replay statement raised.
+  const prelim = await conflictReplayReport(fx.modsDb, { foreignKeys: false });
+  const bad1 = (prelim.perFile.find((f) => f.fileLabel === 'data/bad1.sql') || {}).error || 'no such table: NoSuchB1';
+  fsSc.writeFileSync(fx.logPath, [
+    `[100.001] [Gameplay] ERROR: ${bad1} -- file: bad1.sql statement 0`,
+    '[100.002] [Gameplay] Validating Foreign Key Constraints...',
+    '[100.003] [Gameplay] ERROR: UNIQUE constraint failed: ProvCheck.Id -- file: ghost.sql statement 3',
+  ].join('\n'));
+
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(0, HOST, resolve);
+  });
+  const port = server.address().port;
+  OWN_HOSTS.add(`127.0.0.1:${port}`);
+  console.log(`scratch server: http://127.0.0.1:${port}`);
+  // agent:false, like server-harness: fetch pools sockets and a pooled socket
+  // can hold (or break, at teardown) the event loop after the suite finishes.
+  const httpSc = require('http');
+  const get = (p) => new Promise((resolve, reject) => {
+    const req = httpSc.request({ host: '127.0.0.1', port, path: p, method: 'GET', agent: false }, (res) => {
+      let text = '';
+      res.setEncoding('utf8');
+      res.on('data', (c) => { text += c; });
+      res.on('end', () => {
+        let body = null;
+        try { body = text ? JSON.parse(text) : null; } catch (_) { /* not JSON */ }
+        resolve({ status: res.statusCode, body });
+      });
+    });
+    req.on('error', reject);
+    req.end();
+  });
+
+  console.log('\nShadowing route (read-only enumeration)');
+  const sh = await get('/api/conflicts/shadowing');
+  check('shadowing answers 200 with ok', sh.status === 200 && sh.body && sh.body.ok === true,
+    `status=${sh.status} ok=${sh.body && sh.body.ok}`);
+  const paths = (sh.body.contested || []).map((c) => c.path);
+  check('exactly the three contested paths', JSON.stringify(paths) === JSON.stringify(['UI/Both.lua', 'UI/Panel.lua', 'UI/Tie.lua']),
+    JSON.stringify(paths));
+  const byPath = new Map((sh.body.contested || []).map((c) => [c.path, c]));
+  const both = byPath.get('UI/Both.lua');
+  check('single max wins with its declared value',
+    !!both && both.status === 'decided' && both.winner && both.winner.value === 200
+    && String(both.winner.modId).toLowerCase() === fx.MOD_B.toLowerCase(),
+    JSON.stringify(both && both.winner));
+  const panel = byPath.get('UI/Panel.lua');
+  const panelSources = panel ? panel.claimants.map((c) => c.sources.join('+')).sort() : [];
+  check('LuaReplace-only contest is undefined with both sources named',
+    !!panel && panel.status === 'undefined' && panel.reason === 'no-declared-order' && panel.winner === null
+    && JSON.stringify(panelSources) === JSON.stringify(['LuaReplace', 'file']),
+    JSON.stringify(panelSources));
+  const tie = byPath.get('UI/Tie.lua');
+  check('genuine tie is undefined, unranked, value named',
+    !!tie && tie.status === 'undefined' && tie.reason === 'tie' && tie.value === 300 && tie.winner === null
+    && tie.tied && tie.tied.length === 2,
+    JSON.stringify(tie && { reason: tie.reason, value: tie.value, tied: tie.tied }));
+  check('uncontested path omitted', !paths.includes('UI/Solo.lua'));
+  const env = sh.body.envelope || {};
+  check('envelope counts reported', env.mods === 2 && env.contested === 3 && env.decidable === 1
+    && env.noDeclaredOrder === 1 && env.ties === 1, JSON.stringify(env));
+  check('envelope line present', typeof sh.body.envelopeLine === 'string' && /contested/.test(sh.body.envelopeLine),
+    sh.body.envelopeLine);
+
+  console.log('\nReplay route (temp copy only, user-triggered)');
+  const rp = await get('/api/conflicts/replay?fk=off');
+  check('replay answers 200 with ok', rp.status === 200 && rp.body && rp.body.ok === true,
+    `status=${rp.status} ok=${rp.body && rp.body.ok} err=${rp.body && rp.body.error}`);
+  const tmp = require('os').tmpdir();
+  const realTmp = fsSc.realpathSync.native(tmp);
+  check('report names a temp copy under the OS temp dir',
+    typeof rp.body.tempCopy === 'string' && rp.body.tempCopy.startsWith(realTmp)
+    && /DebugGameplay\.sqlite$/.test(rp.body.tempCopy), rp.body.tempCopy);
+  check('fk mode recorded', rp.body.fkMode === 'OFF', rp.body.fkMode);
+  check('exactly one collision', (rp.body.collisions || []).length === 1,
+    JSON.stringify((rp.body.collisions || []).map((c) => `${c.table}/${c.pk}/${c.column}`)));
+  const col = (rp.body.collisions || [])[0];
+  check('collision names winner plus loser in replay order',
+    !!col && col.table === 'ProvCheck' && col.pk === 'hero' && col.column === 'Value'
+    && col.winner.modId.toLowerCase() === fx.MOD_B.toLowerCase() && col.winner.fileLabel === 'data/b.sql'
+    && col.losers.length === 1 && col.losers[0].modId.toLowerCase() === fx.MOD_A.toLowerCase()
+    && col.losers[0].fileLabel === 'data/a.sql', col ? JSON.stringify(col) : 'none');
+  const pf = new Map((rp.body.perFile || []).map((f) => [f.fileLabel, f]));
+  check('bad files aborted with their errors',
+    pf.get('data/bad1.sql').status === 'aborted' && pf.get('data/bad2.sql').status === 'aborted'
+    && !!pf.get('data/bad1.sql').error, JSON.stringify([...pf].map(([k, v]) => `${k}:${v.status}`)));
+  check('gated file skipped with reason naming the missing mod',
+    pf.get('data/gated.sql').status === 'skipped-gated'
+    && new RegExp(fx.GONE, 'i').test((pf.get('data/gated.sql').gate || {}).reason || ''),
+    JSON.stringify(pf.get('data/gated.sql')));
+  check('missing file listed as unreadable, never executed',
+    (rp.body.unreadable || []).some((u) => u.file === 'data/missing.sql'),
+    JSON.stringify(rp.body.unreadable));
+  check('envelope covers every statement',
+    rp.body.envelope && rp.body.envelope.executed + rp.body.envelope.skipped === rp.body.envelope.statements
+    && typeof rp.body.envelopeLine === 'string', rp.body.envelopeLine);
+  const diff = rp.body.differential || {};
+  check('differential names agreement plus both divergences',
+    diff.available === true && diff.agreements.length === 1 && diff.replayOnly.length === 1 && diff.logOnly.length === 1
+    && diff.agreements[0].fileLabel === 'data/bad1.sql' && diff.replayOnly[0].fileLabel === 'data/bad2.sql'
+    && diff.replayOnly[0].side === 'replay-only' && diff.logOnly[0].fileLabel === 'ghost.sql'
+    && diff.logOnly[0].side === 'log-only' && diff.logPath === fx.logPath,
+    JSON.stringify({ a: diff.agreements, r: diff.replayOnly, l: diff.logOnly }));
+  const rpOn = await get('/api/conflicts/replay?fk=on');
+  check('fk=on replays with FK mode recorded', rpOn.status === 200 && rpOn.body.fkMode === 'ON',
+    `status=${rpOn.status} fkMode=${rpOn.body && rpOn.body.fkMode}`);
+  const rpBad = await get('/api/conflicts/replay?fk=sideways');
+  check('bad fk is a 400 about the request', rpBad.status === 400 && !!rpBad.body.error, `status=${rpBad.status}`);
+
+  console.log('\nDebugGameplay candidates (Local Cache fallback)');
+  {
+    const docsRoot = pathSc.join(scratch, 'docs-root');
+    const localRoot = pathSc.join(scratch, 'local-root');
+    const localCacheDb = pathSc.join(localRoot, 'Cache', 'DebugGameplay.sqlite');
+    const envDb = pathSc.join(scratch, 'env-override.sqlite');
+    fsSc.mkdirSync(docsRoot, { recursive: true });
+    fsSc.mkdirSync(pathSc.dirname(localCacheDb), { recursive: true });
+    fsSc.copyFileSync(fx.debugDb, localCacheDb);
+    fsSc.copyFileSync(fx.debugDb, envDb);
+    const savedEnv = process.env.CIV6_DEBUG_GAMEPLAY;
+    const pathsMod = require('./paths');
+    const savedMy = pathsMod.myGamesRoot;
+    const savedLocal = pathsMod.localGamesRoot;
+    pathsMod.myGamesRoot = () => docsRoot;
+    pathsMod.localGamesRoot = () => localRoot;
+    try {
+      delete process.env.CIV6_DEBUG_GAMEPLAY;
+      const cands = debugGameplayCandidates();
+      check('candidates list env, Documents then Local Cache and bare',
+        JSON.stringify(cands) === JSON.stringify([
+          pathSc.join(docsRoot, 'Cache', 'DebugGameplay.sqlite'),
+          pathSc.join(docsRoot, 'DebugGameplay.sqlite'),
+          pathSc.join(localRoot, 'Cache', 'DebugGameplay.sqlite'),
+          pathSc.join(localRoot, 'DebugGameplay.sqlite'),
+        ]), JSON.stringify(cands));
+      check('Local-side Cache found when Documents-side has none',
+        findDebugGameplay() === localCacheDb, String(findDebugGameplay()));
+      process.env.CIV6_DEBUG_GAMEPLAY = envDb;
+      check('env override still wins over Local-side Cache',
+        findDebugGameplay() === envDb, String(findDebugGameplay()));
+    } finally {
+      if (savedEnv === undefined) delete process.env.CIV6_DEBUG_GAMEPLAY;
+      else process.env.CIV6_DEBUG_GAMEPLAY = savedEnv;
+      pathsMod.myGamesRoot = savedMy;
+      pathsMod.localGamesRoot = savedLocal;
+    }
+  }
+
+  console.log('\nDatabase.log candidates (Local Logs fallback)');
+  {
+    const docsRoot = pathSc.join(scratch, 'docs-log-root');
+    const localRoot = pathSc.join(scratch, 'local-log-root');
+    const localLogsDb = pathSc.join(localRoot, 'Logs', 'Database.log');
+    const envLog = pathSc.join(scratch, 'env-override.log');
+    fsSc.mkdirSync(docsRoot, { recursive: true });
+    fsSc.mkdirSync(pathSc.dirname(localLogsDb), { recursive: true });
+    fsSc.writeFileSync(localLogsDb, '[100.001] [Gameplay] ERROR: stub\n');
+    fsSc.writeFileSync(envLog, '[100.001] [Gameplay] ERROR: stub\n');
+    const savedEnv = process.env.CIV6_DATABASE_LOG;
+    const pathsMod = require('./paths');
+    const savedMy = pathsMod.myGamesRoot;
+    const savedLocal = pathsMod.localGamesRoot;
+    pathsMod.myGamesRoot = () => docsRoot;
+    pathsMod.localGamesRoot = () => localRoot;
+    try {
+      delete process.env.CIV6_DATABASE_LOG;
+      const cands = databaseLogCandidates();
+      check('candidates list Documents then Local Logs and bare',
+        JSON.stringify(cands) === JSON.stringify([
+          pathSc.join(docsRoot, 'Logs', 'Database.log'),
+          pathSc.join(localRoot, 'Logs', 'Database.log'),
+          pathSc.join(localRoot, 'Database.log'),
+        ]), JSON.stringify(cands));
+      check('Local-side Logs found when Documents-side has none',
+        findDatabaseLog() === localLogsDb, String(findDatabaseLog()));
+      process.env.CIV6_DATABASE_LOG = envLog;
+      check('env override still wins over Local-side Logs',
+        findDatabaseLog() === envLog, String(findDatabaseLog()));
+    } finally {
+      if (savedEnv === undefined) delete process.env.CIV6_DATABASE_LOG;
+      else process.env.CIV6_DATABASE_LOG = savedEnv;
+      pathsMod.myGamesRoot = savedMy;
+      pathsMod.localGamesRoot = savedLocal;
+    }
+  }
+
+  console.log('\nRead-only guards (live DBs and configs untouched, no writes)');
+  check('fixture Mods.sqlite unchanged', sha(fx.modsDb) === modsBefore);
+  check('live game DB content unchanged', sha(fx.debugDb) === debugBefore);
+  check('live game DB mtime unchanged', fsSc.statSync(fx.debugDb).mtimeMs === debugMtime);
+  const cfgAfter = fsSc.readdirSync(pathSc.join(__dirname, '..'))
+    .filter((f) => /\.Civ6Cfg$/i.test(f))
+    .map((f) => [f, fsSc.statSync(pathSc.join(__dirname, '..', f)).mtimeMs]);
+  check('no .Civ6Cfg file written', JSON.stringify(cfgAfter) === JSON.stringify(cfgBefore),
+    `${cfgBefore.length} config(s) before, ${cfgAfter.length} after`);
+  const srvSrc = fsSc.readFileSync(pathSc.join(__dirname, 'server.js'), 'utf8');
+  check('no POST route under /api/conflicts',
+    !/req\.method === 'POST' && url\.pathname === '\/api\/conflicts/.test(srvSrc));
+  const viewSrc = fsSc.readFileSync(pathSc.join(__dirname, '..', 'public', 'conflicts.js'), 'utf8');
+  const htmlSrc = fsSc.readFileSync(pathSc.join(__dirname, '..', 'public', 'index.html'), 'utf8');
+  check('report page issues no writes (no POST, no form)',
+    !/postJson/.test(viewSrc) && !/method:\s*['"]POST['"]/i.test(viewSrc) && !/<form/i.test(viewSrc));
+  check("the conflicts page is registered", /pages\s*\[\s*['"]conflicts['"]\s*\]/.test(viewSrc));
+  check('navigation links to it', /data-nav="conflicts"/.test(htmlSrc));
+  check('its script is loaded', /<script src="conflicts\.js"><\/script>/.test(htmlSrc));
+  // The page loads nothing on show: every api("/api/conflicts...") call lives
+  // in a click-triggered runner, never in show(). Extract show() by brace
+  // matching rather than trusting a regex to find its end.
+  const showAt = viewSrc.indexOf('cfShowConflicts');
+  let depth = 0; let showBody = ''; let started = false;
+  for (let i = showAt; i < viewSrc.length && showAt >= 0; i += 1) {
+    const c = viewSrc[i];
+    if (c === '{') { depth += 1; started = true; }
+    if (started) showBody += c;
+    if (c === '}') { depth -= 1; if (started && depth === 0) break; }
+  }
+  check('page show binds buttons but fetches nothing', showBody && !/api\s*\(\s*['"]\/api\/conflicts/.test(showBody));
+  const calls = (srvSrc.match(/conflict(Shadowing|ReplayReport)\(/g) || []).length;
+  const defs = (srvSrc.match(/function conflict(Shadowing|ReplayReport|SelfcheckSeed|GateOf|EffectiveOf|ActiveProfile|StageTotals)\b/g) || []).length;
+  check('reports run only from their routes and the selfcheck', calls > 0 && calls <= defs + 4, `${calls} call site(s)`);
+  // Drop idle keep-alive connections before closing: otherwise process.exit
+  // below can race libuv handle teardown on Windows (UV_HANDLE_CLOSING).
+  if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+  await new Promise((r) => server.close(r));
+  if (pass) fsSc.rmSync(scratch, { recursive: true, force: true });
+  else console.log(`  note: scratch kept at ${scratch}`);
+
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(pass ? 'CONFLICT-DIAGNOSIS 4.1: ALL SELFCHECK CHECKS PASSED' : 'CONFLICT-DIAGNOSIS 4.1: FAILURES PRESENT');
+  console.log('='.repeat(60));
+  return pass;
+}
 
 // A missing mod database is not a reason to refuse the rest, and neither is a
 // store that cannot be read - both are reported and the server carries on, the

@@ -1,6 +1,6 @@
 {
   "name": "civ6-mod-toolkit",
-  "version": "1.7.0",
+  "version": "1.8.0",
   "private": true,
   "description": "Civilization VI mod toolkit: edit mods in .Civ6Cfg game configurations and see which mods are enabled.",
   "type": "commonjs",
@@ -14,7 +14,10 @@
     "phase6": "node src/phase6-sorting.js",
     "phase7": "node src/phase7-loadorder.js",
     "phase8": "node src/phase8-scripts.js",
-    "check:release": "npm run phase4 && npm run phase5 && npm run phase6 && npm run phase7 && npm run phase8",
+    "phase9-replay": "node src/phase9-conflict-replay.js --envelope",
+    "phase9-shadowing": "node src/phase9-shadowing.js --envelope",
+    "phase9-selfcheck": "node src/server.js --selfcheck",
+    "check:release": "npm run phase4 && npm run phase5 && npm run phase6 && npm run phase7 && npm run phase8 && npm run phase9-replay && npm run phase9-shadowing && npm run phase9-selfcheck",
     "edit": "node src/edit-config.js"
   },
   "author": "cru121 (Steam: evzenhouzvicka), maintained by Klear2012",

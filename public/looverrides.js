@@ -15,7 +15,7 @@
 const lov = { data: null };
 
 const STATE_TEXT = {
-  applied: 'in place',
+  applied: 'in place — your value is used',
   drifted: 'drifted — the database has a different value',
   orphaned: 'orphaned — nothing in that mod matches this key any more',
   ambiguous: 'ambiguous — more than one action matches this key',
@@ -29,6 +29,18 @@ function keyLabel(o) {
   return `${parts[0]}${parts[1] ? ` · ${parts[1]}` : ''}${files.length ? ` · ${files.length} file${files.length === 1 ? '' : 's'}` : ''}`;
 }
 
+// Ledger file names: a resolved row names its action's file basenames like
+// picker rows do, from the same lov.fileCache behind the same batch GET
+// /api/action-files?modId=. Unresolvable keys (no componentRowId) keep the
+// key summary only. Basenames carry no Civ markup, so esc() is the right
+// helper — never renderCivText, and never a raw path.
+function lovLedgerFilesSlot(o) {
+  if (o.componentRowId == null) return '';
+  const hit = (lov.fileCache || {})[o.componentRowId];
+  if (!hit) return '<span class="lo-fileslot">…</span>';
+  return `<span class="lo-fileslot">${lovEditFilesHtml(hit, !!lov.filesOpen[o.componentRowId], o.componentRowId)}</span>`;
+}
+
 function rowHtml(o) {
   const editable = o.state === 'applied' || o.state === 'drifted';
   const warn = o.state === 'drifted' ? 'lo-drift' : o.state === 'applied' ? 'lo-override' : 'lo-lost';
@@ -39,8 +51,9 @@ function rowHtml(o) {
       <span class="lo-tag ${warn}">${esc(STATE_TEXT[o.state] || o.state)}</span>
       <span class="lo-ov">at ${esc(n(o.value))}${o.declared !== null ? ` · author declares ${esc(n(o.declared))}` : ''}</span>
       <span class="lo-key">${esc(keyLabel(o))}</span>
+      ${lovLedgerFilesSlot(o)}
       ${o.reason ? `<span class="lo-cond">${esc(o.reason)}</span>` : ''}
-      ${o.protected ? '' : '<span class="lo-tag lo-unprot">not protected — its .modinfo is not on disk</span>'}
+      ${o.protected ? '' : '<span class="lo-tag lo-unprot">can’t be kept safe — its .modinfo is not on disk</span>'}
     </span>
     <span class="lov-actions">
       ${editable ? `<button type="button" class="secondary small" data-act="edit">Change…</button>
@@ -48,6 +61,45 @@ function rowHtml(o) {
       <button type="button" class="secondary small" data-act="discard">Discard</button>
     </span>
   </div>`;
+}
+
+// Per-mod ledger groups: one header per mod with Reset-all (back to recorded
+// author values, refused when any entry lacks one) and Discard-all (forget
+// without touching the database). Sorted by rendered name, like the picker.
+function lovLedgerGroups() {
+  const d = lov.data;
+  if (!d || !d.ok || !Array.isArray(d.overrides) || !d.overrides.length) return [];
+  const byMod = new Map();
+  for (const o of d.overrides) {
+    if (!byMod.has(o.modId)) byMod.set(o.modId, { modId: o.modId, modName: o.modName, rows: [] });
+    byMod.get(o.modId).rows.push(o);
+  }
+  return [...byMod.values()].sort((a, b) => String(a.modName).localeCompare(String(b.modName)));
+}
+
+function lovLedgerModHeader(m) {
+  const c = m.rows.length;
+  return `<div class="lo-row lov-modhead" data-lov-modhead="${esc(m.modId)}">`
+    + `<span class="lo-mod">${renderCivText(m.modName)}</span>`
+    + `<span class="lo-type">${esc(`${c} override${c === 1 ? '' : 's'}`)}</span>`
+    + `<span class="lov-actions">`
+    + `<button type="button" class="secondary small" data-lov-resetmod="${esc(m.modId)}" title="Put every override of this mod back to the recorded author values — refused if any entry lacks one, nothing half-done">Reset all</button>`
+    + ` <button type="button" class="secondary small" data-lov-discardmod="${esc(m.modId)}" title="Forget every override of this mod without touching the database — values stay where last written">Discard all</button>`
+    + `</span></div>`;
+}
+
+// Fire-and-forget batch loads for every mod named in the ledger, reusing the
+// picker's lov.fileCache / lov.filesMod behind the same GET. Each load
+// re-renders once it lands; the filesMod flag keeps a second render from
+// refetching, so this never loops.
+function lovLedgerEnsureFiles() {
+  const d = lov.data;
+  if (!d || !d.ok || !Array.isArray(d.overrides)) return;
+  const mods = [...new Set(d.overrides.filter((o) => o.componentRowId != null).map((o) => o.modId))];
+  for (const mid of mods) {
+    if ((lov.filesMod || {})[mid]) continue;
+    lovEditLoadFiles(mid).catch((err) => toast(err.message, 'err'));
+  }
 }
 
 function renderOverrides() {
@@ -67,8 +119,9 @@ function renderOverrides() {
         : 'Everything is in place')
     : '';
   $('lovList').innerHTML = d && d.ok && d.overrides.length
-    ? d.overrides.map(rowHtml).join('')
+    ? lovLedgerGroups().map((g) => lovLedgerModHeader(g) + g.rows.map(rowHtml).join('')).join('')
     : '<p class="note">No overrides. The load order view is read-only on purpose — an override is set from here.</p>';
+  lovLedgerEnsureFiles();
 }
 
 async function load() {
@@ -105,6 +158,44 @@ function askValue(o) {
 }
 
 $('lovList').addEventListener('click', async (e) => {
+  const fbtn = e.target.closest('button[data-lov-files]');
+  if (fbtn) {
+    const id = fbtn.dataset.lovFiles;
+    lov.filesOpen[id] = !lov.filesOpen[id];
+    renderOverrides();
+    return;
+  }
+  const rmod = e.target.closest('button[data-lov-resetmod]');
+  if (rmod) {
+    const modId = rmod.dataset.lovResetmod;
+    const group = (lovLedgerGroups() || []).find((g) => String(g.modId) === String(modId));
+    const c = group ? group.rows.length : 0;
+    const name = group ? stripCivText(group.modName) : modId;
+    try {
+      if (!confirm(`Put all ${c} override${c === 1 ? '' : 's'} for ${name} back to the recorded author values?`)) return;
+      await post('/api/load-overrides/reset-mod', { modId });
+      toast(`all ${c} back to the authors' values`);
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+    return;
+  }
+  const dmod = e.target.closest('button[data-lov-discardmod]');
+  if (dmod) {
+    const modId = dmod.dataset.lovDiscardmod;
+    const group = (lovLedgerGroups() || []).find((g) => String(g.modId) === String(modId));
+    const c = group ? group.rows.length : 0;
+    const name = group ? stripCivText(group.modName) : modId;
+    try {
+      // Same "values stay" wording as the single discard: forgetting is not resetting.
+      if (!confirm(`Forget all ${c} override${c === 1 ? '' : 's'} for ${name}?\n\nThe values stay where they were last written. Use Reset all if you want the authors' values back.`)) return;
+      await post('/api/load-overrides/discard-mod', { modId });
+      toast('overrides discarded');
+    } catch (err) {
+      toast(err.message, 'err');
+    }
+    return;
+  }
   const btn = e.target.closest('button[data-act]');
   if (!btn) return;
   const row = btn.closest('.lov-row');
@@ -298,10 +389,10 @@ function lovEditActionLabel(a) {
 
 function lovEditActionTags(a) {
   const t = [];
-  if (a.state === 'drifted') t.push('<span class="lo-tag lo-drift">drifted</span>');
-  else if (a.state === 'overridden') t.push('<span class="lo-tag lo-override">overridden</span>');
-  if (a.misspelled) t.push('<span class="lo-tag lo-typo">misspells LoadOrder</span>');
-  if (!a.protected) t.push('<span class="lo-tag lo-unprot">not protected</span>');
+  if (a.state === 'drifted') t.push('<span class="lo-tag lo-drift">changed elsewhere</span>');
+  else if (a.state === 'overridden') t.push('<span class="lo-tag lo-override">changed by you</span>');
+  if (a.misspelled) t.push('<span class="lo-tag lo-typo">spells LoadOrder wrong</span>');
+  if (!a.protected) t.push('<span class="lo-tag lo-unprot">can’t be kept safe</span>');
   return t.join(' ');
 }
 
@@ -324,23 +415,30 @@ function lovEditFilesSlot(a) {
 }
 
 async function lovEditLoadFiles(modId) {
-  if (lov.filesMod[modId]) return;
+  if ((lov.filesMod || {})[modId]) return;
   const d = await api(`/api/action-files?modId=${encodeURIComponent(modId)}`);
   for (const r of (d && d.actions) || []) lov.fileCache[r.componentRowId] = r.files || [];
   lov.filesMod[modId] = true;
-  lovEditRenderPicker();
+  if (typeof lovEditRenderPicker === 'function') {
+    try { lovEditRenderPicker(); } catch (_) { /* picker not on screen */ }
+  }
+  // The ledger reuses the same cache: a batch that landed for the picker
+  // completes the ledger rows of the same mod, and vice versa.
+  if (typeof renderOverrides === 'function' && lov.data && lov.data.ok) {
+    try { renderOverrides(); } catch (_) { /* ledger not on screen */ }
+  }
 }
 
 function lovEditPickerRow(m) {
   const open = String(lov.expandedMod) === String(m.modId);
   const range = m.count ? `${n(m.min)} to ${n(m.max)} · width ${n(m.width)}` : 'no positioned actions';
   const flags = [
-    m.tie ? '<span class="lo-tag lo-tie">tie — game picks arbitrarily</span>' : '',
-    m.undeclared ? `<span class="lo-cond">${n(m.undeclared)} undeclared — never moved</span>` : '',
-    m.unprot ? `<span class="lo-tag lo-unprot">${n(m.unprot)} not protected</span>` : '',
-    m.drifted ? `<span class="lo-tag lo-drift">${n(m.drifted)} drifted</span>` : '',
-    m.misspell ? '<span class="lo-tag lo-typo">misspells LoadOrder</span>' : '',
-    String(lov.moveMod) === String(m.modId) ? '<span class="lo-tag lo-override">selected for move</span>' : '',
+    m.tie ? '<span class="lo-tag lo-tie">tie — the game picks at random</span>' : '',
+    m.undeclared ? `<span class="lo-cond">${n(m.undeclared)} with no position — never moved</span>` : '',
+    m.unprot ? `<span class="lo-tag lo-unprot">${n(m.unprot)} can’t be kept safe</span>` : '',
+    m.drifted ? `<span class="lo-tag lo-drift">${n(m.drifted)} changed elsewhere</span>` : '',
+    m.misspell ? '<span class="lo-tag lo-typo">spells LoadOrder wrong</span>' : '',
+    String(lov.moveMod) === String(m.modId) ? '<span class="lo-tag lo-override">chosen to move</span>' : '',
   ].filter(Boolean).join(' ');
   let inner = '';
   if (open) {
@@ -391,8 +489,8 @@ function lovEditGapList() {
   const gaps = [];
   if (!d || !d.ok) return gaps;
   (d.bands || []).forEach((b, i) => {
-    if (b.kind === 'free') gaps.push({ idx: i, from: b.from, to: b.to, count: b.count, label: `${n(b.from)} to ${n(b.to)} — ${n(b.count)} free` });
-    else if (b.kind === 'headroom') gaps.push({ idx: i, from: b.from, to: null, count: null, label: `everything above ${n(b.from - 1)} (headroom, unbounded)` });
+    if (b.kind === 'free') gaps.push({ idx: i, from: b.from, to: b.to, count: b.count, label: `${n(b.from)} to ${n(b.to)} — room for ${n(b.count)}` });
+    else if (b.kind === 'headroom') gaps.push({ idx: i, from: b.from, to: null, count: null, label: `everything above ${n(b.from - 1)} (open-ended, no top)` });
   });
   return gaps;
 }
@@ -444,7 +542,7 @@ function lovEditReadTarget() {
 // unbounded below (before everything), which always fits.
 function lovEditResolveTarget(m) {
   const gaps = lovEditGapList();
-  if (!gaps.length) return { error: 'this profile has no free bands' };
+  if (!gaps.length) return { error: 'this profile has no empty gaps' };
   const mode = lov.targetMode;
   if (mode === 'free') {
     const gap = gaps.find((x) => String(x.idx) === String(lov.freeIdx)) || gaps[0];
@@ -453,11 +551,11 @@ function lovEditResolveTarget(m) {
   let v;
   if (mode === 'after-mod' || mode === 'before-mod') {
     const am = lovEditStatsById(lov.anchorMod) || m;
-    if (!am || !am.count) return { error: 'the anchor mod has no positioned actions' };
+    if (!am || !am.count) return { error: 'the other mod has nothing positioned to sit next to' };
     v = mode === 'after-mod' ? am.max : am.min;
   } else {
     const t = String(lov.anchorValue).trim();
-    if (!/^-?\d+$/.test(t)) return { error: 'give a whole-number anchor value' };
+    if (!/^-?\d+$/.test(t)) return { error: 'type a whole number to sit next to' };
     v = Number(t);
   }
   if (mode === 'after-value' || mode === 'after-mod') {
@@ -465,12 +563,12 @@ function lovEditResolveTarget(m) {
     const start = v + 1;
     const gap = gaps.find((x) => x.from <= start && (x.to === null || start <= x.to))
       || gaps.find((x) => x.from > start);
-    if (!gap) return { error: 'no free band at or after that anchor' };
+    if (!gap) return { error: 'no empty gap at or after that spot' };
     return { gap, base: Math.max(gap.from, start) };
   }
   // Snug below the anchor, mirroring the server {before}: the block ends at
   // V-1, so base = (V-1) - width. Another mod's value inside the block is a
-  // clash: no-fit (even/overflow/manual), never a jump to a far run. The
+  // clash: no-fit (even/spill-below/manual), never a jump to a far run. The
   // block's own values free up once it moves, so only others count.
   const end = v - 1;
   const base = end - m.width;
@@ -484,12 +582,13 @@ function lovEditResolveTarget(m) {
   const from = prev + 1;
   const count = Math.max(0, end - from + 1);
   return { gap: { idx: 'before', from, to: end, count,
-    label: `${n(from)} to ${n(end)} — ${n(count)} free` }, base, clash: prev >= base };
+    label: `${n(from)} to ${n(end)} — room for ${n(count)}` }, base, clash: prev >= base };
 }
 
 // The proposeBlock contract (design.md), client-side: on fit, new = base +
 // offset, preserving spread and order. On no-fit the block is never squeezed
-// silently — even re-space, overflow, or manual, always with need-vs-gap.
+// silently — even re-space, spill-below, or manual, always with need-vs-gap.
+// Spill is below-only; the open-ended free band covers the other end.
 function lovEditBuildMapping(rows, m, mode, base, gap) {
   const offs = rows.map((a) => Number(a.effective) - m.min);
   if (mode === 'fit') {
@@ -506,11 +605,6 @@ function lovEditBuildMapping(rows, m, mode, base, gap) {
   if (mode === 'overflow-below') {
     const g = lovEditGlobals();
     const b = (g.min === null ? 0 : g.min) - m.width - 1;
-    return rows.map((a, i) => ({ action: a, old: Number(a.effective), proposed: b + offs[i] }));
-  }
-  if (mode === 'overflow-above') {
-    const g = lovEditGlobals();
-    const b = (g.max === null ? 0 : g.max) + 1;
     return rows.map((a, i) => ({ action: a, old: Number(a.effective), proposed: b + offs[i] }));
   }
   return null; // manual is read from its inputs, not built
@@ -555,23 +649,23 @@ function lovEditReadManual(rows) {
 
 function lovEditRenderManual(rows, prefill) {
   const gaps = lovEditGapList();
-  const hint = gaps.length ? `Free bands here: ${esc(gaps.map((x) => x.label).join(' · '))}` : 'No free bands in this profile.';
+  const hint = gaps.length ? `Empty gaps here: ${esc(gaps.map((x) => x.label).join(' · '))}` : 'No empty gaps in this profile.';
   const pre = new Map((prefill || []).map((r) => [String(r.action.componentRowId), r.proposed]));
   const cap = lov.windowRows;
   const box = $('lovManual');
   // Tags the box with the mod it was rendered for: propose() treats a box
   // from another mod as stale input, never as values for this mod.
   box.dataset.lovMod = String(rows.length ? rows[0].modId : (lov.moveMod || ''));
-  box.innerHTML = `<p class="note">${hint} Whole numbers only; leave blank to leave an action out.</p>`
+  box.innerHTML = `<p class="note">${hint} Whole numbers only; leave blank to leave a thing out.</p>`
     + rows.slice(0, cap).map((a) => `<div class="lo-row"><span class="lo-mod">${esc(lovEditActionLabel(a))}</span>`
       + `<span class="lo-type">now ${esc(n(a.effective))}</span>`
-      + `<span class="lov-actions"><input data-lov-row="${a.componentRowId}" type="text" inputmode="numeric" placeholder="new value…" value="${pre.has(String(a.componentRowId)) ? pre.get(String(a.componentRowId)) : ''}" /></span></div>`).join('')
+      + `<span class="lov-actions"><input data-lov-row="${a.componentRowId}" type="text" inputmode="numeric" placeholder="new number…" value="${pre.has(String(a.componentRowId)) ? pre.get(String(a.componentRowId)) : ''}" /></span></div>`).join('')
     + (rows.length > cap ? `<p class="note">Showing the first ${n(cap)} of ${n(rows.length)} — the move still covers all.</p>` : '')
-    + '<div class="lo-row"><span class="lo-mod">Name an undeclared action explicitly</span>'
-    + '<span class="lo-type">action id → new value</span>'
-    + '<span class="lov-actions"><input data-lov-extra-row="" type="text" inputmode="numeric" placeholder="action id…" />'
-    + ' <input data-lov-extra-val="" type="text" inputmode="numeric" placeholder="new value…" /></span></div>'
-    + '<p class="note">Undeclared actions declare no position and are never moved automatically — only an action named above receives a value. The server resolves the id on apply: an unknown id is reported as orphaned and not written.</p>';
+    + '<div class="lo-row"><span class="lo-mod">Name a thing with no position, explicitly</span>'
+    + '<span class="lo-type">row number → new number</span>'
+    + '<span class="lov-actions"><input data-lov-extra-row="" type="text" inputmode="numeric" placeholder="row number…" />'
+    + ' <input data-lov-extra-val="" type="text" inputmode="numeric" placeholder="new number…" /></span></div>'
+    + '<p class="note">Things with no position are never moved automatically — only one you name above gets a number. The server resolves the number on apply: an unknown one is reported as orphaned and not written.</p>';
 }
 
 // Honest warnings, never gates (no-fit blocks auto-placement instead):
@@ -605,6 +699,7 @@ function lovEditMarkNofitSeg() {
   });
 }
 
+// Spill is below-only: the segmented option for the other end is removed from
 function lovEditPropose() {
   lov.proposal = null;
   // No lovManual clear here: in manual mode Preview is the submit action for
@@ -617,7 +712,7 @@ function lovEditPropose() {
   const m = lov.moveMod ? lovEditStatsById(lov.moveMod) : null;
   if (!m || !m.count) {
     $('lovManual').innerHTML = '';
-    $('lovNeedGap').textContent = 'Expand a mod with positioned actions to start a move.';
+    $('lovNeedGap').textContent = 'Open a mod that has something positioned to start a move.';
     $('lovNofit').hidden = true;
     return;
   }
@@ -634,13 +729,18 @@ function lovEditPropose() {
   // A before-anchor clash is no-fit even when the raw count covers the
   // width: the end value itself (or the base) is held by another mod.
   const fit = need <= gapSize && !t.clash;
+  // Spill is below-only now; a stale spill-above choice falls back to even
+  // rather than previewing nothing.
+  if (!fit && lov.nofitMode !== 'even' && lov.nofitMode !== 'overflow-below' && lov.nofitMode !== 'manual') {
+    lov.nofitMode = 'even';
+  }
   const mode = fit ? 'fit' : lov.nofitMode;
   $('lovNofit').hidden = fit;
   // Need-vs-gap up front, in values, before any table.
-  const gapText = gapSize === Infinity ? 'unbounded' : n(gapSize);
+  const gapText = gapSize === Infinity ? 'open-ended' : n(gapSize);
   $('lovNeedGap').textContent = fit
-    ? `Fits: the block needs ${n(need)} value${need === 1 ? '' : 's'} (width ${n(m.width)}) and the gap holds ${gapText}. Offsets preserved: new = ${n(t.base)} + offset.`
-    : `No fit: the block needs ${n(need)} value${need === 1 ? '' : 's'} (width ${n(m.width)}) but the gap holds ${gapText}. Nothing written — pick even re-space, overflow, or manual.`;
+    ? `Fits: this block spans ${n(need)} value${need === 1 ? '' : 's'} and the gap holds ${gapText}. Each thing keeps its spacing: new number = ${n(t.base)} + its old offset.`
+    : `No fit: this block spans ${n(need)} value${need === 1 ? '' : 's'} but the gap holds ${gapText}. Nothing written — spread it evenly, spill below, or type each number.`;
   lovEditMarkNofitSeg();
   let mapping;
   if (!fit && mode === 'manual') {
@@ -653,7 +753,7 @@ function lovEditPropose() {
     const hasInputs = fresh && box.querySelectorAll('input[data-lov-row]').length > 0;
     box.innerHTML = '';
     if (read.bad.length) {
-      $('lovNeedGap').textContent += ` ${n(read.bad.length)} entr${read.bad.length === 1 ? 'y is' : 'ies are'} not a whole number — nothing proposed.`;
+      $('lovNeedGap').textContent += ` ${n(read.bad.length)} box${read.bad.length === 1 ? ' is' : 'es are'} not a whole number — nothing previewed.`;
       return;
     }
     if (hasInputs && read.mapping.length) {
@@ -662,7 +762,7 @@ function lovEditPropose() {
       // First pass renders inputs prefilled with the fit-shaped suggestion;
       // the user edits, then Previews again.
       lovEditRenderManual(rows, lovEditBuildMapping(rows, m, 'fit', t.base, t.gap));
-      $('lovNeedGap').textContent += ' Enter values below, then Preview again.';
+      $('lovNeedGap').textContent += ' Type numbers below, then preview again.';
       return;
     }
   } else {
@@ -678,7 +778,7 @@ function lovEditPropose() {
     + `<span class="lo-type">${esc(r.old === null || r.old === undefined ? 'undeclared' : n(r.old))} → ${esc(n(r.proposed))}</span></div>`).join('')
     + (mapping.length > cap ? `<p class="note">Showing the first ${n(cap)} of ${n(mapping.length)}.</p>` : '');
   $('lovApply').disabled = !mapping.length;
-  $('lovApplyMeta').textContent = mapping.length ? `${n(mapping.length)} actions · one transaction, refused while Civ6 runs` : '';
+  $('lovApplyMeta').textContent = mapping.length ? `${n(mapping.length)} things to move · written in one step, never while the game is running` : '';
 }
 
 // Client preview, server apply — both live, no fallback involved.
@@ -760,6 +860,7 @@ $('lovAnchorValue').addEventListener('keydown', (e) => { if (e.key === 'Enter') 
 $('lovNofitSeg').addEventListener('click', (e) => {
   const b = e.target.closest('button[data-nofit]');
   if (!b) return;
+  if (b.dataset.nofit !== 'even' && b.dataset.nofit !== 'overflow-below' && b.dataset.nofit !== 'manual') return;
   lov.nofitMode = b.dataset.nofit;
   lovEditReadTarget();
   lovEditPropose();

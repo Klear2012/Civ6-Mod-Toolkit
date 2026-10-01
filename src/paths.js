@@ -52,6 +52,14 @@ function myGamesRoot() {
   return firstExisting(roots) || path.join(os.homedir(), 'Documents', 'My Games', GAME_DIR);
 }
 
+// Local Firaxis root (%LOCALAPPDATA%\Firaxis Games\<GAME_DIR>) — the same
+// Local root getModsDb() uses. The game may keep Cache here instead of the
+// Documents-side My Games root.
+function localGamesRoot() {
+  const local = process.env.LOCALAPPDATA || path.join(os.homedir(), 'AppData', 'Local');
+  return path.join(local, 'Firaxis Games', GAME_DIR);
+}
+
 // --- Steam / Workshop -------------------------------------------------------
 
 function steamPathFromRegistry() {
@@ -299,6 +307,6 @@ function getModsDb() {
 }
 
 module.exports = {
-  getSources, getSavesDir, getModsDb, myGamesRoot, toNativePath,
+  getSources, getSavesDir, getModsDb, myGamesRoot, localGamesRoot, toNativePath,
   overridesFile, overridesStatus, writeOverrides,
 };

@@ -1268,23 +1268,22 @@ if (real && fs.existsSync(real)) {
       JSON.stringify(nofit.options) === '["even","overflow","manual"]' && nofit.mapping.length === 0,
       JSON.stringify(nofit.options));
 
-    // The three paths, all pure mappings with an old-to-new table.
+    // The no-fit paths, all pure mappings with an old-to-new table. Spill is
+    // below-only; the open-ended free band covers the other end explicitly.
     const even = lo.buildEvenSpacing(block, bands, { from: 1011, to: 1050 });
     check('even re-space distributes order-preserving inside the gap',
       even.strategy === 'even'
       && even.mapping.find((m) => m.from === 500).to === 1011
       && even.mapping.find((m) => m.from === 600).to === 1050,
       JSON.stringify(even.mapping));
-    const over = lo.buildOverflow(block, bands, 'above');
-    check('overflow above starts past the max and preserves offsets',
-      over.base === 5001
-      && over.mapping.find((m) => m.from === 500).to === 5001
-      && over.mapping.find((m) => m.from === 600).to === 5101,
-      JSON.stringify(over.mapping));
-    const under = lo.buildOverflow(block, bands, 'below');
-    check('overflow below ends at the global min minus one',
-      under.base === 899 && under.mapping.find((m) => m.from === 600).to === 999,
+    const under = lo.buildOverflow(block, bands);
+    check('spill-below ends at the global min minus one',
+      under.base === 899 && under.direction === 'below'
+      && under.mapping.find((m) => m.from === 600).to === 999,
       JSON.stringify(under.mapping));
+    check('  and a directional call is refused, spill being below-only',
+      fails(() => lo.buildOverflow(block, bands, 'below'))
+      && fails(() => lo.buildOverflow(block, bands, 'above')));
     const manUn = lo.buildManual(block, bands, { [crLonely]: 1100 });
     check('only manual may place an undeclared action, and only when picked',
       manUn.mapping.length === 1 && manUn.mapping[0].from === null && manUn.mapping[0].to === 1100);
@@ -1330,12 +1329,14 @@ if (real && fs.existsSync(real)) {
       check('even re-space preview matches the server builder',
         sameMap(clientMap('even', 1011, { from: 1011, to: 1050, count: 40 }), even.mapping),
         JSON.stringify(clientMap('even', 1011, { from: 1011, to: 1050, count: 40 })));
-      // Overflow reads the global min/max through lov.bands, like the page.
+      // Spill reads the global min through lov.bands, like the page.
+      // Below-only: the other end is the headroom free band, not a spill.
       vm.runInContext(`lov.bands = { ok: true, bands: ${JSON.stringify(bands)} }`, cxP);
-      check('overflow-above preview matches the server builder',
-        sameMap(clientMap('overflow-above', null, null), over.mapping), `base ${over.base}`);
-      check('overflow-below preview matches the server builder',
+      check('spill-below preview matches the server builder',
         sameMap(clientMap('overflow-below', null, null), under.mapping), `base ${under.base}`);
+      check('  and no spill-above path remains on the client',
+        vm.runInContext('lovEditBuildMapping([], { min: 0, width: 0 }, \'overflow-above\', 0, null)', cxP) === null
+        && !/overflow-above/.test(clientSrc));
       // Before-anchor parity: snug below the anchor like the server
       // {before} (base = (V-1) - width, ending right below the anchor).
       const dB = db();
@@ -1755,6 +1756,139 @@ if (real && fs.existsSync(real)) {
     } finally {
       if (afChild.exitCode == null) { afChild.kill(); await new Promise((res2) => afChild.once('exit', res2)); }
     }
+  }
+
+  console.log('\nTest 19: per-mod reset-all + discard-all (ledger bulk actions)');
+  {
+    try { fs.unlinkSync(OV_PATH); } catch (_) { /* fresh */ }
+    const kOne19 = keyOf('PatchOne');
+    const kStr19 = keyOf('Strings');
+    const crOne19 = crOf('PatchOne');
+    const crStr19 = crOf('Strings');
+    const beforeOne19 = dbValue(crOne19);
+    const beforeStr19 = dbValue(crStr19);
+
+    // Two overrides on one mod. Values are derived from the current database
+    // so both drift: re-applying the value already there would store nothing
+    // (apply records only drifted rows), which is how a fixed 4242 failed here
+    // after Test 16 left PatchOne at exactly that.
+    const vOne19 = (Number(beforeOne19) || 0) + 1111;
+    const vStr19 = (Number(beforeStr19) || 0) + 2222;
+    await lo.applyOverrides(DB_PATH, [
+      { modId: M1, key: kOne19, value: vOne19 },
+      { modId: M1, key: kStr19, value: vStr19 },
+    ], { file: OV_PATH, statusFn: OPEN });
+    check('two overrides stored for one mod', lo.readOverrides(OV_PATH).count === 2,
+      `count=${lo.readOverrides(OV_PATH).count}`);
+    check('  both landed in the scratch copy', dbValue(crOne19) === String(vOne19) && dbValue(crStr19) === String(vStr19));
+
+    // Ledger file names: resolved rows carry the row id, and the row id
+    // resolves to basenames only — the ledger reuses the same batch shape.
+    const list19 = lo.listOverrides(DB_PATH, { file: OV_PATH });
+    const rowOne19 = list19.overrides.find((o) => o.key === kOne19);
+    check('a resolved ledger row names its action row',
+      !!rowOne19 && Number.isInteger(rowOne19.componentRowId));
+    const d19 = db();
+    const filesOne19 = lo.actionFiles(d19, rowOne19.componentRowId);
+    d19.close();
+    check('  and that row resolves to basenames only, never raw paths',
+      Array.isArray(filesOne19) && filesOne19.length > 0 && filesOne19.every((f) => !/[/\\]/.test(f)),
+      JSON.stringify(filesOne19));
+    // Client side: the ledger slot reuses the picker cache + esc, and an
+    // unresolvable key keeps the current summary.
+    const lovSrc19 = fs.readFileSync(path.join(__dirname, '..', 'public', 'looverrides.js'), 'utf8');
+    check('  the ledger renders those basenames from the shared cache',
+      /function lovLedgerFilesSlot/.test(lovSrc19) && /lov\.fileCache/.test(lovSrc19) && /o\.componentRowId/.test(lovSrc19));
+    check('  via esc, never a raw path', /lovEditFilesHtml\(hit/.test(lovSrc19));
+    check('  and per-mod headers group the ledger',
+      /function lovLedgerGroups/.test(lovSrc19) && /data-lov-resetmod/.test(lovSrc19) && /data-lov-discardmod/.test(lovSrc19));
+    check('  with the values-stay wording on discard-all',
+      /values stay where they were last written/.test(lovSrc19));
+
+    // Reset-all: one transaction, one backup, both values back, file forgotten.
+    const rAll = await lo.resetModOverrides(DB_PATH, M1, { file: OV_PATH, statusFn: OPEN });
+    check('reset-all restores every override of the mod',
+      rAll.restored.length === 2 && dbValue(crOne19) === String(beforeOne19) && dbValue(crStr19) === String(beforeStr19),
+      `db ${dbValue(crOne19)}/${dbValue(crStr19)} vs ${beforeOne19}/${beforeStr19}`);
+    check('  and forgets the mod in the store', lo.readOverrides(OV_PATH).count === 0);
+    check('  and reports one backup pointing at a real file',
+      typeof rAll.backupPath === 'string' && fs.existsSync(rAll.backupPath));
+    {
+      const b = new DatabaseSync(rAll.backupPath, { readOnly: true });
+      const pre = b.prepare("SELECT Value AS v FROM ComponentProperties WHERE ComponentRowId = ? AND Name = 'LoadOrder'");
+      const vals = [pre.get(crOne19), pre.get(crStr19)].map((x) => (x ? String(x.v) : null));
+      b.close();
+      // Pre-image of the reset: the backup holds the override values being
+      // undone (one transaction covers the whole batch), not the restored ones.
+      check('  the backup is a pre-image of the whole batch (one transaction)',
+        vals.includes(String(vOne19)) && vals.includes(String(vStr19)), JSON.stringify(vals));
+    }
+    let emptyMsg = '';
+    try { await lo.resetModOverrides(DB_PATH, M1, { file: OV_PATH, statusFn: OPEN }); } catch (e) { emptyMsg = e.message; }
+    check('  resetting a mod with nothing stored is refused', /no overrides are stored for that mod/.test(emptyMsg), emptyMsg);
+
+    // Missing declared: refused with nothing half-done (DB + file untouched).
+    const vOneB19 = vOne19 + 1;
+    const vStrB19 = vStr19 + 1;
+    await lo.applyOverrides(DB_PATH, [{ modId: M1, key: kOne19, value: vOneB19 }], { file: OV_PATH, statusFn: OPEN });
+    await lo.applyOverrides(DB_PATH, [{ modId: M1, key: kStr19, value: vStrB19 }], { file: OV_PATH, statusFn: OPEN });
+    const v19 = lo.readOverrides(OV_PATH);
+    const next19 = { ...v19.overrides };
+    // Strip the recorded author value from one entry by hand: a bare number
+    // loads as { value } with no declared.
+    next19[normId(M1)] = { [kOne19]: { value: vOneB19 }, [kStr19]: next19[normId(M1)][kStr19] };
+    lo.writeOverrides(OV_PATH, next19);
+    const midDb19 = dbValue(crOne19);
+    const midFile19 = fs.readFileSync(OV_PATH, 'utf8');
+    let missMsg = '';
+    try { await lo.resetModOverrides(DB_PATH, M1, { file: OV_PATH, statusFn: OPEN }); } catch (e) { missMsg = e.message; }
+    check('reset-all refuses when any entry lacks a recorded author value', /never recorded.*nothing was written/.test(missMsg), missMsg);
+    check('  and wrote nothing to the database', dbValue(crOne19) === midDb19 && dbValue(crStr19) === String(vStrB19));
+    check('  and left the file byte-for-byte as it was', fs.readFileSync(OV_PATH, 'utf8') === midFile19);
+    check('  and still stores both overrides', lo.readOverrides(OV_PATH).count === 2);
+
+    // Discard-all: forgets without touching the DB.
+    const dAll = await lo.discardModOverrides(DB_PATH, M1, { file: OV_PATH, statusFn: OPEN });
+    check('discard-all forgets the mod', dAll.discarded === 2 && lo.readOverrides(OV_PATH).count === 0);
+    check('  and leaves the values where the last apply put them',
+      dbValue(crOne19) === String(vOneB19) && dbValue(crStr19) === String(vStrB19),
+      `${dbValue(crOne19)}/${dbValue(crStr19)}`);
+    let dEmpty = '';
+    try { await lo.discardModOverrides(DB_PATH, M1, { file: OV_PATH, statusFn: OPEN }); } catch (e) { dEmpty = e.message; }
+    check('  discarding a mod with nothing stored is refused', /no overrides are stored/.test(dEmpty), dEmpty);
+
+    // Refused while Civ6 runs, like all writes — and the refusal costs nothing.
+    await lo.applyOverrides(DB_PATH, [{ modId: M1, key: kOne19, value: vOneB19 + 1 }], { file: OV_PATH, statusFn: OPEN });
+    const runDb19 = dbValue(crOne19);
+    const runFile19 = fs.readFileSync(OV_PATH, 'utf8');
+    const runBak19 = newestBackup();
+    let runR = '';
+    try { await lo.resetModOverrides(DB_PATH, M1, { file: OV_PATH, statusFn: RUNNING }); } catch (e) { runR = e.message; }
+    check('reset-all refuses while Civilization VI is running', /close Civilization VI/.test(runR), runR);
+    let runD = '';
+    try { await lo.discardModOverrides(DB_PATH, M1, { file: OV_PATH, statusFn: RUNNING }); } catch (e) { runD = e.message; }
+    check('discard-all refuses too', /close Civilization VI/.test(runD), runD);
+    check('  and neither wrote the database', dbValue(crOne19) === runDb19);
+    check('  nor the file', fs.readFileSync(OV_PATH, 'utf8') === runFile19);
+    check('  nor took a backup', newestBackup() === runBak19);
+    // Clean up so Test 17 sees no leftover handles or files.
+    lo.writeOverrides(OV_PATH, {});
+
+    // HTTP layer: mod-scoped routes exist, guard the game to 409, delegate.
+    // Split on the route's closing quote like the bulk test does, so the
+    // comment mentioning the path does not become the boundary.
+    const srvSrc19 = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+    for (const p of ['/api/load-overrides/reset-mod', '/api/load-overrides/discard-mod']) {
+      check(`  the ${p} route exists`, srvSrc19.includes(p));
+    }
+    const resetBranch19 = srvSrc19.split("/api/load-overrides/reset-mod')")[1].split('/api/load-overrides/discard-mod')[0];
+    check('  reset-mod awaits the game guard and maps it to 409',
+      /await gameStatus\(\)/.test(resetBranch19) && /409/.test(resetBranch19) && /close Civilization VI first/.test(resetBranch19));
+    check('  and delegates to resetModOverrides', /resetModOverrides/.test(resetBranch19));
+    const discardBranch19 = srvSrc19.split("/api/load-overrides/discard-mod')")[1].split('/api/load-overrides/sync')[0];
+    check('  discard-mod awaits the game guard and maps it to 409',
+      /await gameStatus\(\)/.test(discardBranch19) && /409/.test(discardBranch19));
+    check('  and delegates to discardModOverrides', /discardModOverrides/.test(discardBranch19));
   }
 
   console.log('\nTest 17: nothing was left open');
