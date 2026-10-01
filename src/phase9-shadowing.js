@@ -9,6 +9,7 @@
 //   node src/phase9-shadowing.js --contested [path/to/Mods.sqlite]
 //   node src/phase9-shadowing.js --winners
 //   node src/phase9-shadowing.js --envelope
+//   node src/phase9-shadowing.js --warnings
 //
 // The load-bearing fixture: mod B contests UI/Panel.lua ONLY via a
 // ReplaceUIScript action's ComponentProperties.LuaReplace row, with zero
@@ -26,14 +27,21 @@ const TMP = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'civ6-s
 const DB_PATH = path.join(TMP, 'Mods.sqlite');
 const WINNERS_DB = path.join(TMP, 'Winners.sqlite');
 const ENVELOPE_DB = path.join(TMP, 'Envelope.sqlite');
+const WARNINGS_DB = path.join(TMP, 'Warnings.sqlite');
+const TAGGED_DB = path.join(TMP, 'Tagged.sqlite');
 
 const ARGS = process.argv.slice(2);
 const WANT_WINNERS = ARGS.includes('--winners');
 const WANT_ENVELOPE = ARGS.includes('--envelope');
+const WANT_WARNINGS = ARGS.includes('--warnings');
 // Default (no flag) is the 3.1 contested enumeration, as before; --contested
 // selects it explicitly, --winners selects the 3.2 winner-rule fixtures,
-// --envelope selects the 3.3 reference-scale envelope fixture.
-const WANT_CONTESTED = ARGS.includes('--contested') || (!WANT_WINNERS && !WANT_ENVELOPE);
+// --envelope selects the 3.3 reference-scale envelope fixture, --warnings
+// selects the pairing + wrong-context warning fixtures. The warnings suite
+// also runs with the default (bare or --contested) invocation, so the plain
+// `node src/phase9-shadowing.js` proof covers it.
+const WANT_CONTESTED = ARGS.includes('--contested') || (!WANT_WINNERS && !WANT_ENVELOPE && !WANT_WARNINGS);
+const RUN_WARNINGS = WANT_WARNINGS || WANT_CONTESTED;
 
 let pass = true;
 const check = (label, cond, extra = '') => {
@@ -60,6 +68,23 @@ function addFileAction(w, modRowId, type, id, files, properties) {
     w.prepare('INSERT INTO ComponentFiles (ComponentRowId, FileRowId, Priority) VALUES (?, ?, 0)').run(cr, row.id);
   }
   return cr;
+}
+
+// A front-end action: a Settings row with its <File> children linked through
+// SettingFiles. Settings carry no ComponentProperties in this model (mirrors
+// the registration: properties are a Components-side table), so there is no
+// properties argument.
+function addSettingAction(w, modRowId, type, id, files) {
+  const sr = w.prepare('INSERT INTO Settings (ModRowId, SettingId, SettingType) VALUES (?, ?, ?)')
+    .run(modRowId, id, type).lastInsertRowid;
+  for (const f of files || []) {
+    let row = w.prepare('SELECT FileRowId AS id FROM ModFiles WHERE ModRowId = ? AND Path = ?').get(modRowId, f);
+    if (!row) {
+      row = { id: w.prepare('INSERT INTO ModFiles (ModRowId, Path) VALUES (?, ?)').run(modRowId, f).lastInsertRowid };
+    }
+    w.prepare('INSERT INTO SettingFiles (SettingRowId, FileRowId, Priority) VALUES (?, ?, 0)').run(sr, row.id);
+  }
+  return sr;
 }
 
 function seed() {
@@ -197,6 +222,75 @@ console.log('Test 1: contested-path enumeration (--contested)');
     JSON.stringify(contested.map((c) => [c.path, c.claimants.map((cl) => cl.name)])));
 }
 } // end WANT_CONTESTED
+
+// Tagged-name fixture (DLC-style): claimant Name tags with no own
+// LocalizedText row. TAG_A's tag text lives under another mod's row
+// (cross-mod resolution); TAG_B's tag lives nowhere (prettyName).
+// Old modIndex showed the raw LOC_ tag for both; the shared reader
+// (MOD_NAME_SQL + displayNameOf + prettyName) resolves/prettifies.
+const TAG_A = 'e1e1e1e1-aaaa-4aaa-8aaa-aaaaaaaaaa11';
+const TAG_B = 'e2e2e2e2-bbbb-4bbb-8bbb-bbbbbbbbbb22';
+const TAG_HOLDER = 'e3e3e3e3-cccc-4ccc-8ccc-cccccccccc33';
+
+function seedTagged(file) {
+  const w = new DatabaseSync(file);
+  w.exec(`CREATE TABLE ScannedFiles(ScannedFileRowId INTEGER PRIMARY KEY, Path TEXT UNIQUE, LastWriteTime INTEGER NOT NULL);
+    CREATE TABLE Mods(ModRowId INTEGER PRIMARY KEY, ScannedFileRowId INTEGER NOT NULL, ModId TEXT NOT NULL, Version INTEGER NOT NULL);
+    CREATE TABLE Components(ComponentRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, ComponentId TEXT, ComponentType TEXT NOT NULL);
+    CREATE TABLE ComponentProperties(ComponentRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ComponentRowId, Name));
+    CREATE TABLE ModFiles(FileRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, Path TEXT NOT NULL);
+    CREATE TABLE ComponentFiles(ComponentRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, Priority INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, FileRowId));
+    CREATE TABLE ModGroups(ModGroupRowId INTEGER PRIMARY KEY, Name TEXT NOT NULL, CanDelete BOOLEAN, Selected BOOLEAN, SortIndex INTEGER);
+    CREATE TABLE ModGroupItems(ModGroupRowId INTEGER NOT NULL, ModRowId INTEGER NOT NULL, Disabled BOOLEAN NOT NULL, PRIMARY KEY(ModGroupRowId, ModRowId));
+    CREATE TABLE ModProperties(ModRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ModRowId, Name));
+    CREATE TABLE LocalizedText(ModRowId INTEGER NOT NULL, Tag TEXT NOT NULL, Locale TEXT NOT NULL, Text TEXT NOT NULL, PRIMARY KEY(ModRowId, Tag, Locale));`);
+
+  const addTaggedMod = (modId, scannedPath, nameTag) => {
+    const sf = w.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, 1)').run(scannedPath).lastInsertRowid;
+    const mid = w.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)').run(sf, modId).lastInsertRowid;
+    w.prepare('INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, ?, ?)').run(mid, 'Name', nameTag);
+    return mid;
+  };
+  const tA = addTaggedMod(TAG_A, 'C:/mods/TaggedA.modinfo', 'LOC_EXPANSION1_MOD_TITLE');
+  const tB = addTaggedMod(TAG_B, 'C:/mods/TaggedB.modinfo', 'LOC_EXPANSION2_MOD_TITLE');
+  const tH = addTaggedMod(TAG_HOLDER, 'C:/mods/TagHolder.modinfo', 'LOC_TAG_HOLDER_NAME');
+  w.prepare("INSERT INTO LocalizedText (ModRowId, Tag, Locale, Text) VALUES (?, ?, 'en_US', ?)")
+    .run(tH, 'LOC_TAG_HOLDER_NAME', 'Tag Holder');
+  // The DLC-style title text lives under another mod's row only.
+  w.prepare("INSERT INTO LocalizedText (ModRowId, Tag, Locale, Text) VALUES (?, ?, 'en_US', ?)")
+    .run(tH, 'LOC_EXPANSION1_MOD_TITLE', 'Expansion: Rise and Fall');
+  w.prepare('INSERT INTO ModGroups (ModGroupRowId, Name, CanDelete, Selected, SortIndex) VALUES (1, ?, 0, 1, 0)').run('Main');
+  const tItem = w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (1, ?, 0)');
+  tItem.run(tA); tItem.run(tB); tItem.run(tH);
+  addFileAction(w, tA, 'AddUIScript', 'TaggedShipA', ['UI/Tagged.lua']);
+  addFileAction(w, tB, 'AddUIScript', 'TaggedShipB', ['UI/Tagged.lua']);
+  w.close();
+}
+
+if (WANT_CONTESTED) {
+  console.log('\nTest 1b: tagged DLC-style claimant names resolve (no bare LOC_ tag)');
+  seedTagged(TAGGED_DB);
+  const tdb = new DatabaseSync(TAGGED_DB, { readOnly: true });
+  let tagged;
+  try {
+    tagged = shadowing.enumerateContested(tdb);
+  } finally {
+    tdb.close();
+  }
+  const tEntry = tagged.find((c) => c.path === 'UI/Tagged.lua');
+  const tNames = tEntry ? tEntry.claimants.map((c) => c.name) : [];
+  console.log(`  contested: UI/Tagged.lua <- ${tNames.join(' vs ')}`);
+  check('the tagged contest is enumerated with both claimants',
+    !!tEntry && tEntry.claimants.length === 2, JSON.stringify(tNames));
+  check('no claimant name is a bare LOC_ tag',
+    tNames.length === 2 && tNames.every((n) => !/LOC_[A-Z0-9_]+/i.test(n)), JSON.stringify(tNames));
+  const tAName = tEntry ? (tEntry.claimants.find((c) => c.modId.toLowerCase() === TAG_A.toLowerCase()) || {}).name : null;
+  const tBName = tEntry ? (tEntry.claimants.find((c) => c.modId.toLowerCase() === TAG_B.toLowerCase()) || {}).name : null;
+  check('cross-mod text resolves like every other screen (Expansion: Rise and Fall)',
+    tAName === 'Expansion: Rise and Fall', JSON.stringify(tAName));
+  check('an unlocalised tag prettifies like every other screen (Expansion: Gathering Storm)',
+    tBName === 'Expansion: Gathering Storm', JSON.stringify(tBName));
+}
 
 // Task 3.2 fixtures: one contested path per winner-rule outcome. All mods are
 // enabled; LoadOrder is the only signal the rule may read.
@@ -472,6 +566,298 @@ if (WANT_ENVELOPE) {
     JSON.stringify(limSources) === JSON.stringify(['LuaReplace', 'file']), JSON.stringify(limSources));
   check('an undeclared LuaReplace contest is undefined with reason no-declared-order',
     !!limEntry && limEntry.status === 'undefined' && limEntry.reason === 'no-declared-order' && limEntry.winner === null);
+}
+
+// Pairing + wrong-context warning fixtures. A dedicated database: the mods
+// below must not leak contested paths into the Test 1 seed (which asserts an
+// exact path list), and Test 1's mods must not leak warnings here.
+const MP_A = 'a1a1a1a1-1111-4111-8111-1111111111a1'; // Pair Alpha: wins the .lua half
+const MP_B = 'b2b2b2b2-2222-4222-8222-2222222222b2'; // Pair Beta: wins the .xml half
+const MC_F = 'c3c3c3c3-3333-4333-8333-3333333333c3'; // gameplay script in a front-end action
+const MC_D = 'd4d4d4d4-4444-4444-8444-4444444444d4'; // script file in a data action, data file in a script action
+const MC_OK = 'e5e5e5e5-5555-4555-8555-5555555555e5'; // clean in every direction (the negative case)
+
+function seedWarnings(file) {
+  const w = new DatabaseSync(file);
+  w.exec(`CREATE TABLE ScannedFiles(ScannedFileRowId INTEGER PRIMARY KEY, Path TEXT UNIQUE, LastWriteTime INTEGER NOT NULL);
+    CREATE TABLE Mods(ModRowId INTEGER PRIMARY KEY, ScannedFileRowId INTEGER NOT NULL, ModId TEXT NOT NULL, Version INTEGER NOT NULL);
+    CREATE TABLE Components(ComponentRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, ComponentId TEXT, ComponentType TEXT NOT NULL);
+    CREATE TABLE ComponentProperties(ComponentRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ComponentRowId, Name));
+    CREATE TABLE ModFiles(FileRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, Path TEXT NOT NULL);
+    CREATE TABLE ComponentFiles(ComponentRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, Priority INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, FileRowId));
+    CREATE TABLE Settings(SettingRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, SettingId TEXT, SettingType TEXT NOT NULL);
+    CREATE TABLE SettingFiles(SettingRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, Priority INTEGER NOT NULL, PRIMARY KEY(SettingRowId, FileRowId));
+    CREATE TABLE ModGroups(ModGroupRowId INTEGER PRIMARY KEY, Name TEXT NOT NULL, CanDelete BOOLEAN, Selected BOOLEAN, SortIndex INTEGER);
+    CREATE TABLE ModGroupItems(ModGroupRowId INTEGER NOT NULL, ModRowId INTEGER NOT NULL, Disabled BOOLEAN NOT NULL, PRIMARY KEY(ModGroupRowId, ModRowId));
+    CREATE TABLE ModProperties(ModRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ModRowId, Name));
+    CREATE TABLE LocalizedText(ModRowId INTEGER NOT NULL, Tag TEXT NOT NULL, Locale TEXT NOT NULL, Text TEXT NOT NULL, PRIMARY KEY(ModRowId, Tag, Locale));`);
+
+  const ids = {};
+  for (const [modId, name] of [[MP_A, 'Pair Alpha'], [MP_B, 'Pair Beta'], [MC_F, 'Ctx Front'],
+      [MC_D, 'Ctx Data'], [MC_OK, 'Ctx Clean']]) {
+    const tag = `LOC_${name.toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_NAME`;
+    const sf = w.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, 1)')
+      .run(`C:/mods/${name.replace(/[^A-Za-z]+/g, '_')}.modinfo`).lastInsertRowid;
+    const mid = w.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)')
+      .run(sf, modId).lastInsertRowid;
+    w.prepare('INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, ?, ?)').run(mid, 'Name', tag);
+    w.prepare('INSERT INTO LocalizedText (ModRowId, Tag, Locale, Text) VALUES (?, ?, ?, ?)').run(mid, tag, 'en_US', name);
+    ids[modId] = mid;
+  }
+  w.prepare('INSERT INTO ModGroups (ModGroupRowId, Name, CanDelete, Selected, SortIndex) VALUES (1, ?, 0, 1, 0)').run('Main');
+  const item = w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (1, ?, 0)');
+  for (const mid of Object.values(ids)) item.run(mid);
+
+  // Split pair: the .lua decides for Alpha (200 > 100), the .xml for Beta
+  // (300 > 50). Same-winner pair: Alpha takes both halves (200 > 100 twice).
+  // Tie pair: the .lua ties at 300 (undefined) beside a decided .xml.
+  // Quiet pair: neither half declares anything (both undefined).
+  addFileAction(w, ids[MP_A], 'AddUIScript', 'PairLuaA', ['UI/Pair.lua'], { LoadOrder: '200' });
+  addFileAction(w, ids[MP_B], 'AddUIScript', 'PairLuaB', ['UI/Pair.lua'], { LoadOrder: '100' });
+  addFileAction(w, ids[MP_A], 'AddUIScript', 'PairXmlA', ['UI/Pair.xml'], { LoadOrder: '50' });
+  addFileAction(w, ids[MP_B], 'AddUIScript', 'PairXmlB', ['UI/Pair.xml'], { LoadOrder: '300' });
+  addFileAction(w, ids[MP_A], 'AddUIScript', 'SameLuaA', ['UI/Same.lua'], { LoadOrder: '200' });
+  addFileAction(w, ids[MP_B], 'AddUIScript', 'SameLuaB', ['UI/Same.lua'], { LoadOrder: '100' });
+  addFileAction(w, ids[MP_A], 'AddUIScript', 'SameXmlA', ['UI/Same.xml'], { LoadOrder: '200' });
+  addFileAction(w, ids[MP_B], 'AddUIScript', 'SameXmlB', ['UI/Same.xml'], { LoadOrder: '100' });
+  addFileAction(w, ids[MP_A], 'AddUIScript', 'TieLuaA', ['UI/TiePair.lua'], { LoadOrder: '300' });
+  addFileAction(w, ids[MP_B], 'AddUIScript', 'TieLuaB', ['UI/TiePair.lua'], { LoadOrder: '300' });
+  addFileAction(w, ids[MP_A], 'AddUIScript', 'TieXmlA', ['UI/TiePair.xml'], { LoadOrder: '50' });
+  addFileAction(w, ids[MP_B], 'AddUIScript', 'TieXmlB', ['UI/TiePair.xml'], { LoadOrder: '400' });
+  addFileAction(w, ids[MP_A], 'AddUIScript', 'QuietLuaA', ['UI/Quiet.lua']);
+  addFileAction(w, ids[MP_B], 'AddUIScript', 'QuietLuaB', ['UI/Quiet.lua']);
+  addFileAction(w, ids[MP_A], 'AddUIScript', 'QuietXmlA', ['UI/Quiet.xml']);
+  addFileAction(w, ids[MP_B], 'AddUIScript', 'QuietXmlB', ['UI/Quiet.xml']);
+
+  // Wrong context, positive: a gameplay script behind a front-end action (no
+  // in-game counterpart, so no contested path carries it - the warning is the
+  // only place it surfaces), a .lua inside UpdateDatabase next to a legit
+  // .sql (only the .lua warns), and a .sql inside a script action.
+  addSettingAction(w, ids[MC_F], 'AddGameplayScripts', 'FrontGame', ['Game/Front.lua']);
+  addFileAction(w, ids[MC_D], 'UpdateDatabase', 'MixedData', ['data/ok.sql', 'UI/Stray.lua']);
+  addFileAction(w, ids[MC_D], 'AddUIScript', 'ScriptWithSql', ['UI/ScriptWithSql.lua', 'data/stray.sql']);
+  // Wrong context, negative: every kind where it belongs. The .xml beside
+  // the .lua under a script action is the screen/layout pair mechanism, not a
+  // misplaced file, and stays silent.
+  addFileAction(w, ids[MC_OK], 'UpdateDatabase', 'GoodData', ['data/good.sql']);
+  addFileAction(w, ids[MC_OK], 'AddGameplayScripts', 'GoodGame', ['Game/good.lua']);
+  addSettingAction(w, ids[MC_OK], 'UpdateText', 'GoodText', ['Text/good.xml']);
+  addFileAction(w, ids[MC_OK], 'AddUIScript', 'GoodUI', ['UI/good.lua', 'UI/good.xml']);
+
+  w.close();
+}
+
+if (RUN_WARNINGS) {
+  console.log('\nTest 4: Lua/XML split-brain pairing warnings (--warnings)');
+  seedWarnings(WARNINGS_DB);
+  const db = new DatabaseSync(WARNINGS_DB, { readOnly: true });
+  let decided;
+  let warnCtx;
+  let warnAll;
+  try {
+    decided = shadowing.resolveWinners(db);
+    warnCtx = shadowing.detectWrongContext(db);
+    warnAll = shadowing.collectWarnings(db, decided);
+  } finally {
+    db.close();
+  }
+  const sb = shadowing.detectSplitBrain(decided);
+  for (const warn of sb) {
+    console.log(`  split-brain: ${warn.luaPath} <- ${warn.luaWinner.name} vs ${warn.xmlPath} <- ${warn.xmlWinner.name}`);
+  }
+
+  check('exactly the one split pair warns',
+    sb.length === 1 && sb[0].luaPath === 'UI/Pair.lua' && sb[0].xmlPath === 'UI/Pair.xml',
+    JSON.stringify(sb.map((x) => [x.luaPath, x.xmlPath])));
+  check('the warning names the split winners with their display names',
+    sb.length === 1 && sb[0].luaWinner.modId.toLowerCase() === MP_A.toLowerCase() && sb[0].luaWinner.name === 'Pair Alpha'
+    && sb[0].xmlWinner.modId.toLowerCase() === MP_B.toLowerCase() && sb[0].xmlWinner.name === 'Pair Beta',
+    JSON.stringify(sb[0] && { lua: sb[0].luaWinner, xml: sb[0].xmlWinner }));
+  const sbText = JSON.stringify(sb);
+  check('the same-winner pair stays silent', !sbText.includes('Same'), sbText);
+  check('the tie-decided pair stays silent (undefined side names no winner)', !sbText.includes('TiePair'), sbText);
+  check('the undeclared pair stays silent', !sbText.includes('Quiet'), sbText);
+
+  console.log('\nTest 5: wrong-context placement warnings (--warnings)');
+  for (const warn of warnCtx) {
+    console.log(`  wrong-context: ${warn.dir} ${warn.actionType} ${warn.actionId || ''} (${warn.scope}) <- ${warn.name}: ${(warn.files || []).join(', ')}`);
+  }
+  check('exactly the three misplaced files/actions warn', warnCtx.length === 3,
+    JSON.stringify(warnCtx.map((x) => [x.dir, x.actionType, x.files])));
+
+  const front = warnCtx.find((x) => x.dir === 'gameplay-in-frontend');
+  check('a gameplay script in a front-end action warns with scope and action',
+    !!front && front.scope === 'frontend' && front.actionType === 'AddGameplayScripts'
+    && front.modId.toLowerCase() === MC_F.toLowerCase() && front.name === 'Ctx Front',
+    JSON.stringify(front));
+  const inData = warnCtx.find((x) => x.dir === 'script-in-data-action');
+  check('a .lua inside a database action warns naming only the script file',
+    !!inData && inData.scope === 'ingame' && inData.actionType === 'UpdateDatabase'
+    && JSON.stringify(inData.files) === JSON.stringify(['UI/Stray.lua']),
+    JSON.stringify(inData && inData.files));
+  const inScript = warnCtx.find((x) => x.dir === 'data-in-script-action');
+  check('a .sql inside a script action warns naming the database file',
+    !!inScript && inScript.actionType === 'AddUIScript'
+    && JSON.stringify(inScript.files) === JSON.stringify(['data/stray.sql']),
+    JSON.stringify(inScript && inScript.files));
+  check('the clean mod warns nowhere',
+    !warnCtx.some((x) => x.modId.toLowerCase() === MC_OK.toLowerCase()),
+    JSON.stringify(warnCtx.map((x) => x.name)));
+
+  check('collectWarnings joins both layers, split-brain first',
+    warnAll.length === sb.length + warnCtx.length
+    && warnAll[0].kind === 'split-brain' && warnAll.slice(1).every((x) => x.kind === 'wrong-context'),
+    JSON.stringify(warnAll.map((x) => x.kind)));
+  const dbw = new DatabaseSync(WARNINGS_DB, { readOnly: true });
+  let envW;
+  try {
+    envW = shadowing.buildEnvelope(dbw);
+  } finally {
+    dbw.close();
+  }
+  check('the envelope carries the warnings', envW.warnings.length === warnAll.length,
+    `${envW.warnings.length} warning(s)`);
+  check('a nonzero warning count appends to the envelope line',
+    /pairing\/placement warning/.test(shadowing.formatEnvelope(envW)), shadowing.formatEnvelope(envW));
+
+  console.log('\nZero-warning pin: the Test 1 corpus warns nowhere and keeps its envelope line');
+  // The Test 1 corpus only exists when the contested block seeded it; a
+  // --warnings-only run skips this pin rather than reading a missing file.
+  if (WANT_CONTESTED) {
+    const dbz = new DatabaseSync(DB_PATH, { readOnly: true });
+    let envZ;
+    try {
+      envZ = shadowing.buildEnvelope(dbz);
+    } finally {
+      dbz.close();
+    }
+    check('no warnings on the contested-only corpus', envZ.warnings.length === 0,
+      JSON.stringify(envZ.warnings));
+    check('a zero warning count leaves the envelope line byte-identical',
+      !/warning/.test(shadowing.formatEnvelope(envZ)), shadowing.formatEnvelope(envZ));
+  }
+}
+
+// Base/DLC warning silence (doctrine: a warning fires only when a real mod
+// is involved). A dedicated database so the exact-count pins above never
+// move: the DLC-vs-DLC split pair stays silent, the mod-vs-DLC split pair
+// fires, and a misplaced file on a DLC mod stays silent beside a firing
+// real-mod control. Winner math is unchanged throughout: DLC claimants are
+// still listed and still win.
+const WARNINGS_DLC_DB = path.join(TMP, 'WarningsDlc.sqlite');
+const MD_A = 'd1d1d1d1-aaaa-4aaa-8aaa-aaaaaaaaaa01'; // DLC claimant (relative ../../../DLC path)
+const MD_B = 'b2b2b2b2-bbbb-4bbb-8bbb-bbbbbbbbbb02'; // base-game claimant (relative ../../../Base path)
+const MR_R = 'c3c3c3c3-cccc-4ccc-8ccc-cccccccccc03'; // real mod (absolute .modinfo path)
+
+function seedWarningsDlc(file) {
+  const w = new DatabaseSync(file);
+  w.exec(`CREATE TABLE ScannedFiles(ScannedFileRowId INTEGER PRIMARY KEY, Path TEXT UNIQUE, LastWriteTime INTEGER NOT NULL);
+    CREATE TABLE Mods(ModRowId INTEGER PRIMARY KEY, ScannedFileRowId INTEGER NOT NULL, ModId TEXT NOT NULL, Version INTEGER NOT NULL);
+    CREATE TABLE Components(ComponentRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, ComponentId TEXT, ComponentType TEXT NOT NULL);
+    CREATE TABLE ComponentProperties(ComponentRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL, PRIMARY KEY(ComponentRowId, Name));
+    CREATE TABLE ModFiles(FileRowId INTEGER PRIMARY KEY, ModRowId INTEGER NOT NULL, Path TEXT NOT NULL);
+    CREATE TABLE ComponentFiles(ComponentRowId INTEGER NOT NULL, FileRowId INTEGER NOT NULL, Priority INTEGER NOT NULL, PRIMARY KEY(ComponentRowId, FileRowId));
+    CREATE TABLE ModGroups(ModGroupRowId INTEGER PRIMARY KEY, Name TEXT NOT NULL, CanDelete BOOLEAN, Selected BOOLEAN, SortIndex INTEGER);
+    CREATE TABLE ModGroupItems(ModGroupRowId INTEGER NOT NULL, ModRowId INTEGER NOT NULL, Disabled BOOLEAN NOT NULL, PRIMARY KEY(ModGroupRowId, ModRowId));`);
+
+  const addMod = (modId, scannedPath) => w.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)')
+    .run(w.prepare('INSERT INTO ScannedFiles (Path, LastWriteTime) VALUES (?, 1)').run(scannedPath).lastInsertRowid, modId).lastInsertRowid;
+  const dlcA = addMod(MD_A, '../../../DLC/Expansion1/Expansion1.modinfo');
+  const baseB = addMod(MD_B, '../../../Base/Game/BaseGame.modinfo');
+  const realR = addMod(MR_R, 'C:/mods/RealMod.modinfo');
+  w.prepare('INSERT INTO ModGroups (ModGroupRowId, Name, CanDelete, Selected, SortIndex) VALUES (1, ?, 0, 1, 0)').run('Main');
+  const item = w.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (1, ?, 0)');
+  item.run(dlcA); item.run(baseB); item.run(realR);
+
+  // DLC-vs-DLC split: .lua decides for DLC Alpha (200 > 100), .xml for Base
+  // Beta (300 > 50). Mod-vs-DLC split: .lua for the real mod (200 > 100),
+  // .xml for DLC Alpha (300 > 50).
+  addFileAction(w, dlcA, 'AddUIScript', 'DlcLuaA', ['UI/DlcPair.lua'], { LoadOrder: '200' });
+  addFileAction(w, baseB, 'AddUIScript', 'DlcLuaB', ['UI/DlcPair.lua'], { LoadOrder: '100' });
+  addFileAction(w, dlcA, 'AddUIScript', 'DlcXmlA', ['UI/DlcPair.xml'], { LoadOrder: '50' });
+  addFileAction(w, baseB, 'AddUIScript', 'DlcXmlB', ['UI/DlcPair.xml'], { LoadOrder: '300' });
+  addFileAction(w, realR, 'AddUIScript', 'MixLuaR', ['UI/MixedPair.lua'], { LoadOrder: '200' });
+  addFileAction(w, dlcA, 'AddUIScript', 'MixLuaA', ['UI/MixedPair.lua'], { LoadOrder: '100' });
+  addFileAction(w, realR, 'AddUIScript', 'MixXmlR', ['UI/MixedPair.xml'], { LoadOrder: '50' });
+  addFileAction(w, dlcA, 'AddUIScript', 'MixXmlA', ['UI/MixedPair.xml'], { LoadOrder: '300' });
+  // Wrong context: a .lua in a database action on the base-game mod (silent)
+  // beside the same misplacement on the real mod (fires).
+  addFileAction(w, baseB, 'UpdateDatabase', 'DlcData', ['data/dlc.sql', 'UI/DlcStray.lua']);
+  addFileAction(w, realR, 'UpdateDatabase', 'RealData', ['data/real.sql', 'UI/RealStray.lua']);
+
+  w.close();
+}
+
+if (RUN_WARNINGS) {
+  console.log('\nTest 6: base/DLC warning silence (DLC-vs-DLC quiet, mod-vs-DLC fires) (--warnings)');
+  seedWarningsDlc(WARNINGS_DLC_DB);
+  const dd = new DatabaseSync(WARNINGS_DLC_DB, { readOnly: true });
+  let decided;
+  let sbBare;
+  let sb;
+  let warnCtx;
+  let warnAll;
+  try {
+    decided = shadowing.resolveWinners(dd);
+    sbBare = shadowing.detectSplitBrain(decided);
+    sb = shadowing.detectSplitBrain(decided, dd);
+    warnCtx = shadowing.detectWrongContext(dd);
+    warnAll = shadowing.collectWarnings(dd, decided);
+  } finally {
+    dd.close();
+  }
+  for (const d of decided) {
+    console.log(`  decided: ${d.path} <- ${d.status === 'decided' ? `winner ${d.winner.modId.slice(0, 8)} @${d.winner.value}` : d.reason}`);
+  }
+  for (const warn of sb) {
+    console.log(`  split-brain: ${warn.luaPath} <- ${warn.luaWinner.modId.slice(0, 8)} vs ${warn.xmlPath} <- ${warn.xmlWinner.modId.slice(0, 8)}`);
+  }
+  for (const warn of warnCtx) {
+    console.log(`  wrong-context: ${warn.dir} ${warn.actionType} <- ${warn.modId.slice(0, 8)}: ${(warn.files || []).join(', ')}`);
+  }
+
+  const byPath = new Map(decided.map((d) => [d.path, d]));
+  check('all four DLC-corpus paths stay contested and decided (winner math unchanged)',
+    decided.length === 4 && decided.every((d) => d.status === 'decided'),
+    JSON.stringify(decided.map((d) => [d.path, d.status])));
+  const dlcLua = byPath.get('UI/DlcPair.lua');
+  const dlcXml = byPath.get('UI/DlcPair.xml');
+  check('the DLC-vs-DLC halves still decide for their DLC/base winners',
+    !!dlcLua && dlcLua.winner.modId.toLowerCase() === MD_A.toLowerCase() && dlcLua.winner.value === 200
+    && !!dlcXml && dlcXml.winner.modId.toLowerCase() === MD_B.toLowerCase() && dlcXml.winner.value === 300,
+    JSON.stringify({ lua: dlcLua && dlcLua.winner, xml: dlcXml && dlcXml.winner }));
+  const mixLua = byPath.get('UI/MixedPair.lua');
+  const mixXml = byPath.get('UI/MixedPair.xml');
+  check('the mod-vs-DLC halves still decide across the real/DLC line',
+    !!mixLua && mixLua.winner.modId.toLowerCase() === MR_R.toLowerCase() && mixLua.winner.value === 200
+    && !!mixXml && mixXml.winner.modId.toLowerCase() === MD_A.toLowerCase() && mixXml.winner.value === 300,
+    JSON.stringify({ lua: mixLua && mixLua.winner, xml: mixXml && mixXml.winner }));
+  check('without the database the filter is off and both split pairs warn',
+    sbBare.length === 2, JSON.stringify(sbBare.map((x) => [x.luaPath, x.xmlPath])));
+  check('with the database only the mod-vs-DLC pair warns',
+    sb.length === 1 && sb[0].luaPath === 'UI/MixedPair.lua' && sb[0].xmlPath === 'UI/MixedPair.xml',
+    JSON.stringify(sb.map((x) => [x.luaPath, x.xmlPath])));
+  check('the firing pair names the real .lua winner beside the DLC .xml winner',
+    sb.length === 1 && sb[0].luaWinner.modId.toLowerCase() === MR_R.toLowerCase()
+    && sb[0].xmlWinner.modId.toLowerCase() === MD_A.toLowerCase(),
+    JSON.stringify(sb[0] && { lua: sb[0].luaWinner, xml: sb[0].xmlWinner }));
+  check('exactly the real-mod misplacement warns (the DLC stray stays silent)',
+    warnCtx.length === 1 && warnCtx[0].dir === 'script-in-data-action'
+    && warnCtx[0].modId.toLowerCase() === MR_R.toLowerCase()
+    && JSON.stringify(warnCtx[0].files) === JSON.stringify(['UI/RealStray.lua']),
+    JSON.stringify(warnCtx.map((x) => [x.dir, x.modId, x.files])));
+  check('collectWarnings joins the firing layers, split-brain first',
+    warnAll.length === 2 && warnAll[0].kind === 'split-brain' && warnAll[1].kind === 'wrong-context',
+    JSON.stringify(warnAll.map((x) => x.kind)));
+  const dde = new DatabaseSync(WARNINGS_DLC_DB, { readOnly: true });
+  let envD;
+  try {
+    envD = shadowing.buildEnvelope(dde);
+  } finally {
+    dde.close();
+  }
+  check('the envelope carries the two firing warnings', envD.warnings.length === 2,
+    `${envD.warnings.length} warning(s)`);
 }
 
 // A real database, if one is offered: read-only enumeration, never written.

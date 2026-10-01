@@ -68,6 +68,12 @@
         <label>Configurations folder (.Civ6Cfg files)
           <input id="pathSaves" type="text" spellcheck="false" />
         </label>
+        <label>Game logs folder (Database.log, Modding.log)
+          <input id="pathLogs" type="text" spellcheck="false" />
+        </label>
+        <label>Game cache folder (DebugGameplay.sqlite)
+          <input id="pathCache" type="text" spellcheck="false" />
+        </label>
         <label>Mod database (Mods.sqlite)
           <input id="pathModsDb" type="text" spellcheck="false" />
         </label>
@@ -398,9 +404,14 @@
       <div class="panel-body">
         <div class="note" id="cfReplayEnv"></div>
         <div class="list tall" id="cfReplayCollisions"></div>
-        <h3>Gated out, unreadable, and aborted files</h3>
+        <h3>Files the replay skipped or stopped on</h3>
         <div class="list" id="cfReplayGated"></div>
-        <h3>Database.log differential</h3>
+        <h3>Game log vs replay: what each side reports</h3>
+        <div class="toolbar">
+          <input id="cfDiffFilter" class="filter" type="search" placeholder="Type a mod&rsquo;s full name&hellip;" title="Show only the mod with exactly this full name — type the whole name" />
+          <label class="toggle" title="Hide the findings no mod could be named for. The count says how many are hidden — untick to show them again."><input type="checkbox" id="cfHideUnattributed" /> Hide unnamed findings</label>
+          <span class="meta" id="cfDiffNote"></span>
+        </div>
         <div class="list" id="cfReplayDiff"></div>
       </div>
     </section>

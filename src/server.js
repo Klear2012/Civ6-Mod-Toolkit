@@ -381,6 +381,30 @@ function findDatabaseLog() {
   return null;
 }
 
+// Where the game keeps Modding.log, read beside Database.log for the
+// log-pairing bracketing timeline (same ms clock, nearest-preceding Loading
+// line). Same shape as the Database.log lookup: env first, then the
+// Documents-side root, then the Local-side root, Logs dir before bare root.
+function moddingLogCandidates() {
+  const out = [];
+  if (process.env.CIV6_MODDING_LOG) out.push(process.env.CIV6_MODDING_LOG);
+  const root = paths.myGamesRoot();
+  if (root) out.push(path.join(root, 'Logs', 'Modding.log'));
+  const localRoot = paths.localGamesRoot ? paths.localGamesRoot() : null;
+  if (localRoot) {
+    out.push(path.join(localRoot, 'Logs', 'Modding.log'));
+    out.push(path.join(localRoot, 'Modding.log'));
+  }
+  return out;
+}
+
+function findModdingLog() {
+  for (const p of moddingLogCandidates()) {
+    try { if (p && fs.statSync(p).isFile()) return p; } catch (_) { /* next */ }
+  }
+  return null;
+}
+
 // Caps so one click cannot replay the whole Steam library into a temp copy.
 // Counted BEFORE anything runs: over the cap is a 400 naming the counts,
 // never a truncated report that reads as complete.
@@ -537,6 +561,141 @@ function conflictStageTotals(collected) {
   return totals;
 }
 
+// Log-pairing folder map for workshop-ID/mod-folder attribution: workshop ids
+// from the installed workshop mods, absolute mod folders (workshop and local
+// alike) as local prefixes so non-workshop-shaped paths still resolve, plus
+// the backend's base-game heuristic for the rest. Never throws: an empty map
+// leaves every path stated as unmapped, never dropped.
+function conflictLogFolderMap() {
+  let installed = [];
+  try { installed = scanMods(paths.getSources()); } catch (_) { installed = []; }
+  const workshop = {};
+  const local = [];
+  for (const m of installed) {
+    if (!m) continue;
+    if (m.workshopId != null && String(m.workshopId).trim() !== '') {
+      workshop[String(m.workshopId)] = { modId: m.id, name: m.name };
+    }
+    if (m.folder) local.push({ folder: m.folder, modId: m.id, name: m.name });
+  }
+  return { workshop, local };
+}
+
+// Replay-side mod ids are GUIDs from the game database; resolve each to the
+// installed display name for the report, falling back to the id itself.
+function conflictModNameIndex() {
+  const byId = new Map();
+  try {
+    for (const m of scanMods(paths.getSources())) {
+      if (!m || !m.id) continue;
+      if (!byId.has(m.id)) byId.set(m.id, m.name);
+      const nn = normId(m.id);
+      if (nn && !byId.has(nn)) byId.set(nn, m.name);
+    }
+  } catch (_) { /* names fall back to ids below */ }
+  return byId;
+}
+
+function conflictDisplayName(modId, nameById) {
+  if (modId == null) return null;
+  if (modId === 'base-game') return 'Base game';
+  return (nameById && (nameById.get(modId) || nameById.get(normId(modId)))) || String(modId);
+}
+
+// Modding.log Loading timeline for bracketing. Absent, oversized, or
+// unreadable is an empty timeline, never a failed report: context and hint
+// strengths still attribute, and unbracketable rows say so via their reason.
+function readModdingLoadings() {
+  const moddingPath = findModdingLog();
+  if (!moddingPath) return [];
+  try {
+    if (fs.statSync(moddingPath).size > MAX_CONFLICT_LOG_BYTES) return [];
+    return conflictReplay.parseModdingLog(fs.readFileSync(moddingPath, 'utf8'));
+  } catch (_) {
+    return [];
+  }
+}
+
+// Log-pairing follow-up: every skipped/stopped file row names its mod the way
+// the mod manager shows it, resolved here so the page never renders a raw
+// mod id. Additive: modName rides alongside modId; unknown mods fall back to
+// the id itself (the mod-name-display fallback: render, never raw markup).
+function withModDisplayNames(rows, nameById) {
+  return (rows || []).map((r) => ({ ...r, modName: conflictDisplayName(r && r.modId, nameById) }));
+}
+
+// Log-pairing 3.1: thread per-row attribution onto the existing differential
+// rows using the backend's three-strength fallback (attributeErrorWithFallback
+// owns the strengths; this only carries them). Agreements and replay-only rows
+// name the replay mod - the replay is its own oracle - with agreements also
+// carrying the log-side strength and log-attributed mod for cross-checking.
+// Log-only rows name the log-attributed mod. Every row gains
+// responsibleModId/responsibleModName plus strength; log-side rows also carry
+// the full attribution (kind/reason/candidates) so the page states unmapped
+// paths and same-ms ambiguity instead of dropping them.
+function attributeDifferential(diff, entries, loadings, folderMap, nameById) {
+  const byLine = new Map((entries || []).map((e) => [e.line, e]));
+  const ofLogLine = (logLine) => {
+    const entry = byLine.get(logLine) || null;
+    if (!entry) {
+      return {
+        strength: 'unattributed', approximate: false,
+        attribution: { kind: 'unattributed', modId: null, modName: null, workshopId: null, reason: 'no-log-entry' },
+      };
+    }
+    return conflictReplay.attributeErrorWithFallback(entry, loadings, folderMap);
+  };
+  const replaySide = (row) => ({
+    ...row,
+    responsibleModId: row.modId || null,
+    responsibleModName: row.modId ? conflictDisplayName(row.modId, nameById) : null,
+  });
+  const logSide = (row, fb) => {
+    const attr = (fb && fb.attribution) || {};
+    const modId = attr.modId || null;
+    const hasCandidates = attr.kind === 'bracket-ambiguous'
+      && Array.isArray(attr.candidates) && attr.candidates.length > 0;
+    // An unattributed row must not carry an attributing strength: with no
+    // named mod and no named candidates the strength is unattributed. The
+    // original detail (file hint, reason, loading path) stays on attribution
+    // for the page note, so nothing is lost by the relabel.
+    const strength = (modId || hasCandidates) ? fb.strength : 'unattributed';
+    return {
+      ...row,
+      responsibleModId: modId,
+      responsibleModName: modId ? (attr.modName || conflictDisplayName(modId, nameById)) : null,
+      strength,
+      approximate: strength === 'unattributed' ? false : !!fb.approximate,
+      attribution: attr,
+    };
+  };
+  return {
+    agreements: (diff.agreements || []).map((a) => {
+      const fb = ofLogLine(a.logLine);
+      const attr = fb.attribution || {};
+      const base = replaySide(a);
+      // The replay named the mod; the log side only cross-checks. When the
+      // log names nothing, the row would otherwise pair a named mod with an
+      // unattributed label, so it falls back to the replay strength.
+      const strength = fb.strength === 'unattributed' ? 'replay' : fb.strength;
+      return {
+        ...base,
+        strength,
+        approximate: strength === 'replay' ? false : !!fb.approximate,
+        attribution: attr,
+        logModId: attr.modId || null,
+        logModName: attr.modId ? (attr.modName || conflictDisplayName(attr.modId, nameById)) : null,
+      };
+    }),
+    replayOnly: (diff.replayOnly || []).map((r) => ({
+      ...replaySide(r),
+      strength: 'replay',
+      approximate: false,
+    })),
+    logOnly: (diff.logOnly || []).map((l) => logSide(l, ofLogLine(l.logLine))),
+  };
+}
+
 async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
   const debugPath = findDebugGameplay();
   if (!debugPath) {
@@ -570,8 +729,11 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
     conflictReplay.destroyTempCopy(tmpDir);
   }
   const envelope = conflictReplay.buildReplayEnvelope(report);
+  const nameById = conflictModNameIndex();
+  const folderMap = conflictLogFolderMap();
   const perFile = report.perFile.map((f) => ({
     modId: f.modId,
+    modName: conflictDisplayName(f.modId, nameById),
     fileLabel: f.fileLabel,
     statements: f.statements,
     executed: f.executed,
@@ -587,7 +749,10 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
 
   // Differential validation against Database.log, when the log is there to
   // read. Absent or oversized is reported, never silent and never fatal.
+  // The Modding.log Loading timeline is read once here: it feeds both the
+  // per-row bracketing below and the load-order calibration beside it.
   let differential;
+  const loadings = readModdingLoadings();
   const logPath = findDatabaseLog();
   if (!logPath) {
     differential = { available: false, reason: 'Database.log was not found (looked in the game Logs folder; set CIV6_DATABASE_LOG to point at it)' };
@@ -596,7 +761,32 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
   } else {
     const entries = conflictReplay.parseDatabaseLog(fs.readFileSync(logPath, 'utf8'));
     const diff = conflictReplay.differentialValidate(report, entries, collected);
-    differential = { available: true, logPath, ...diff };
+    const attributed = attributeDifferential(
+      diff, entries, loadings, folderMap, nameById);
+    differential = {
+      available: true, logPath,
+      agreements: attributed.agreements,
+      replayOnly: attributed.replayOnly,
+      logOnly: attributed.logOnly,
+      replayErrors: diff.replayErrors,
+      logErrors: diff.logErrors,
+    };
+  }
+
+  // Load-order calibration against Modding.log, beside the differential.
+  // Report-only: divergences are listed, replay assumptions stay as-is.
+  // Absent or oversized is reported, never silent and never fatal.
+  let calibration;
+  const moddingPath = findModdingLog();
+  if (!moddingPath) {
+    calibration = { available: false, reason: 'Modding.log was not found (looked in the game Logs folder; set CIV6_MODDING_LOG to point at it)' };
+  } else if (fs.statSync(moddingPath).size > MAX_CONFLICT_LOG_BYTES) {
+    calibration = { available: false, reason: `Modding.log is larger than ${MAX_CONFLICT_LOG_BYTES} bytes`, logPath: moddingPath };
+  } else {
+    calibration = {
+      available: true, logPath: moddingPath,
+      ...conflictReplay.calibrateLoadOrder(collected.files, loadings),
+    };
   }
 
   return {
@@ -615,12 +805,13 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
     collisions: report.provenance.collisions,
     limitationFlags,
     stages: conflictStageTotals(collected),
-    gatedOut: report.gatedOut,
-    gatedUnknown: report.gatedUnknown,
-    unreadable: scope.unreadable,
+    gatedOut: withModDisplayNames(report.gatedOut, nameById),
+    gatedUnknown: withModDisplayNames(report.gatedUnknown, nameById),
+    unreadable: withModDisplayNames(scope.unreadable, nameById),
     skippedNonDb: scope.skippedNonDb,
     perFile,
     differential,
+    calibration,
   };
 }
 
@@ -632,6 +823,8 @@ async function handleApi(req, res, url) {
     return send(res, 200, {
       sources,
       saves: paths.getSavesDir(),
+      logs: paths.getLogsDir(),
+      cache: paths.getCacheDir(),
       pathsError: paths.overridesStatus().error,
       ...listConfigs(),
       installed: installed.map((m) => ({ id: m.id, idNorm: m.idNorm, name: m.name, type: m.type })),
@@ -884,6 +1077,8 @@ async function handleApi(req, res, url) {
       version: VERSION,
       sources,
       saves: paths.getSavesDir(),
+      logs: paths.getLogsDir(),
+      cache: paths.getCacheDir(),
       pathsError: paths.overridesStatus().error,
       modsDb: { ...modsDb, ok: dbState.ok, error: dbState.error || null, activeGroup: dbState.activeGroup || null },
       game: await gameStatus(),
@@ -1558,7 +1753,7 @@ function conflictSelfcheckSeed(dir) {
   } finally {
     seed.close();
   }
-  return { modsDb, debugDb, logPath: pathSc.join(dir, 'Database.log'), MOD_A, MOD_B, GONE };
+  return { modsDb, debugDb, logPath: pathSc.join(dir, 'Database.log'), moddingPath: pathSc.join(dir, 'Modding.log'), MOD_A, MOD_B, GONE };
 }
 
 async function runConflictSelfcheck() {
@@ -1590,6 +1785,7 @@ async function runConflictSelfcheck() {
   process.env.CIV6_MODS_DB = fx.modsDb;
   process.env.CIV6_DEBUG_GAMEPLAY = fx.debugDb;
   process.env.CIV6_DATABASE_LOG = fx.logPath;
+  process.env.CIV6_MODDING_LOG = fx.moddingPath;
 
   // Learn the exact replay error text first (in-process, same code the route
   // calls), so the fixture Database.log carries one matching error plus one
@@ -1600,6 +1796,13 @@ async function runConflictSelfcheck() {
     `[100.001] [Gameplay] ERROR: ${bad1} -- file: bad1.sql statement 0`,
     '[100.002] [Gameplay] Validating Foreign Key Constraints...',
     '[100.003] [Gameplay] ERROR: UNIQUE constraint failed: ProvCheck.Id -- file: ghost.sql statement 3',
+  ].join('\n'));
+  // Modding.log Loading timeline with one inverted pair: the replay assumes
+  // data/a.sql before data/b.sql, the game loaded b.sql before a.sql. Later
+  // timestamps than the Database.log errors so bracketing is untouched.
+  fsSc.writeFileSync(fx.moddingPath, [
+    '[100.010] [Modding] UpdateDatabase - Loading D:/Synthetic/ModB/data/b.sql',
+    '[100.011] [Modding] UpdateDatabase - Loading D:/Synthetic/ModA/data/a.sql',
   ].join('\n'));
 
   await new Promise((resolve, reject) => {
@@ -1697,6 +1900,45 @@ async function runConflictSelfcheck() {
     && diff.replayOnly[0].side === 'replay-only' && diff.logOnly[0].fileLabel === 'ghost.sql'
     && diff.logOnly[0].side === 'log-only' && diff.logPath === fx.logPath,
     JSON.stringify({ a: diff.agreements, r: diff.replayOnly, l: diff.logOnly }));
+  // Log-pairing calibration: one inverted pair in the payload, and the
+  // display mapping renders it. The fixture Modding.log loads b.sql before
+  // a.sql against the assumed a-before-b replay order.
+  const cal = rp.body.calibration || {};
+  const inv = (cal.divergences || [])[0] || {};
+  check('calibration carries the one inverted pair with both sides named',
+    cal.available === true && (cal.divergences || []).length === 1 && cal.logPath === fx.moddingPath
+    && /data\/a\.sql/.test(inv.assumedFirst || '') && /data\/b\.sql/.test(inv.assumedSecond || '')
+    && /assumed replay order/.test(inv.assumedOrder || '') && /game-observed order/.test(inv.observedOrder || ''),
+    JSON.stringify(cal.divergences));
+  {
+    // Display mapping runs in a stubbed-DOM vm (phase7 precedent): the page
+    // script only needs $, esc/n/renderCivText, api/toast, and pages to load.
+    const vmSc = require('vm');
+    const cfSrc = fsSc.readFileSync(pathSc.join(__dirname, '..', 'public', 'conflicts.js'), 'utf8');
+    const stubEl = () => ({ addEventListener() {}, disabled: false, textContent: '', innerHTML: '', value: 'off' });
+    const cfCx = {
+      console,
+      esc: (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+        { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])),
+      n: (v) => (v == null ? '' : Number(v).toLocaleString()),
+      renderCivText: (s) => String(s == null ? '' : s),
+      $: () => stubEl(),
+      api: async () => ({}),
+      toast: () => {},
+      pages: {},
+    };
+    vmSc.createContext(cfCx);
+    vmSc.runInContext(cfSrc, cfCx, { filename: 'conflicts.js' });
+    const calHtml = vmSc.runInContext(`cfCalibrationHtml(${JSON.stringify(cal)})`, cfCx);
+    check('display mapping names both files and which side each order came from',
+      typeof calHtml === 'string' && /data\/a\.sql/.test(calHtml) && /data\/b\.sql/.test(calHtml)
+      && /assumed replay order/.test(calHtml) && /game-observed order/.test(calHtml),
+      String(calHtml).slice(0, 200));
+    const calZeroHtml = vmSc.runInContext(
+      'cfCalibrationHtml({ available: true, divergences: [], assumedOnly: [], observedOnly: [] })', cfCx);
+    check('display mapping states the zero-divergence case',
+      typeof calZeroHtml === 'string' && /match/i.test(calZeroHtml), String(calZeroHtml).slice(0, 160));
+  }
   const rpOn = await get('/api/conflicts/replay?fk=on');
   check('fk=on replays with FK mode recorded', rpOn.status === 200 && rpOn.body.fkMode === 'ON',
     `status=${rpOn.status} fkMode=${rpOn.body && rpOn.body.fkMode}`);

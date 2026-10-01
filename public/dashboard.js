@@ -84,6 +84,8 @@ function renderDashboard() {
     ...local.map((s) => folderRow('Local mods', s.root, s.exists)),
     ...ws.map((s) => folderRow('Steam Workshop', s.root, s.exists)),
     folderRow('Configurations', d.saves.root, d.saves.exists),
+    folderRow('Game logs', d.logs.root, d.logs.exists),
+    folderRow('Game cache', d.cache.root, d.cache.exists),
     folderRow('Mod database', d.modsDb.path, d.modsDb.exists,
       d.modsDb.activeGroup ? `active mod group: ${esc(groupLabel(d.modsDb.activeGroup))}` : ''),
   ].join('');
@@ -91,6 +93,8 @@ function renderDashboard() {
   $('pathLocal').value = (local[0] || {}).root || '';
   $('pathWorkshop').value = ws.map((s) => s.root).filter(Boolean).join(';');
   $('pathSaves').value = d.saves.root || '';
+  $('pathLogs').value = d.logs.root || '';
+  $('pathCache').value = d.cache.root || '';
   $('pathModsDb').value = d.modsDb.path || '';
 }
 
@@ -113,6 +117,8 @@ $('pathsForm').addEventListener('submit', async (e) => {
       localMods: $('pathLocal').value.trim() || undefined,
       workshop: workshop.length ? workshop : undefined,
       saves: $('pathSaves').value.trim() || undefined,
+      logsDir: $('pathLogs').value.trim() || undefined,
+      cacheDir: $('pathCache').value.trim() || undefined,
       modsDb: $('pathModsDb').value.trim() || undefined,
     });
     $('pathsMsg').textContent = 'Saved.';

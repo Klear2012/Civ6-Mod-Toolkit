@@ -5,7 +5,8 @@
 //
 // Override precedence (highest first):
 //   1. civ6-paths.json in the project root (or CIV6_PATHS_FILE)
-//   2. env vars CIV6_LOCAL_MODS / CIV6_WORKSHOP / CIV6_SAVES / CIV6_MODS_DB
+//   2. env vars CIV6_LOCAL_MODS / CIV6_WORKSHOP / CIV6_SAVES / CIV6_MODS_DB /
+//      CIV6_LOGS_DIR / CIV6_CACHE_DIR
 //   3. guessed defaults (probed for existence)
 //
 // A "source" is { type: 'local'|'workshop', label, root, exists }.
@@ -161,6 +162,8 @@ const OVERRIDE_KEYS = {
   localMods: (v) => (typeof v === 'string' && v.trim() ? v : null),
   saves: (v) => (typeof v === 'string' && v.trim() ? v : null),
   modsDb: (v) => (typeof v === 'string' && v.trim() ? v : null),
+  logsDir: (v) => (typeof v === 'string' && v.trim() ? v : null),
+  cacheDir: (v) => (typeof v === 'string' && v.trim() ? v : null),
   workshop: (v) => {
     if (typeof v === 'string' && v.trim()) return [v];
     if (Array.isArray(v) && v.length && v.every((x) => typeof x === 'string' && x.trim())) return v.slice();
@@ -306,7 +309,23 @@ function getModsDb() {
   return { path: file, exists };
 }
 
+// The game's log folder (Database.log, Modding.log) and cache folder
+// (DebugGameplay.sqlite). Both live under the Local-side Firaxis root, not
+// Documents. Same shape as getSavesDir: { root, exists }.
+function getLogsDir() {
+  const { overrides: ov } = loadOverrides();
+  const dir = ov.logsDir || process.env.CIV6_LOGS_DIR || path.join(localGamesRoot(), 'Logs');
+  return { root: dir, exists: existsDir(dir) };
+}
+
+function getCacheDir() {
+  const { overrides: ov } = loadOverrides();
+  const dir = ov.cacheDir || process.env.CIV6_CACHE_DIR || path.join(localGamesRoot(), 'Cache');
+  return { root: dir, exists: existsDir(dir) };
+}
+
 module.exports = {
-  getSources, getSavesDir, getModsDb, myGamesRoot, localGamesRoot, toNativePath,
+  getSources, getSavesDir, getModsDb, getLogsDir, getCacheDir,
+  myGamesRoot, localGamesRoot, toNativePath,
   overridesFile, overridesStatus, writeOverrides,
 };

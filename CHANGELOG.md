@@ -10,6 +10,26 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
+## v1.9.0 — 2 October 2026
+
+### Added
+
+- **Game errors name their mod.** The Conflicts differential joins each
+  `Database.log` error with its same-timestamp context (statement, row values,
+  workshop file path), falls back to file-hint matching, and brackets the rest
+  against `Modding.log`'s load timeline — every row says how it knows
+  (*traced to this mod*, *matched by file name*, *best guess*, *found by
+  replay*), approximate rows say so, and calibration lists game-observed vs
+  assumed load-order divergences.
+- **The differential reads mod-first**: per-mod groups with counts, repeated
+  same-failure files collapsed into one finding, attributed before
+  unattributed, exact-match mod search, and a toggle hiding unnamed findings.
+  Gated-out rows name mods instead of ids.
+- The Dashboard folder setup lists the **game Logs** and **game Cache**
+  folders with the same detect/edit/override plumbing as every other path.
+- Conflict warnings stay silent on base-game and DLC content, and shadowing
+  claimant names resolve like every other screen.
+
 ## v1.8.0 — 1 October 2026
 
 ### Added

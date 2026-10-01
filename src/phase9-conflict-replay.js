@@ -1823,10 +1823,62 @@ function runProvenance() {
 // fileHint, stmtHint }: only lines containing ERROR count, leading
 // [timestamp] / [tag] prefixes strip to a message, a *.sql/*.xml token is
 // the file hint, and a statement/stmt N token is the statement hint.
+//
+// Log-pairing 1.1 (additive): each ERROR also joins its same-timestamp
+// non-ERROR context lines -- the executing statement ("While executing -
+// '...'"), the row values ("... with values (...)"), and the source file
+// ("from file <path>", usually a workshop path carrying its Steam ID) --
+// into { statement, values, sourcePath, workshopId }. An ERROR with no
+// same-timestamp context lines keeps today's single-line shape (all four
+// null), so existing differential behavior is unchanged.
 // ---------------------------------------------------------------------------
+
+// Leading [timestamp] tag of a Database.log line; the join key for 1.1.
+function dbTimestampOf(raw) {
+  const m = /^\s*(\[[^\]]*\])/.exec(String(raw == null ? '' : raw));
+  return m ? m[1] : null;
+}
+
+// Fold one same-timestamp context line into the attribution accumulator.
+// First match per field wins across the timestamp group. Shapes measured
+// on real logs (synthetic values in fixtures, never real paths).
+function foldDbContextLine(text, acc) {
+  let m = /while\s+executing\s*[-–:]\s*(.+?)\s*$/i.exec(text);
+  if (m && acc.statement == null) {
+    const stmt = m[1].replace(/^['"]/, '').replace(/['"]\s*[.,;]?\s*$/, '').trim();
+    if (stmt) acc.statement = stmt;
+  }
+  m = /with\s+values\s*(.+?)\s*$/i.exec(text);
+  if (m && acc.values == null) {
+    let v = m[1].trim();
+    if (!/\)$/.test(v)) v = v.replace(/[.,;]+$/, '').trim();
+    if (v) acc.values = v;
+  }
+  m = /from\s+file\s+(.+?)\s*$/i.exec(text);
+  if (m && acc.sourcePath == null) {
+    const p = m[1].trim().replace(/^['"]/, '').replace(/['"\s.,;]+$/, '');
+    if (p) {
+      acc.sourcePath = p;
+      const w = /workshop\/content\/\d+\/(\d+)/i.exec(p);
+      if (w) acc.workshopId = w[1];
+    }
+  }
+  return acc;
+}
 
 function parseDatabaseLog(logText) {
   const lines = String(logText == null ? '' : logText).split(/\r?\n/);
+  // First pass: index non-ERROR context lines by leading timestamp tag.
+  const contextByTs = new Map();
+  lines.forEach((raw) => {
+    if (/ERROR/i.test(raw)) return;
+    const ts = dbTimestampOf(raw);
+    if (!ts) return;
+    const text = raw.trim();
+    if (!text) return;
+    if (!contextByTs.has(ts)) contextByTs.set(ts, []);
+    contextByTs.get(ts).push(text);
+  });
   const entries = [];
   lines.forEach((raw, i) => {
     if (!/ERROR/i.test(raw)) return;
@@ -1835,15 +1887,345 @@ function parseDatabaseLog(logText) {
     const message = text.replace(/^\s*(\[[^\]]*\]\s*)+/, '').trim();
     const fileM = /([\w][\w.\-]*\.(?:sql|xml))\b/i.exec(text);
     const stmtM = /(?:statement|stmt)\s*#?\s*(\d+)/i.exec(text);
+    // Same-timestamp siblings only; none shared means today's shape.
+    const acc = { statement: null, values: null, sourcePath: null, workshopId: null };
+    const ts = dbTimestampOf(raw);
+    const siblings = (ts && contextByTs.get(ts)) || [];
+    siblings.forEach((sib) => foldDbContextLine(sib, acc));
     entries.push({
       line: i + 1,
       text,
       message,
       fileHint: fileM ? fileM[1] : null,
       stmtHint: stmtM ? Number(stmtM[1]) : null,
+      statement: acc.statement,
+      values: acc.values,
+      sourcePath: acc.sourcePath,
+      workshopId: acc.workshopId,
     });
   });
   return entries;
+}
+
+// ---------------------------------------------------------------------------
+// Log-pairing 1.2: workshop/local/base source mapping. Pure functions over
+// the attributed entries from parseDatabaseLog: no filesystem access, the
+// caller supplies the folder map (built server-side from scanMods plus
+// resolved folders). Every entry yields an attribution stating its outcome;
+// unmapped paths are reported, never silently dropped.
+//
+// Folder map shape:
+//   { workshop: { [workshopId]: { modId, name? } | 'modId-string' },
+//     local: [{ folder, modId, name? }] or
+//            { [folderOrPrefix]: { modId, name? } | 'modId-string' } }
+// A local folder is either a bare mod-folder name (matched as a /Mods/<name>/
+// path segment) or an absolute mod-folder prefix (matched case-insensitively
+// after slash normalization). Base-game/DLC paths need no map entry: a
+// normalized path carrying a /base/ or /dlc/ segment attributes to the base
+// game. Explicit maps win over the base-game heuristic, in that order.
+// ---------------------------------------------------------------------------
+
+function normalizeLogPath(p) {
+  return String(p == null ? '' : p).replace(/\\/g, '/').toLowerCase();
+}
+
+function isBaseGamePath(norm) {
+  return /(^|\/)(base|dlc)(\/|$)/.test(norm || '');
+}
+
+function localEntriesOf(folderMap) {
+  const local = (folderMap && folderMap.local) || [];
+  if (Array.isArray(local)) return local;
+  return Object.keys(local).map((k) => {
+    const v = local[k];
+    return typeof v === 'string' ? { folder: k, modId: v } : { folder: k, ...(v || {}) };
+  });
+}
+
+function matchLocalFolder(normPath, entry) {
+  const folder = normalizeLogPath((entry && entry.folder) || '').replace(/^\/+|\/+$/g, '');
+  if (!folder) return false;
+  // Absolute-prefix form (caller passed a full mod folder): prefix match.
+  if (folder.includes('/')) return normPath.startsWith(folder);
+  // Bare folder-name form: match one full path segment.
+  return normPath.includes(`/${folder}/`);
+}
+
+// One source path to its owning mod. Never throws on a missing map and
+// never returns a bare null: the reason field always says what happened.
+function resolveLogSourceMod(sourcePath, workshopId, folderMap) {
+  const map = folderMap || {};
+  const wid = workshopId == null || workshopId === '' ? null : String(workshopId);
+  if (!sourcePath) {
+    return {
+      kind: 'unmapped', modId: null, modName: null,
+      workshopId: wid, reason: 'no-source-path',
+    };
+  }
+  if (wid) {
+    const hit = (map.workshop || {})[wid];
+    if (hit) {
+      return {
+        kind: 'workshop',
+        modId: typeof hit === 'string' ? hit : (hit.modId || null),
+        modName: typeof hit === 'string' ? null : (hit.name || null),
+        workshopId: wid, reason: null,
+      };
+    }
+    return {
+      kind: 'unmapped', modId: null, modName: null,
+      workshopId: wid, reason: `workshop-id-not-installed:${wid}`,
+    };
+  }
+  const norm = normalizeLogPath(sourcePath);
+  for (const entry of localEntriesOf(map)) {
+    if (matchLocalFolder(norm, entry)) {
+      return {
+        kind: 'local',
+        modId: entry.modId || null,
+        modName: entry.name || null,
+        workshopId: null, reason: null,
+      };
+    }
+  }
+  if (isBaseGamePath(norm)) {
+    return {
+      kind: 'base-game', modId: 'base-game', modName: 'Base game',
+      workshopId: null, reason: null,
+    };
+  }
+  return {
+    kind: 'unmapped', modId: null, modName: null,
+    workshopId: null, reason: 'path-not-mapped',
+  };
+}
+
+// Entries plus folder map to entries carrying .attribution. Non-mutating:
+// the input array and its entries are returned untouched in fresh objects.
+function attributeLogSources(entries, folderMap) {
+  return (entries || []).map((e) => ({
+    ...(e || {}),
+    attribution: resolveLogSourceMod(e && e.sourcePath, e && e.workshopId, folderMap),
+  }));
+}
+
+// Log-pairing 2.1: numeric ms clock shared by Database.log and Modding.log.
+// Tags look like [100.001]; unparseable tags yield null (unbracketable).
+function parseLogTimestampMs(tag) {
+  const m = /^\s*\[\s*([0-9]+(?:\.[0-9]+)?)\s*\]/.exec(String(tag == null ? '' : tag));
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isFinite(n) ? n : null;
+}
+
+// Log-pairing 2.1: Modding.log Loading timeline. Real shape is
+// `[t] <Action> - Loading <path>` on the same ms clock as Database.log;
+// fixtures below use synthetic paths only, never real paths.
+function parseModdingLog(logText) {
+  const lines = String(logText == null ? '' : logText).split(/\r?\n/);
+  const out = [];
+  lines.forEach((raw, i) => {
+    const m = /-\s*Loading\s+(.+?)\s*$/.exec(raw);
+    if (!m) return;
+    const cleaned = m[1].trim().replace(/^['"]/, '').replace(/['"\s.,;]+$/, '');
+    if (!cleaned) return;
+    const tag = dbTimestampOf(raw);
+    const w = /workshop\/content\/\d+\/(\d+)/i.exec(cleaned);
+    out.push({
+      line: i + 1,
+      text: raw.trim(),
+      timestampTag: tag,
+      timestampMs: tag ? parseLogTimestampMs(tag) : null,
+      path: cleaned,
+      workshopId: w ? w[1] : null,
+    });
+  });
+  return out;
+}
+
+// Log-pairing 2.1: usable context means any same-timestamp joined field.
+// Hint-only errors (fileHint without context) stay hint-matched, never
+// bracketed; only errors with neither context nor hint are bracketable.
+function hasUsableDbContext(entry) {
+  const e = entry || {};
+  return !!(e.sourcePath || e.statement || e.values);
+}
+
+// Log-pairing 2.1: nearest-preceding Loading bracketing, always labeled
+// approximate. Single preceding Loading brackets to its file; two or more
+// sharing the nearest ms yield a named-candidates list (never a pick);
+// no preceding Loading states so explicitly via reason.
+function bracketErrorWithLoading(dbError, loadings, folderMap) {
+  const e = dbError || {};
+  const errTag = e.timestampTag || dbTimestampOf(e.text || '');
+  const errMs = errTag ? parseLogTimestampMs(errTag) : null;
+  const base = { timestampTag: errTag || null, approximate: true };
+  if (errMs == null) {
+    return { ...base, outcome: 'unbracketed', strength: 'unattributed',
+      loadingPath: null, loadingLine: null, attribution: null,
+      candidates: [], reason: 'no-error-timestamp' };
+  }
+  const prior = (loadings || []).filter((l) => l && typeof l.timestampMs === 'number' && l.timestampMs <= errMs);
+  if (prior.length === 0) {
+    return { ...base, outcome: 'unbracketed', strength: 'unattributed',
+      loadingPath: null, loadingLine: null, attribution: null,
+      candidates: [], reason: 'no-loading-precedes' };
+  }
+  let maxMs = prior[0].timestampMs;
+  for (const l of prior) if (l.timestampMs > maxMs) maxMs = l.timestampMs;
+  const nearest = prior.filter((l) => l.timestampMs === maxMs);
+  if (nearest.length === 1) {
+    const n = nearest[0];
+    return { ...base, outcome: 'bracketed', strength: 'bracket-approximate',
+      loadingPath: n.path, loadingLine: n.line, timestampTag: n.timestampTag,
+      attribution: resolveLogSourceMod(n.path, n.workshopId, folderMap),
+      candidates: null, reason: null };
+  }
+  return { ...base, outcome: 'ambiguous', strength: 'bracket-approximate',
+    loadingPath: null, loadingLine: null, timestampTag: nearest[0].timestampTag,
+    attribution: null,
+    candidates: nearest.map((n) => ({ path: n.path, line: n.line,
+      attribution: resolveLogSourceMod(n.path, n.workshopId, folderMap) })),
+    reason: 'same-ms-ambiguity' };
+}
+
+// Log-pairing 2.1: three-strength fallback in order. Context-proven first,
+// then hint-matched (fileHint kept, never bracketed), then Modding.log
+// bracketing labeled approximate; otherwise unattributed with a reason.
+function attributeErrorWithFallback(entry, loadings, folderMap) {
+  const e = entry || {};
+  if (e.sourcePath || e.statement || e.values) {
+    return { strength: 'context-proven', approximate: false,
+      attribution: resolveLogSourceMod(e.sourcePath, e.workshopId, folderMap),
+      bracket: null };
+  }
+  if (e.fileHint) {
+    return { strength: 'hint-matched', approximate: false,
+      attribution: { kind: 'hint', modId: null, modName: null,
+        fileHint: e.fileHint, stmtHint: e.stmtHint == null ? null : e.stmtHint,
+        workshopId: null, reason: 'file-hint-only' },
+      bracket: null };
+  }
+  const bracket = bracketErrorWithLoading(e, loadings, folderMap);
+  if (bracket.outcome === 'bracketed') {
+    return { strength: 'bracket-approximate', approximate: true,
+      attribution: { ...bracket.attribution, strength: 'bracket-approximate',
+        approximate: true, loadingPath: bracket.loadingPath,
+        loadingLine: bracket.loadingLine },
+      bracket };
+  }
+  if (bracket.outcome === 'ambiguous') {
+    return { strength: 'bracket-approximate', approximate: true,
+      attribution: { kind: 'bracket-ambiguous', modId: null, modName: null,
+        workshopId: null, reason: bracket.reason,
+        candidates: bracket.candidates },
+      bracket };
+  }
+  return { strength: 'unattributed', approximate: true,
+    attribution: { kind: 'unattributed', modId: null, modName: null,
+      workshopId: null, reason: bracket.reason },
+    bracket };
+}
+
+// Log-pairing 2.2: load-sequence calibration (report-only). The game file
+// load sequence is the Modding.log Loading order; calibration compares it
+// against the assumed replay order and reports inverted pairs naming which
+// side each order came from (game-observed vs assumed). Never reorders or
+// corrects anything: replay assumptions stay as-is.
+function basenameOfLoadPath(p) {
+  const norm = String(p == null ? '' : p).replace(/\\/g, '/');
+  const base = norm.split('/').pop() || '';
+  return base;
+}
+
+function loadOrderKey(s) {
+  return basenameOfLoadPath(s).toLowerCase();
+}
+
+function assumedFileLabel(f) {
+  if (typeof f === 'string') return f;
+  if (f && typeof f.fileLabel === 'string') return f.fileLabel;
+  if (f && typeof f.label === 'string') return f.label;
+  if (f && typeof f.path === 'string') return basenameOfLoadPath(f.path);
+  return String(f == null ? '' : f);
+}
+
+// Game-observed file load sequence: Loading paths in file (line) order.
+// Returns fresh objects; never mutates the loadings input.
+function gameLoadSequence(loadings) {
+  const sorted = [...(loadings || [])]
+    .filter((l) => l && typeof l.path === 'string' && l.path)
+    .sort((a, b) => (a.line || 0) - (b.line || 0));
+  return sorted.map((l) => ({
+    path: l.path,
+    key: loadOrderKey(l.path),
+    label: basenameOfLoadPath(l.path),
+    line: l.line,
+    timestampMs: l.timestampMs,
+  }));
+}
+
+// Report-only calibration of assumed replay order vs game-observed order.
+// Files are matched by basename (case-insensitive); only files present on
+// both sides participate in pair comparison, while side-only files are
+// listed separately (never dropped silently). Returns a fresh report;
+// inputs are never reordered or mutated.
+function calibrateLoadOrder(assumedFiles, loadings) {
+  const assumed = (assumedFiles || []).map((f, i) => ({
+    index: i,
+    label: assumedFileLabel(f),
+    key: loadOrderKey(assumedFileLabel(f)),
+    modId: (f && typeof f === 'object' && f.modId) || null,
+  })).filter((a) => a.key);
+  const observed = gameLoadSequence(loadings);
+  const assumedPos = new Map();
+  for (const a of assumed) if (!assumedPos.has(a.key)) assumedPos.set(a.key, a.index);
+  const observedPos = new Map();
+  observed.forEach((o, rank) => { if (!observedPos.has(o.key)) observedPos.set(o.key, rank); });
+  const commonKeys = [...assumedPos.keys()].filter((k) => observedPos.has(k));
+  const assumedOrder = [...commonKeys].sort((a, b) => assumedPos.get(a) - assumedPos.get(b));
+  const observedOrder = [...commonKeys].sort((a, b) => observedPos.get(a) - observedPos.get(b));
+  const labelOf = (key) => {
+    const a = assumed.find((x) => x.key === key);
+    return a ? a.label : key;
+  };
+  const divergences = [];
+  for (let i = 0; i < assumedOrder.length; i += 1) {
+    for (let j = i + 1; j < assumedOrder.length; j += 1) {
+      const first = assumedOrder[i];
+      const second = assumedOrder[j];
+      if (observedPos.get(first) > observedPos.get(second)) {
+        const aLabel = labelOf(first);
+        const bLabel = labelOf(second);
+        divergences.push({
+          assumedFirst: aLabel,
+          assumedSecond: bLabel,
+          assumedOrder: `${aLabel} before ${bLabel} (assumed replay order)`,
+          observedOrder: `${bLabel} before ${aLabel} (game-observed order)`,
+        });
+      }
+    }
+  }
+  const assumedOnly = assumed.filter((a) => !observedPos.has(a.key)).map((a) => a.label);
+  const observedOnly = observed.filter((o) => !assumedPos.has(o.key)).map((o) => o.label);
+  return {
+    assumedOrder: assumedOrder.map(labelOf),
+    observedOrder: observedOrder.map(labelOf),
+    divergences,
+    assumedOnly,
+    observedOnly,
+  };
+}
+
+function formatCalibration(cal) {
+  const lines = [];
+  lines.push(`assumed=[${(cal.assumedOrder || []).join(', ')}]`
+    + ` observed=[${(cal.observedOrder || []).join(', ')}]`
+    + ` divergences=${(cal.divergences || []).length}`);
+  (cal.divergences || []).forEach((d) => {
+    lines.push(`  inverted: ${d.assumedOrder} vs ${d.observedOrder}`);
+  });
+  return lines.join('\n');
 }
 
 // Message comparison strips the -- file: annotation this harness appends
@@ -2068,6 +2450,211 @@ function runDifferential() {
   const diff = differentialValidate(report, entries, collected);
   console.log(formatDifferential(diff));
   assertDifferential(diff, check);
+
+  // Log-pairing 1.1: same-timestamp context joining on a real-log-shaped
+  // fixture (in-memory log text; the workshop path is synthetic, never a
+  // real path). The 2.2 assertions above already passed unchanged.
+  console.log('\nContext joining (log-pairing 1.1, real-log-shaped fixture):');
+  const pairingLog = [
+    "[200.001] [Gameplay] While executing - 'insert into Traits(TraitType, Name) values (?, ?)'",
+    '[200.001] [Gameplay] In XMLSerializer while updating table Traits with values (TRAIT_PAIRED, Paired Trait)',
+    '[200.001] [Gameplay] from file D:/SteamLibrary/steamapps/workshop/content/289070/1234567890/Data/PairedMod_Traits.xml',
+    '[200.001] [Gameplay] ERROR: UNIQUE constraint failed: Traits.TraitType',
+    '[200.002] [Gameplay] ERROR: no such table: NoSuchLone -- file: lone.sql statement 1',
+  ].join('\n');
+  pairingLog.split('\n').forEach((l) => console.log(`  log: ${l}`));
+  const paired = parseDatabaseLog(pairingLog);
+  check('context fixture parses to both ERROR entries', paired.length === 2, `got ${paired.length}`);
+  const ctx = paired[0];
+  console.log(`  attributed: workshopId=${ctx.workshopId} sourcePath=${ctx.sourcePath}`);
+  console.log(`  statement: ${ctx.statement}`);
+  console.log(`  values: ${ctx.values}`);
+  check('executing statement joined',
+    ctx.statement === 'insert into Traits(TraitType, Name) values (?, ?)', String(ctx.statement));
+  check('row values joined',
+    ctx.values === '(TRAIT_PAIRED, Paired Trait)', String(ctx.values));
+  check('workshop source path joined',
+    ctx.sourcePath === 'D:/SteamLibrary/steamapps/workshop/content/289070/1234567890/Data/PairedMod_Traits.xml',
+    String(ctx.sourcePath));
+  check('workshop ID attributed', ctx.workshopId === '1234567890', String(ctx.workshopId));
+  const lone = paired[1];
+  check('single-line fallback keeps null context fields',
+    lone.statement === null && lone.values === null && lone.sourcePath === null && lone.workshopId === null,
+    JSON.stringify({
+      statement: lone.statement,
+      values: lone.values,
+      sourcePath: lone.sourcePath,
+      workshopId: lone.workshopId,
+    }));
+  check('fallback keeps file-hint and statement-hint',
+    lone.fileHint === 'lone.sql' && lone.stmtHint === 1, `${lone.fileHint}#${lone.stmtHint}`);
+
+  // Log-pairing 1.2: workshop/local/base mapping over attributed entries.
+  // Pure function on in-memory fixtures (synthetic paths, never real paths).
+  console.log('\nSource mapping (log-pairing 1.2, workshop/local/base fixtures):');
+  const folderMap = {
+    workshop: { 1234567890: { modId: 'mod-paired', name: 'Paired Mod' } },
+    local: [{ folder: 'MyLocalMod', modId: 'mod-local', name: 'Local Mod' }],
+  };
+  const mapLog = [
+    '[300.001] [Gameplay] from file D:/SteamLibrary/steamapps/workshop/content/289070/1234567890/Data/PairedMod_Traits.xml',
+    '[300.001] [Gameplay] ERROR: UNIQUE constraint failed: Traits.TraitType',
+    "[300.002] [Gameplay] from file C:/Users/Test/Documents/My Games/Sid Meier's Civilization VI/Mods/MyLocalMod/Data/Local_Traits.xml",
+    '[300.002] [Gameplay] ERROR: no such table: LocalTraits',
+    "[300.003] [Gameplay] from file C:/Games/Sid Meier's Civilization VI/Base/Assets/Gameplay/Data/Base_Traits.xml",
+    '[300.003] [Gameplay] ERROR: UNIQUE constraint failed: BaseTraits.Id',
+    '[300.004] [Gameplay] from file D:/SteamLibrary/steamapps/workshop/content/289070/9999999999/Data/Stranger_Traits.xml',
+    '[300.004] [Gameplay] ERROR: no such table: StrangerTraits',
+  ].join('\n');
+  mapLog.split('\n').forEach((l) => console.log(`  log: ${l}`));
+  const mapEntries = parseDatabaseLog(mapLog);
+  const mapped = attributeLogSources(mapEntries, folderMap);
+  check('mapping fixture parses to four ERROR entries', mapped.length === 4, `got ${mapped.length}`);
+  mapped.forEach((e) => console.log(`  mapped: kind=${e.attribution && e.attribution.kind}`
+    + ` mod=${(e.attribution && e.attribution.modId) || '(none)'}`
+    + ` workshopId=${e.workshopId || '-'} sourcePath=${e.sourcePath}`));
+  check('mapper does not mutate its input',
+    mapEntries.every((e) => e.attribution === undefined));
+  check('every entry carries a stated attribution (none dropped)',
+    mapped.every((e) => e.attribution && typeof e.attribution.kind === 'string'),
+    JSON.stringify(mapped.map((e) => e.attribution && e.attribution.kind)));
+  check('workshop path maps to its mod',
+    mapped[0].attribution.kind === 'workshop' && mapped[0].attribution.modId === 'mod-paired',
+    JSON.stringify(mapped[0].attribution));
+  check('local path resolves by folder',
+    mapped[1].attribution.kind === 'local' && mapped[1].attribution.modId === 'mod-local',
+    JSON.stringify(mapped[1].attribution));
+  check('base-game path attributes to the base game',
+    mapped[2].attribution.kind === 'base-game' && mapped[2].attribution.modId === 'base-game',
+    JSON.stringify(mapped[2].attribution));
+  check('unknown workshop ID is stated, not dropped',
+    mapped[3].attribution.kind === 'unmapped' && /9999999999/.test(mapped[3].attribution.reason || ''),
+    JSON.stringify(mapped[3].attribution));
+  const unmappedAll = attributeLogSources(mapEntries, null);
+  check('empty map leaves nothing unstated (base needs no map entry)',
+    unmappedAll.every((e) => e.attribution && typeof e.attribution.kind === 'string')
+    && unmappedAll[0].attribution.kind === 'unmapped'
+    && unmappedAll[1].attribution.kind === 'unmapped'
+    && unmappedAll[2].attribution.kind === 'base-game',
+    JSON.stringify(unmappedAll.map((e) => e.attribution.kind)));
+
+  // Log-pairing 2.1: hint-only fallback kept (synthetic paths only).
+  console.log('\nFallbacks (log-pairing 2.1, hint-only fixture):');
+  const hintLog = '[400.001] [Gameplay] ERROR: no such table: NoSuchHinted -- file: hinted.sql statement 2';
+  console.log(`  log: ${hintLog}`);
+  const hintEntries = parseDatabaseLog(hintLog);
+  check('hint-only fixture parses to one ERROR', hintEntries.length === 1, `got ${hintEntries.length}`);
+  const hintE = hintEntries[0];
+  check('hint-only keeps file-hint matching', hintE.fileHint === 'hinted.sql' && hintE.stmtHint === 2,
+    `${hintE.fileHint}#${hintE.stmtHint}`);
+  check('hint-only has no usable context', !hasUsableDbContext(hintE),
+    JSON.stringify({ statement: hintE.statement, sourcePath: hintE.sourcePath }));
+  const hintFb = attributeErrorWithFallback(hintE, [], folderMap);
+  check('hint-only stays hint-matched, never bracketed',
+    hintFb.strength === 'hint-matched' && hintFb.bracket === null && !hintFb.approximate,
+    JSON.stringify(hintFb));
+
+  // Log-pairing 2.1: Modding.log bracketing for no-context errors.
+  console.log('\nBracketing (log-pairing 2.1, no-context fixture):');
+  const bracketMap = {
+    workshop: { 1111111111: { modId: 'mod-alpha', name: 'Alpha Mod' },
+      2222222222: { modId: 'mod-beta', name: 'Beta Mod' } },
+    local: [],
+  };
+  const moddingSingle = [
+    '[500.001] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/1111111111/Data/Alpha_Units.xml',
+    '[500.002] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/2222222222/Data/Beta_Units.xml',
+    '[500.004] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/1111111111/Data/Alpha_Late.xml',
+  ].join('\n');
+  moddingSingle.split('\n').forEach((l) => console.log(`  modding: ${l}`));
+  const singleLoads = parseModdingLog(moddingSingle);
+  check('Modding.log parses three Loading lines', singleLoads.length === 3, `got ${singleLoads.length}`);
+  check('non-Loading lines are ignored', parseModdingLog('[500.000] [Modding] Idle').length === 0);
+  const bareLog = '[500.003] [Gameplay] ERROR: no such table: NoSuchBare';
+  console.log(`  log: ${bareLog}`);
+  const bareE = parseDatabaseLog(bareLog)[0];
+  check('no-context error has neither context nor hint',
+    !hasUsableDbContext(bareE) && !bareE.fileHint, JSON.stringify(bareE));
+  const bareB = bracketErrorWithLoading(bareE, singleLoads, bracketMap);
+  console.log(`  bracket: outcome=${bareB.outcome} path=${bareB.loadingPath}`);
+  check('nearest-preceding Loading brackets the error', bareB.outcome === 'bracketed'
+    && /2222222222/.test(bareB.loadingPath || ''), JSON.stringify(bareB));
+  check('bracketing is labeled approximate', bareB.approximate === true
+    && bareB.strength === 'bracket-approximate', JSON.stringify(bareB));
+  check('bracket resolves the loading mod', !!bareB.attribution
+    && bareB.attribution.modId === 'mod-beta', JSON.stringify(bareB.attribution));
+  const bareFb = attributeErrorWithFallback(bareE, singleLoads, bracketMap);
+  check('fallback labels no-context as bracket-approximate',
+    bareFb.strength === 'bracket-approximate' && bareFb.approximate === true,
+    JSON.stringify(bareFb));
+
+  // Same-ms ambiguity degrades to a named-candidates list, never a pick.
+  const moddingAmbig = [
+    '[600.001] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/1111111111/Data/Ambig_A.xml',
+    '[600.001] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/2222222222/Data/Ambig_B.xml',
+  ].join('\n');
+  const ambigLoads = parseModdingLog(moddingAmbig);
+  const ambigE = parseDatabaseLog('[600.002] [Gameplay] ERROR: no such table: NoSuchAmbig')[0];
+  const ambigB = bracketErrorWithLoading(ambigE, ambigLoads, bracketMap);
+  console.log(`  ambiguous: outcome=${ambigB.outcome} candidates=${(ambigB.candidates || []).length}`);
+  check('same-ms yields candidates, not a single pick',
+    ambigB.outcome === 'ambiguous' && (ambigB.candidates || []).length === 2
+    && ambigB.loadingPath === null, JSON.stringify(ambigB));
+  check('candidates are named with mods',
+    ambigB.candidates.every((c) => !!c.path && !!c.attribution && !!c.attribution.modId),
+    JSON.stringify((ambigB.candidates || []).map((c) => c.path)));
+  check('ambiguity keeps the approximate label', ambigB.approximate === true
+    && ambigB.strength === 'bracket-approximate' && ambigB.reason === 'same-ms-ambiguity');
+
+  // No preceding Loading states so explicitly.
+  const lateLoads = parseModdingLog('[700.005] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/1111111111/Data/Late.xml');
+  const earlyE = parseDatabaseLog('[700.001] [Gameplay] ERROR: no such table: NoSuchEarly')[0];
+  const earlyB = bracketErrorWithLoading(earlyE, lateLoads, bracketMap);
+  console.log(`  early: outcome=${earlyB.outcome} reason=${earlyB.reason}`);
+  check('no preceding Loading is stated explicitly',
+    earlyB.outcome === 'unbracketed' && earlyB.reason === 'no-loading-precedes',
+    JSON.stringify(earlyB));
+  const ctxFb = attributeErrorWithFallback(ctx, singleLoads, folderMap);
+  check('context-proven errors never fall through to bracketing',
+    ctxFb.strength === 'context-proven' && ctxFb.bracket === null,
+    JSON.stringify(ctxFb));
+
+  // Log-pairing 2.2: load-sequence calibration from Loading lines
+  // (report-only: divergences are listed, replay assumptions untouched).
+  console.log('\nCalibration (log-pairing 2.2, one inverted pair):');
+  const assumedFiles = [
+    { modId: 'mod-alpha', fileLabel: 'Alpha_Units.xml' },
+    { modId: 'mod-beta', fileLabel: 'Beta_Units.xml' },
+  ];
+  const calLoadings = parseModdingLog([
+    '[800.001] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/2222222222/Data/Beta_Units.xml',
+    '[800.002] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/1111111111/Data/Alpha_Units.xml',
+  ].join('\n'));
+  calLoadings.forEach((l) => console.log(`  loading: ${l.path}`));
+  const seq = gameLoadSequence(calLoadings);
+  check('game load sequence follows Loading order',
+    seq.map((s) => s.label).join(',') === 'Beta_Units.xml,Alpha_Units.xml',
+    seq.map((s) => s.label).join(','));
+  const calBefore = JSON.stringify(assumedFiles);
+  const cal = calibrateLoadOrder(assumedFiles, calLoadings);
+  console.log(formatCalibration(cal));
+  check('one inverted pair reported', cal.divergences.length === 1, `got ${cal.divergences.length}`);
+  const inv = cal.divergences[0];
+  check('inversion names which side each order came from',
+    !!inv && /assumed replay order/.test(inv.assumedOrder || '')
+    && /game-observed order/.test(inv.observedOrder || ''),
+    inv ? `${inv.assumedOrder} vs ${inv.observedOrder}` : 'none');
+  check('inversion names both files',
+    !!inv && /Alpha_Units\.xml/.test(inv.assumedOrder || '')
+    && /Beta_Units\.xml/.test(inv.observedOrder || ''),
+    inv ? `${inv.assumedOrder} vs ${inv.observedOrder}` : 'none');
+  check('calibration never reorders its inputs', JSON.stringify(assumedFiles) === calBefore);
+  const calSame = calibrateLoadOrder(assumedFiles, parseModdingLog([
+    '[801.001] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/1111111111/Data/Alpha_Units.xml',
+    '[801.002] [Modding] UpdateDatabase - Loading D:/Synthetic/workshop/content/289070/2222222222/Data/Beta_Units.xml',
+  ].join('\n')));
+  check('matching order reports no divergences', calSame.divergences.length === 0,
+    `got ${calSame.divergences.length}`);
 
   destroyTempCopy(c1.tmpDir);
   check('source content unchanged', sha256(sourceDbPath) === beforeHash);
@@ -2350,6 +2937,16 @@ module.exports = {
   formatCollision,
   runProvenance,
   parseDatabaseLog,
+  resolveLogSourceMod,
+  attributeLogSources,
+  parseLogTimestampMs,
+  parseModdingLog,
+  hasUsableDbContext,
+  bracketErrorWithLoading,
+  attributeErrorWithFallback,
+  gameLoadSequence,
+  calibrateLoadOrder,
+  formatCalibration,
   normalizeDbMessage,
   dbMessagesMatch,
   collectReplayErrors,
