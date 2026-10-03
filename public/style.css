@@ -70,9 +70,19 @@ a.card:hover { border-color: var(--accent); }
 
 .panel { background: var(--panel); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
 .panel h2 { margin: 0 0 4px; font-size: 16px; }
+/* Sub-heads inside a panel (conflict sections, the move target): one step
+   below the 16px h2 in the same margin language, so the hierarchy reads
+   without measuring. */
+.panel h3 { margin: 14px 0 6px; font-size: 14px; }
 .panel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; flex-wrap: wrap; }
 .panel-actions { display: flex; gap: 8px; }
 .panel-actions button { padding: 6px 12px; font-size: 13px; }
+/* The replay head holds a label, a select and a button in one row. Centred
+   and wrapping, so the label cannot stretch into a detached-looking band
+   above the button, and the select drops to its own line on a phone instead
+   of pushing the row off the edge. */
+#page-conflicts .panel-actions { align-items: center; flex-wrap: wrap; }
+#page-conflicts .panel-actions select { min-width: 0; }
 
 .folders { display: flex; flex-direction: column; gap: 2px; }
 .folder {

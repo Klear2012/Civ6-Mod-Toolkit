@@ -24,8 +24,10 @@ const {
 } = require('./modsdb');
 const { gameStatus } = require('./game');
 const labelStore = require('./labels');
+const setupStore = require('./gamesetup');
 const loOrder = require('./loadorder');
 const shadowing = require('./shadowing');
+const packaging = require('./packaging');
 const conflictReplay = require('./phase9-conflict-replay');
 
 const { version: VERSION } = require('../package.json');
@@ -290,6 +292,56 @@ function labelPruneSet(list, running) {
   return list.ok && !running ? new Set(list.mods.map((m) => m.idNorm)) : null;
 }
 
+// -------- Assumed game setup ("I always play with X on") ----------------------
+//
+// GET /api/game-setup -> the option catalog mined from the library (rulesets,
+// game modes and config values actions actually gate on, each with its
+// gated-action count) plus the asserted options from game-setup.json.
+//
+// POST /api/game-setup { key, on } -> assert (on true) or withdraw (on false)
+// one option. POST /api/game-setup/clear -> withdraw every assertion.
+//
+// Like labels, and unlike every mod-database write, these are NEVER refused
+// while Civ6 runs: game-setup.json is a file the game has never heard of, and
+// the store only changes verdicts, never the game database. Refusing would
+// copy a rule whose reason does not apply.
+//
+// Every answer carries the refreshed state, so the panel updates in place
+// instead of refetching - the same shape the label writes use.
+
+// The catalog the panel offers: distinct setup options actually gating
+// library actions, mined at request time so the list can neither drift from
+// the library nor invent an option. Read-only open, like every other GET -
+// works while Civ6 runs. A missing database gates nothing: empty options with
+// a reason, never a failed request.
+function gameSetupCatalog() {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return { options: [], error: 'Mod database not found.' };
+  const db = loOrder.openDb(modsDb.path);
+  try {
+    return setupStore.buildCatalog(db);
+  } finally {
+    db.close();
+  }
+}
+
+// The known set a store read or write prunes against: only prune against a
+// catalog we could actually mine. An unvouched set prunes nothing, so a
+// missing database never costs assertions.
+function gameSetupKnown(catalog) {
+  if (!catalog || catalog.error) return null;
+  return new Set(catalog.options.map((o) => o.key));
+}
+
+function gameSetupResponse(view, catalog, game) {
+  return {
+    ok: true, game,
+    options: catalog.options, catalogError: catalog.error,
+    asserted: view.asserted, keys: view.keys,
+    error: view.error, unusable: !!view.unusable, pruned: view.pruned,
+  };
+}
+
 // -------- Conflict diagnosis (read-only reports) ----------------------------------
 //
 // Scope: the ACTIVE profile only. The shadowing backend scopes itself to the
@@ -327,6 +379,31 @@ function conflictShadowing(modsDbPath) {
       envelopeLine: shadowing.formatEnvelope(envelope),
       contested: results,
     };
+  } finally {
+    db.close();
+  }
+}
+
+// Static packaging findings over Mods.sqlite: files no action references,
+// actions loading one .sql file into the wrong database, mods sharing one
+// id, and database files the game skips. Scope is the ACTIVE profile's
+// enabled mods, in load order — the backend (packaging.js) scopes itself to
+// the active group internally, the same scoping as the shadowing report, so
+// a switched-off mod's findings never reach the page: switched off, it
+// cannot affect the game. The profile and the enabled count ride along so
+// the panel states its scope instead of implying the whole library.
+//
+// Read-only like every other GET: packaging opens Mods.sqlite read-only and
+// only lists mod folders, never writes, so it works while Civ6 runs. The
+// backend (packaging.js) is reused, not reimplemented; display names ride
+// along on every finding so the page renders names, never raw ids.
+function conflictPackaging(modsDbPath) {
+  const db = loOrder.openDb(modsDbPath);
+  try {
+    const profile = conflictActiveProfile(db);
+    const enabled = shadowing.enabledModRowIds(db, shadowing.activeGroupId(db));
+    const warnings = packaging.collectPackagingWarnings(db);
+    return { ok: true, profile, enabledMods: enabled ? enabled.size : null, warnings };
   } finally {
     db.close();
   }
@@ -490,6 +567,10 @@ function collectConflictModSet(db) {
   const byMod = new Map();
   const unreadable = [];
   let skippedNonDb = 0;
+  // Which enabled mods claim each database file path (ComponentFiles rows in
+  // the replay's own action scope). Calibration divergence rows name the
+  // owning mod(s) under each path, and a path two mods ship must list both.
+  const claimants = new Map();
   for (const c of comps) {
     const modId = modRow.get(c.modRowId);
     const dir = modDir.get(c.modRowId);
@@ -507,6 +588,10 @@ function collectConflictModSet(db) {
     for (const f of files) {
       const rel = String(f.rel || '').replace(/\\/g, '/');
       if (!/\.(sql|xml)$/i.test(rel)) { skippedNonDb += 1; continue; }
+      // Claimed whether or not its copy is readable: ownership is about the
+      // ComponentFiles row, not the disk state checked below.
+      if (!claimants.has(rel)) claimants.set(rel, new Set());
+      claimants.get(rel).add(modId);
       if (!dir) {
         unreadable.push({ modId, file: rel, reason: 'the mod folder is not on disk' });
         continue;
@@ -545,6 +630,7 @@ function collectConflictModSet(db) {
     gates: { enabled: installed.filter((id) => [...enabled].some((rowId) => modRow.get(rowId) === id)), installed },
     unreadable,
     skippedNonDb,
+    fileClaimants: [...claimants].map(([file, modIds]) => ({ file, modIds: [...modIds] })),
   };
 }
 
@@ -616,12 +702,61 @@ function readModdingLoadings() {
   }
 }
 
+// Collision rows name display names, never raw mod ids: winner/loser mods
+// resolve through the installed display-name index, falling back to the mod
+// id only when unresolvable (the mod-name-display fallback: the page renders
+// modName with renderCivText, never raw markup). Same-mod pairs (every loser
+// shares the winner's mod) are tagged and sort after cross-mod pairs; the
+// collision count and the envelope are untouched.
+function conflictCollisionDisplay(collisions, nameById) {
+  const rows = (collisions || []).map((c) => {
+    const winnerModId = c && c.winner ? c.winner.modId : null;
+    const sameMod = !!(c && c.winner && Array.isArray(c.losers) && c.losers.length
+      && c.losers.every((w) => w && w.modId === winnerModId));
+    return {
+      ...c,
+      winner: c && c.winner ? { ...c.winner, modName: conflictDisplayName(c.winner.modId, nameById) } : c && c.winner,
+      losers: ((c && c.losers) || []).map((w) => ({ ...w, modName: conflictDisplayName(w && w.modId, nameById) })),
+      sameMod,
+    };
+  });
+  // Stable: internal (same-mod) pairs after cross-mod pairs, replay order
+  // within each half.
+  rows.sort((a, b) => (a.sameMod ? 1 : 0) - (b.sameMod ? 1 : 0));
+  return rows;
+}
+
 // Log-pairing follow-up: every skipped/stopped file row names its mod the way
 // the mod manager shows it, resolved here so the page never renders a raw
 // mod id. Additive: modName rides alongside modId; unknown mods fall back to
 // the id itself (the mod-name-display fallback: render, never raw markup).
 function withModDisplayNames(rows, nameById) {
   return (rows || []).map((r) => ({ ...r, modName: conflictDisplayName(r && r.modId, nameById) }));
+}
+
+// Calibration divergence rows name the owning mod(s) under each path: the
+// claimant mod ids collected above, resolved to display names here so the
+// page renders names, never raw ids (mod-name-display fallback: the id
+// itself when unresolvable). Exact rel-path match first, then a basename
+// match mirroring the calibration's own basename pairing; a path two mods
+// ship lists both, deduped by mod id. Additive: assumedFirstMods /
+// assumedSecondMods ride alongside the existing divergence label fields.
+function conflictFileClaimants(fileClaimants, label, nameById) {
+  const norm = String(label == null ? '' : label).replace(/\\/g, '/');
+  const base = (norm.split('/').pop() || '').toLowerCase();
+  if (!base) return [];
+  const seen = new Set();
+  const out = [];
+  for (const c of fileClaimants || []) {
+    const rel = String((c && c.file) || '');
+    if (rel !== norm && (rel.split('/').pop() || '').toLowerCase() !== base) continue;
+    for (const id of (c && c.modIds) || []) {
+      if (id == null || seen.has(String(id))) continue;
+      seen.add(String(id));
+      out.push({ modId: id, modName: conflictDisplayName(id, nameById) });
+    }
+  }
+  return out;
 }
 
 // Log-pairing 3.1: thread per-row attribution onto the existing differential
@@ -701,6 +836,13 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
   if (!debugPath) {
     throw new Error('DebugGameplay.sqlite was not found (looked in the game Cache folder; set CIV6_DEBUG_GAMEPLAY to point at it)');
   }
+  // Assumed game setup ("I always play with X on"), same prune pattern as the
+  // setup routes: only prune against a catalog actually mined here, so a
+  // missing database never costs assertions. Read on every replay so toggling
+  // options moves live verdicts; an unreadable store reads as empty, never
+  // half-applied, per the store's failure contract.
+  const setupCatalog = gameSetupCatalog();
+  const setupView = setupStore.readSetup(setupStore.gameSetupFile(), gameSetupKnown(setupCatalog));
   const db = loOrder.openDb(modsDbPath);
   let collected;
   let scope;
@@ -722,7 +864,9 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
   try {
     report = conflictReplay.replayOrdered(tempDbPath, collected, {
       foreignKeys,
-      gates: scope.gates,
+      // Asserted values satisfy matching undecidable gates, flagged assumed
+      // in gate reporting - never presented as measured.
+      gates: { ...scope.gates, asserted: setupView.asserted },
       provenance: true,
     });
   } finally {
@@ -787,6 +931,13 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
       available: true, logPath: moddingPath,
       ...conflictReplay.calibrateLoadOrder(collected.files, loadings),
     };
+    // Owning mods under each divergence path, resolved server-side so the
+    // page never maps ids to names itself. Additive: the existing divergence
+    // label fields are untouched.
+    for (const dv of calibration.divergences || []) {
+      dv.assumedFirstMods = conflictFileClaimants(scope.fileClaimants, dv.assumedFirst, nameById);
+      dv.assumedSecondMods = conflictFileClaimants(scope.fileClaimants, dv.assumedSecond, nameById);
+    }
   }
 
   return {
@@ -802,11 +953,16 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
     skippedGated: report.skippedGated,
     envelope,
     envelopeLine: conflictReplay.formatReplayEnvelope(envelope),
-    collisions: report.provenance.collisions,
+    collisions: conflictCollisionDisplay(report.provenance.collisions, nameById),
     limitationFlags,
     stages: conflictStageTotals(collected),
     gatedOut: withModDisplayNames(report.gatedOut, nameById),
     gatedUnknown: withModDisplayNames(report.gatedUnknown, nameById),
+    gatedAssumed: withModDisplayNames(report.gatedAssumed, nameById),
+    // Statements that ran clean but matched nothing, named with display
+    // names like every other mod list. Additive: the replay core already
+    // flags them; this only carries them alongside, never renames.
+    zeroRows: withModDisplayNames(report.zeroRows, nameById),
     unreadable: withModDisplayNames(scope.unreadable, nameById),
     skippedNonDb: scope.skippedNonDb,
     perFile,
@@ -893,6 +1049,20 @@ async function handleApi(req, res, url) {
       return send(res, 200, await conflictReplayReport(modsDb.path, { foreignKeys: fk === 'on' }));
     } catch (e) {
       return send(res, 400, { error: e.message });
+    }
+  }
+
+  // GET /api/conflicts/packaging -> static packaging findings for the active
+  // profile's enabled mods, with display names on every finding. Cheap enough to run on
+  // click like the other two reports, and like them a GET only: there is
+  // deliberately no POST anywhere under /api/conflicts.
+  if (req.method === 'GET' && url.pathname === '/api/conflicts/packaging') {
+    const modsDb = paths.getModsDb();
+    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    try {
+      return send(res, 200, conflictPackaging(modsDb.path));
+    } catch (e) {
+      return send(res, 500, { error: e.message });
     }
   }
 
@@ -1208,6 +1378,49 @@ async function handleApi(req, res, url) {
       return send(res, 200, labelResponse(v, game));
     } catch (e) {
       return send(res, /no mod is labelled/.test(e.message) ? 404 : 500, { error: e.message });
+    }
+  }
+
+  // GET /api/game-setup -> the option catalog plus the asserted options.
+  // Read-only, like every other GET: works while Civ6 runs.
+  if (req.method === 'GET' && url.pathname === '/api/game-setup') {
+    const catalog = gameSetupCatalog();
+    const view = setupStore.readSetup(setupStore.gameSetupFile(), gameSetupKnown(catalog));
+    return send(res, 200, gameSetupResponse(view, catalog, await gameStatus()));
+  }
+
+  // POST /api/game-setup { key, on } -> assert (on true) or withdraw (on
+  // false) one option. The key is an exact catalog key (KIND:value); anything
+  // else is a 400 about the request. A store file the toolkit can no longer
+  // read is a 500 about ours: the store refuses to build on it rather than
+  // overwrite whatever it holds, and the message says so.
+  if (req.method === 'POST' && url.pathname === '/api/game-setup') {
+    const body = await readBody(req);
+    let key;
+    try {
+      key = setupStore.cleanKey(body.key);
+    } catch (e) {
+      return send(res, 400, { error: e.message });
+    }
+    if (typeof body.on !== 'boolean') return send(res, 400, { error: 'on must be true or false' });
+    const catalog = gameSetupCatalog();
+    try {
+      const view = setupStore.setOption(setupStore.gameSetupFile(), key, body.on, gameSetupKnown(catalog));
+      return send(res, 200, gameSetupResponse(view, catalog, await gameStatus()));
+    } catch (e) {
+      return send(res, 500, { error: e.message });
+    }
+  }
+
+  // POST /api/game-setup/clear -> withdraw every assertion. The file stays,
+  // asserting nothing - the same state deleting it reads as.
+  if (req.method === 'POST' && url.pathname === '/api/game-setup/clear') {
+    const catalog = gameSetupCatalog();
+    try {
+      const view = setupStore.clearSetup(setupStore.gameSetupFile(), gameSetupKnown(catalog));
+      return send(res, 200, gameSetupResponse(view, catalog, await gameStatus()));
+    } catch (e) {
+      return send(res, 500, { error: e.message });
     }
   }
 
@@ -1683,6 +1896,7 @@ function conflictSelfcheckSeed(dir) {
   fsSc.writeFileSync(modinfoB, '<Mod></Mod>');
   fsSc.writeFileSync(pathSc.join(modsDir, 'ModA', 'data', 'a.sql'), "UPDATE ProvCheck SET Value = 1 WHERE Id = 'hero';\n");
   fsSc.writeFileSync(pathSc.join(modsDir, 'ModA', 'data', 'gated.sql'), "INSERT INTO ProvCheck VALUES('gated', 7);\n");
+  fsSc.writeFileSync(pathSc.join(modsDir, 'ModA', 'data', 'setup.sql'), 'CREATE TABLE SetupGated(Id TEXT);\nINSERT INTO SetupGated VALUES(\'s1\');\n');
   fsSc.writeFileSync(pathSc.join(modsDir, 'ModB', 'data', 'b.sql'), "UPDATE ProvCheck SET Value = 2 WHERE Id = 'hero';\n");
   fsSc.writeFileSync(pathSc.join(modsDir, 'ModB', 'data', 'bad1.sql'), 'INSERT INTO NoSuchB1 VALUES(1);\n');
   fsSc.writeFileSync(pathSc.join(modsDir, 'ModB', 'data', 'bad2.sql'), 'INSERT INTO NoSuchB2 VALUES(1);\n');
@@ -1735,6 +1949,7 @@ function conflictSelfcheckSeed(dir) {
   // DB files: A(100) writes hero=1, B(200) writes hero=2, so B wins in order.
   addAction(mA, 'UpdateDatabase', 'GoodA', ['data/a.sql'], { LoadOrder: '100' });
   const gatedCr = addAction(mA, 'UpdateDatabase', 'GatedA', ['data/gated.sql']);
+  const setupCr = addAction(mA, 'UpdateDatabase', 'SetupA', ['data/setup.sql']);
   addAction(mA, 'UpdateDatabase', 'MissA', ['data/missing.sql']);
   addAction(mB, 'UpdateDatabase', 'GoodB', ['data/b.sql'], { LoadOrder: '200' });
   addAction(mB, 'UpdateDatabase', 'BadB1', ['data/bad1.sql']);
@@ -1744,6 +1959,12 @@ function conflictSelfcheckSeed(dir) {
   w.prepare('INSERT INTO Criterion (CriterionRowId, CriteriaRowId, CriterionType, Inverse) VALUES (1, 1, ?, 0)').run('ModInUse');
   w.prepare("INSERT INTO CriterionProperties (CriterionRowId, Name, Value) VALUES (1, 'Value', ?)").run(GONE);
   w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, 1)').run(gatedCr);
+  // SetupA runs only with RULESET_STANDARD asserted: undecidable with nothing
+  // asserted (replays, flagged unknown), assumed-satisfied once asserted.
+  w.prepare('INSERT INTO Criteria (CriteriaRowId, ModRowId, CriteriaId, Any) VALUES (2, ?, ?, 0)').run(mA, 'SetupGate');
+  w.prepare('INSERT INTO Criterion (CriterionRowId, CriteriaRowId, CriterionType, Inverse) VALUES (2, 2, ?, 0)').run('RuleSetInUse');
+  w.prepare("INSERT INTO CriterionProperties (CriterionRowId, Name, Value) VALUES (2, 'Value', ?)").run('RULESET_STANDARD');
+  w.prepare('INSERT INTO ComponentCriteria (ComponentRowId, CriteriaRowId) VALUES (?, 2)').run(setupCr);
   w.close();
 
   const debugDb = pathSc.join(dir, 'DebugGameplay.sqlite');
@@ -1786,6 +2007,10 @@ async function runConflictSelfcheck() {
   process.env.CIV6_DEBUG_GAMEPLAY = fx.debugDb;
   process.env.CIV6_DATABASE_LOG = fx.logPath;
   process.env.CIV6_MODDING_LOG = fx.moddingPath;
+  // Hermetic game setup: the replay report reads game-setup.json on every run,
+  // so point it at a scratch file (absent = nothing asserted) rather than any
+  // repo file a developer may have left behind.
+  process.env.CIV6_GAMESETUP_FILE = pathSc.join(scratch, 'game-setup.json');
 
   // Learn the exact replay error text first (in-process, same code the route
   // calls), so the fixture Database.log carries one matching error plus one
@@ -1879,6 +2104,45 @@ async function runConflictSelfcheck() {
     && col.winner.modId.toLowerCase() === fx.MOD_B.toLowerCase() && col.winner.fileLabel === 'data/b.sql'
     && col.losers.length === 1 && col.losers[0].modId.toLowerCase() === fx.MOD_A.toLowerCase()
     && col.losers[0].fileLabel === 'data/a.sql', col ? JSON.stringify(col) : 'none');
+  // Collision display names (readability): winner/loser mods resolve through
+  // the installed display-name index with mod-id fallback, same-mod pairs
+  // tag and sort after cross-mod pairs, counts and envelope untouched.
+  // In-process over the mapping itself: no fixture change, no new DB rows.
+  {
+    const byId = new Map([[fx.MOD_A, 'Alpha Mod'], [fx.MOD_B, 'Beta Mod']]);
+    const cross = {
+      table: 'T', pk: 'k', column: 'V', writes: 2, fidelityLimited: [],
+      winner: { modId: fx.MOD_B, fileLabel: 'b.sql', stmtIndex: 0, globalIndex: 1 },
+      losers: [{ modId: fx.MOD_A, fileLabel: 'a.sql', stmtIndex: 0, globalIndex: 0 }],
+    };
+    const inner = {
+      table: 'T', pk: 'k2', column: 'V', writes: 2, fidelityLimited: [],
+      winner: { modId: fx.MOD_A, fileLabel: 'a2.sql', stmtIndex: 1, globalIndex: 3 },
+      losers: [{ modId: fx.MOD_A, fileLabel: 'a1.sql', stmtIndex: 0, globalIndex: 2 }],
+    };
+    const ghost = {
+      table: 'T', pk: 'k3', column: 'V', writes: 2, fidelityLimited: [],
+      winner: { modId: 'missing-mod-id', fileLabel: 'g.sql', stmtIndex: 0, globalIndex: 5 },
+      losers: [{ modId: fx.MOD_A, fileLabel: 'a.sql', stmtIndex: 0, globalIndex: 4 }],
+    };
+    const shown = conflictCollisionDisplay([inner, cross, ghost], byId);
+    check('collision winner/loser carry display names, never bare ids',
+      shown.every((c) => typeof c.winner.modName === 'string' && typeof c.losers[0].modName === 'string')
+      && shown.some((c) => c.winner.modName === 'Beta Mod')
+      && shown.some((c) => c.losers[0].modName === 'Alpha Mod'),
+      JSON.stringify(shown.map((c) => [c.winner.modName, c.losers[0].modName])));
+    check('unresolvable mods fall back to the mod id',
+      shown.some((c) => c.winner.modName === 'missing-mod-id'),
+      JSON.stringify(shown.map((c) => c.winner.modName)));
+    check('same-mod pairs tag and sort after cross-mod pairs',
+      shown[shown.length - 1].sameMod === true && shown[shown.length - 1].table === 'T'
+      && shown[0].sameMod === false && shown[1].sameMod === false
+      && shown.filter((c) => !c.sameMod).length === 2,
+      JSON.stringify(shown.map((c) => c.sameMod)));
+    check('the live route response already carries names and the tag',
+      col && typeof col.winner.modName === 'string' && typeof col.losers[0].modName === 'string'
+      && col.sameMod === false, col ? JSON.stringify({ winner: col.winner, sameMod: col.sameMod }) : 'none');
+  }
   const pf = new Map((rp.body.perFile || []).map((f) => [f.fileLabel, f]));
   check('bad files aborted with their errors',
     pf.get('data/bad1.sql').status === 'aborted' && pf.get('data/bad2.sql').status === 'aborted'
@@ -1910,6 +2174,37 @@ async function runConflictSelfcheck() {
     && /data\/a\.sql/.test(inv.assumedFirst || '') && /data\/b\.sql/.test(inv.assumedSecond || '')
     && /assumed replay order/.test(inv.assumedOrder || '') && /game-observed order/.test(inv.observedOrder || ''),
     JSON.stringify(cal.divergences));
+  // Divergence owning mods (polish): each divergence file resolves
+  // server-side to its claiming mod(s) with display names - data/a.sql is
+  // Mod A's file, data/b.sql Mod B's.
+  const firstMods = inv.assumedFirstMods || [];
+  const secondMods = inv.assumedSecondMods || [];
+  check('divergence files resolve to their owning mods with display names',
+    firstMods.length === 1 && String(firstMods[0].modId).toLowerCase() === fx.MOD_A.toLowerCase()
+    && typeof firstMods[0].modName === 'string' && firstMods[0].modName.length > 0
+    && secondMods.length === 1 && String(secondMods[0].modId).toLowerCase() === fx.MOD_B.toLowerCase()
+    && typeof secondMods[0].modName === 'string' && secondMods[0].modName.length > 0,
+    JSON.stringify({ first: firstMods, second: secondMods }));
+  {
+    // The lookup itself, in-process with no fixture change: a path two mods
+    // ship lists both with display names, deduped; basename fallback mirrors
+    // the calibration's own basename pairing; unknown paths resolve empty.
+    const byId = new Map([[fx.MOD_A, 'Alpha Mod'], [fx.MOD_B, 'Beta Mod']]);
+    const fake = [
+      { file: 'data/shared.sql', modIds: [fx.MOD_A, fx.MOD_B, fx.MOD_A] },
+      { file: 'other/shared.sql', modIds: [fx.MOD_B] },
+    ];
+    const both = conflictFileClaimants(fake, 'data/shared.sql', byId);
+    check('a path two mods ship lists both with display names',
+      both.length === 2 && both[0].modName === 'Alpha Mod' && both[1].modName === 'Beta Mod',
+      JSON.stringify(both));
+    const byBase = conflictFileClaimants([{ file: 'data/only.sql', modIds: [fx.MOD_A] }], 'elsewhere/only.sql', byId);
+    check('basename fallback mirrors the calibration pairing',
+      byBase.length === 1 && byBase[0].modName === 'Alpha Mod', JSON.stringify(byBase));
+    check('unknown paths resolve to an empty list, never a bare id',
+      conflictFileClaimants(fake, 'data/nowhere.sql', byId).length === 0
+      && conflictFileClaimants([], 'data/shared.sql', byId).length === 0, 'empty');
+  }
   {
     // Display mapping runs in a stubbed-DOM vm (phase7 precedent): the page
     // script only needs $, esc/n/renderCivText, api/toast, and pages to load.
@@ -1934,6 +2229,22 @@ async function runConflictSelfcheck() {
       typeof calHtml === 'string' && /data\/a\.sql/.test(calHtml) && /data\/b\.sql/.test(calHtml)
       && /assumed replay order/.test(calHtml) && /game-observed order/.test(calHtml),
       String(calHtml).slice(0, 200));
+    const calOwnHtml = vmSc.runInContext(`cfCalibrationHtml(${JSON.stringify({ available: true, divergences: [{
+      assumedFirst: 'data/a.sql', assumedSecond: 'data/b.sql',
+      assumedOrder: 'data/a.sql before data/b.sql (assumed replay order)',
+      observedOrder: 'data/b.sql before data/a.sql (game-observed order)',
+      assumedFirstMods: [{ modId: 'mid-a', modName: 'Green A' }],
+      assumedSecondMods: [{ modId: 'mid-b', modName: 'Plain B' }, { modId: 'mid-c', modName: 'Plain C' }],
+    }] })})`, cfCx);
+    check('display mapping shows owning mods under each divergence file, all claimants',
+      typeof calOwnHtml === 'string' && /Green A/.test(calOwnHtml) && /Plain B/.test(calOwnHtml)
+      && /Plain C/.test(calOwnHtml) && !/mid-a|mid-b|mid-c/.test(calOwnHtml),
+      String(calOwnHtml).slice(0, 200));
+    const calNoOwnHtml = vmSc.runInContext(
+      'cfCalibrationHtml({ available: true, divergences: [{ assumedFirst: "x.sql", assumedSecond: "y.sql", assumedOrder: "x before y", observedOrder: "y before x", assumedFirstMods: [], assumedSecondMods: [] }] })', cfCx);
+    check('display mapping states unowned files in plain words',
+      typeof calNoOwnHtml === 'string' && /owning mod unknown/.test(calNoOwnHtml),
+      String(calNoOwnHtml).slice(0, 160));
     const calZeroHtml = vmSc.runInContext(
       'cfCalibrationHtml({ available: true, divergences: [], assumedOnly: [], observedOnly: [] })', cfCx);
     check('display mapping states the zero-divergence case',
@@ -1944,6 +2255,76 @@ async function runConflictSelfcheck() {
     `status=${rpOn.status} fkMode=${rpOn.body && rpOn.body.fkMode}`);
   const rpBad = await get('/api/conflicts/replay?fk=sideways');
   check('bad fk is a 400 about the request', rpBad.status === 400 && !!rpBad.body.error, `status=${rpBad.status}`);
+
+  console.log('\nAssumed game setup feeds replay gates (game-setup micro-fix)');
+  {
+    // End to end through the route: the fixture gates data/setup.sql on
+    // RULESET_STANDARD, which nothing can measure here. Asserting it must move
+    // the live replay verdict to assumed; withdrawing it must move it back.
+    const setupKey = 'RULESET:RULESET_STANDARD';
+    const setupFile = process.env.CIV6_GAMESETUP_FILE;
+    const setupOf = (body) => ((body && body.perFile) || []).find((f) => f.fileLabel === 'data/setup.sql');
+    const rpPlain = await get('/api/conflicts/replay?fk=off');
+    const plainRec = setupOf(rpPlain.body);
+    check('with nothing asserted the setup-gated file replays undecided, never assumed',
+      rpPlain.status === 200 && plainRec && plainRec.status === 'committed'
+      && plainRec.gate && plainRec.gate.willRun === null && !plainRec.gate.assumed
+      && ((rpPlain.body.gatedAssumed || []).length === 0),
+      JSON.stringify(plainRec && plainRec.gate));
+    // Same prune pattern as the setup routes: assert against the mined catalog.
+    setupStore.setOption(setupFile, setupKey, true, gameSetupKnown(gameSetupCatalog()));
+    const rpAssumed = await get('/api/conflicts/replay?fk=off');
+    const assumedRec = setupOf(rpAssumed.body);
+    check('with the ruleset asserted the gated file replays as assumed, not measured',
+      rpAssumed.status === 200 && assumedRec && assumedRec.status === 'committed'
+      && assumedRec.gate && assumedRec.gate.willRun === true && assumedRec.gate.assumed === true,
+      JSON.stringify(assumedRec && assumedRec.gate));
+    const namedAssumed = (rpAssumed.body.gatedAssumed || []).find((g) => g.fileLabel === 'data/setup.sql');
+    check('the payload names it in gatedAssumed with a display name',
+      !!namedAssumed && typeof namedAssumed.modName === 'string' && namedAssumed.modName.length > 0,
+      JSON.stringify(namedAssumed));
+    {
+      // The gated list marks it: render the live payload headless through the
+      // real page script with a capturing $ (phase7 precedent).
+      const vmA = require('vm');
+      const cfSrcA = fsSc.readFileSync(pathSc.join(__dirname, '..', 'public', 'conflicts.js'), 'utf8');
+      const capA = {};
+      const capElA = () => ({ addEventListener() {}, disabled: false, textContent: '', innerHTML: '', value: 'off' });
+      const cfCxA = {
+        console,
+        esc: (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+          { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])),
+        n: (v) => (v == null ? '' : Number(v).toLocaleString()),
+        renderCivText: (s) => String(s == null ? '' : s),
+        $: (id) => (capA[id] || (capA[id] = capElA())),
+        api: async () => ({}),
+        toast: () => {},
+        pages: {},
+      };
+      vmA.createContext(cfCxA);
+      vmA.runInContext(cfSrcA, cfCxA, { filename: 'conflicts.js' });
+      vmA.runInContext(`cfState.replay = ${JSON.stringify(rpAssumed.body)}`, cfCxA);
+      vmA.runInContext('cfRenderReplay()', cfCxA);
+      const gatedHtml = capA.cfReplayGated && capA.cfReplayGated.innerHTML;
+      check('the gated list marks the assumed file with the view tag language, never as measured',
+        typeof gatedHtml === 'string' && /data\/setup\.sql/.test(gatedHtml) && /lo-assumed/.test(gatedHtml)
+        && /assumed setup/.test(gatedHtml),
+        String(gatedHtml).slice(0, 300));
+      vmA.runInContext(`cfState.replay = ${JSON.stringify(rpPlain.body)}`, cfCxA);
+      vmA.runInContext('cfRenderReplay()', cfCxA);
+      const plainHtml = capA.cfReplayGated && capA.cfReplayGated.innerHTML;
+      check('with nothing asserted the gated list carries no assumed marker',
+        typeof plainHtml === 'string' && !/assum/i.test(plainHtml),
+        String(plainHtml).slice(0, 200));
+    }
+    setupStore.setOption(setupFile, setupKey, false, gameSetupKnown(gameSetupCatalog()));
+    const rpBack = await get('/api/conflicts/replay?fk=off');
+    const backRec = setupOf(rpBack.body);
+    check('withdrawing the assertion returns the file to undecided',
+      rpBack.status === 200 && backRec && backRec.gate && backRec.gate.willRun === null && !backRec.gate.assumed
+      && ((rpBack.body.gatedAssumed || []).length === 0),
+      JSON.stringify(backRec && backRec.gate));
+  }
 
   console.log('\nDebugGameplay candidates (Local Cache fallback)');
   {

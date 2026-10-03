@@ -52,8 +52,19 @@ function stateBadge(a) {
   return '';
 }
 
+// Rows decided by assertion carry the verdict's assumed flag, and read
+// differently from measured rows by construction: measured rows never carry
+// it, so loAssumedTag is empty for them and their HTML is byte-identical
+// with nothing asserted. The tag says what it is in the same short language
+// as the other tags ("changed by you", "can't be kept safe"); the title
+// says what to do next.
+function loAssumedTag(a) {
+  if (!a || !a.assumed) return '';
+  return '<span class="lo-tag lo-assumed" title="Decided by your asserted game setup, never measured — change it in the game-setup panel">assumed setup</span>';
+}
+
 function conditionLine(a) {
-  if (a.willRun === false) return `<span class="lo-cond lo-off">not run &mdash; ${renderCivText(a.reason)}</span>`;
+  if (a.willRun === false) return `<span class="lo-cond lo-off">not run &mdash; ${renderCivText(a.reason)}</span>${loAssumedTag(a)}`;
   if (a.willRun === null && a.unknown && a.unknown.length) {
     // Name the first thing it could not decide, and say how many others there
     // are. Showing only the first reads as "this is the one thing", which is a
@@ -118,6 +129,10 @@ function actionRow(a) {
   if (a.inCompare === false) bits.push('<span class="lo-diff lo-diff-rm">not in the compared profile</span>');
   if (a.inCompare === true) bits.push('<span class="lo-diff lo-diff-same">in both profiles</span>');
   if (a.willRun !== true) bits.push(conditionLine(a));
+  // Will-run rows have no condition line, so an assumed run would read as a
+  // measured run without its own marker. (Assumed not-run rows carry it in
+  // conditionLine above; undecided rows are never assumed.)
+  if (a.willRun === true && a.assumed) bits.push(loAssumedTag(a));
   if (a.override) {
     bits.push(stateBadge(a));
     if (a.state === 'drifted') {

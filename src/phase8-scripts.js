@@ -338,7 +338,438 @@ console.log('\nTest 8: differential grouped by mod, searchable, hideable (log-pa
   }
 }
 
+console.log('\nTest 9: conflicts readability (toggle layout, heading, stacked divergences, collision names)');
+{
+  // Same stubbed-DOM harness as Tests 7/8: the real conflicts.js render path
+  // headless, plus index.html source checks for the layout-only fixes.
+  const cfSrc9 = fs.readFileSync(path.join(PUB, 'conflicts.js'), 'utf8');
+  const escStub9 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const renderStub9 = (s) => escStub9(String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ''));
+  const els9 = {};
+  const dollarStub9 = (id) => {
+    if (!els9[id]) els9[id] = { textContent: '', innerHTML: '', disabled: false, value: 'off', checked: false, addEventListener() {} };
+    return els9[id];
+  };
+  let cx9 = null;
+  let cxErr9 = '';
+  try {
+    cx9 = vm.createContext({ $: dollarStub9, pages: {}, n: (v) => (v == null ? '' : Number(v).toLocaleString()),
+      esc: escStub9, renderCivText: renderStub9,
+      stripCivText: (s) => String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ' ').replace(/\s+/g, ' ').trim(),
+      api: async () => ({ ok: true }), toast() {}, window: {} });
+    vm.runInContext(cfSrc9, cx9, { filename: 'conflicts.js' });
+  } catch (e) { cxErr9 = e.message; }
+  check('the conflicts script loads headless under stubs', cx9 !== null, cxErr9);
+  if (cx9) {
+    const run9 = (expr) => vm.runInContext(expr, cx9);
+    const whoNamed = run9('cfWhoHtml({ modId: "guid-winner-1", modName: "[COLOR_GREEN]Winner Mod[ENDCOLOR]", fileLabel: "w.sql", stmtIndex: 2 })');
+    check('collision rows render the display name, never the mod id',
+      /Winner Mod/.test(whoNamed) && !/guid-winner-1/.test(whoNamed) && !/\[COLOR/i.test(whoNamed), whoNamed);
+    const whoFallback = run9('cfWhoHtml({ modId: "guid-unknown-9", fileLabel: "g.sql", stmtIndex: 0 })');
+    check('  with mod-id fallback only when unresolvable', /guid-unknown-9/.test(whoFallback), whoFallback);
+    const sameTag = run9('cfCollisionHtml({ table: "T", pk: "k", column: "V", writes: 2, sameMod: true, fidelityLimited: [], winner: { modId: "m", modName: "Same Mod", fileLabel: "a.sql", stmtIndex: 0 }, losers: [] })');
+    check('same-mod pairs carry the same-mod tag', /same mod/.test(sameTag), sameTag.slice(0, 200));
+    const crossTag = run9('cfCollisionHtml({ table: "T", pk: "k", column: "V", writes: 2, sameMod: false, fidelityLimited: [], winner: { modId: "m", modName: "M", fileLabel: "a.sql", stmtIndex: 0 }, losers: [] })');
+    check('  and cross-mod pairs carry none', !/same mod/.test(crossTag));
+    run9('cfState.replay = {"ok":true,"envelopeLine":"env","fkMode":"off","profile":{"name":"P"},"limitationFlags":[],"unreadable":[],"skippedGated":0,"collisions":[{"table":"CrossT","pk":"k","column":"V","writes":2,"sameMod":false,"fidelityLimited":[],"winner":{"modId":"guid-cross-w","modName":"Cross Winner","fileLabel":"w.sql","stmtIndex":0},"losers":[{"modId":"guid-cross-l","modName":"Cross Loser","fileLabel":"l.sql","stmtIndex":0}]},{"table":"SameT","pk":"k","column":"V","writes":2,"sameMod":true,"fidelityLimited":[],"winner":{"modId":"guid-same-w","modName":"Same Winner","fileLabel":"w2.sql","stmtIndex":1},"losers":[{"modId":"guid-same-w","modName":"Same Winner","fileLabel":"w1.sql","stmtIndex":0}]}],"gatedOut":[],"gatedUnknown":[],"perFile":[],"differential":{"available":false,"reason":"no log"}}');
+    run9('cfRenderReplay()');
+    const colHtml9 = els9.cfReplayCollisions.innerHTML;
+    check('replay rows name mods, never raw ids',
+      /Cross Winner/.test(colHtml9) && /Same Winner/.test(colHtml9) && /Cross Loser/.test(colHtml9)
+      && !/guid-cross-w|guid-cross-l|guid-same-w/.test(colHtml9), colHtml9.slice(0, 200));
+    check('the client keeps server order: same-mod rows render after cross-mod rows',
+      colHtml9.indexOf('CrossT') >= 0 && colHtml9.indexOf('CrossT') < colHtml9.indexOf('SameT')
+      && /same mod/.test(colHtml9.slice(colHtml9.indexOf('SameT'))));
+    const divHtml9 = run9('cfCalibrationHtml({ available: true, divergences: [{ assumedFirst: "m/a.sql", assumedSecond: "m/b.sql", assumedOrder: "m/a.sql before m/b.sql (assumed replay order)", observedOrder: "m/b.sql before m/a.sql (game-observed order)" }] })');
+    check('divergence keeps the same content', /m\/a\.sql/.test(divHtml9) && /m\/b\.sql/.test(divHtml9)
+      && /assumed replay order/.test(divHtml9) && /game-observed order/.test(divHtml9), divHtml9.slice(0, 200));
+    check('divergence rows stack: pair on its own line, no side-by-side columns',
+      /lo-bandhead/.test(divHtml9) && !/<span class="lo-mod">order differs/.test(divHtml9));
+  }
+  {
+    // Layout-only fixes live in index.html: assert structure, not pixels.
+    const html9 = fs.readFileSync(path.join(PUB, 'index.html'), 'utf8');
+    check('the differential section is headed Log pairing report',
+      /<h3>Log pairing report<\/h3>/.test(html9) && !/Game log vs replay/.test(html9));
+    const hideAt9 = html9.indexOf('id="cfHideUnattributed"');
+    const noteAt9 = html9.indexOf('id="cfDiffNote"');
+    check('the hidden-count note sits under the toggle row, not beside it',
+      hideAt9 >= 0 && noteAt9 > hideAt9 && /<\/div>/.test(html9.slice(hideAt9, noteAt9)));
+    check('toggle and note keep their styling classes',
+      /<label class="toggle"[^>]*><input[^>]*id="cfHideUnattributed"/.test(html9)
+      && /<div class="meta" id="cfDiffNote"><\/div>/.test(html9));
+  }
+}
+
+console.log('\nTest 10: conflicts polish batch (FK placement, divergence mods, heading sizes)');
+{
+  // Fix 1: the missing-references control lives in the replay panel-head row
+  // beside Run replay (not above the panel), labelled as what-to-do-next.
+  const html10 = fs.readFileSync(path.join(PUB, 'index.html'), 'utf8');
+  const css10 = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  check('the FK control is labelled how-to-handle in plain words',
+    /<label class="meta" for="cfFkMode">How to handle missing references<\/label>/.test(html10));
+  const headAt10 = html10.indexOf('DB collision replay');
+  const fkAt10 = html10.indexOf('id="cfFkMode"');
+  const runAt10 = html10.indexOf('id="cfRunReplay"');
+  check('the FK select sits in the panel-head row beside Run replay',
+    headAt10 >= 0 && fkAt10 > headAt10 && runAt10 > fkAt10
+    && /<\/div>\s*<\/div>\s*<div class="panel-body">/.test(html10.slice(runAt10, runAt10 + 400)));
+  const fkSel10 = html10.slice(fkAt10, html10.indexOf('</select>', fkAt10));
+  check('Off stays the game-like default, On the strict comparison',
+    /<option value="off">Off — game-like: skip past missing references<\/option>/.test(fkSel10)
+    && /<option value="on">On — strict: stop each file at the first missing reference<\/option>/.test(fkSel10));
+  check('the FK tooltip answers what-to-do-next',
+    /Leave Off to replay like the game/.test(fkSel10) && /Switch On for a strict comparison/.test(fkSel10));
+  check('the replay head row centres and wraps instead of floating detached',
+    /#page-conflicts \.panel-actions \{[^}]*align-items:\s*center[^}]*flex-wrap:\s*wrap/.test(css10));
+}
+{
+  // Fix 2: divergence rows name owning mods, resolved server-side.
+  const cfSrc10 = fs.readFileSync(path.join(PUB, 'conflicts.js'), 'utf8');
+  const escStub10 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const renderStub10 = (s) => escStub10(String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ''));
+  const els10 = {};
+  const dollarStub10 = (id) => {
+    if (!els10[id]) els10[id] = { textContent: '', innerHTML: '', disabled: false, value: 'off', checked: false, addEventListener() {} };
+    return els10[id];
+  };
+  let cx10 = null;
+  let cxErr10 = '';
+  try {
+    cx10 = vm.createContext({ $: dollarStub10, pages: {}, n: (v) => (v == null ? '' : Number(v).toLocaleString()),
+      esc: escStub10, renderCivText: renderStub10,
+      stripCivText: (s) => String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ' ').replace(/\s+/g, ' ').trim(),
+      api: async () => ({ ok: true }), toast() {}, window: {} });
+    vm.runInContext(cfSrc10, cx10, { filename: 'conflicts.js' });
+  } catch (e) { cxErr10 = e.message; }
+  check('the conflicts script loads headless under stubs', cx10 !== null, cxErr10);
+  if (cx10) {
+    const run10 = (expr) => vm.runInContext(expr, cx10);
+    const divHtml10 = run10('cfCalibrationHtml({ available: true, divergences: [{ assumedFirst: "data/a.sql", assumedSecond: "data/b.sql", assumedOrder: "data/a.sql before data/b.sql (assumed replay order)", observedOrder: "data/b.sql before data/a.sql (game-observed order)", assumedFirstMods: [{ modId: "guid-a", modName: "[COLOR_GREEN]Alpha Mod[ENDCOLOR]" }], assumedSecondMods: [{ modId: "guid-b", modName: "Beta Mod" }, { modId: "guid-c", modName: "Gamma Mod" }] }] })');
+    check('each divergence file names its owning mod(s) with no bracket tags',
+      /Alpha Mod/.test(divHtml10) && /Beta Mod/.test(divHtml10) && /Gamma Mod/.test(divHtml10)
+      && !/\[COLOR/i.test(divHtml10) && !/ENDCOLOR/i.test(divHtml10), divHtml10.slice(0, 300));
+    check('multi-claimant files list every claimant, never a raw mod id',
+      /Beta Mod, Gamma Mod/.test(divHtml10) && !/guid-a|guid-b|guid-c/.test(divHtml10));
+    check('unowned files state so in plain words',
+      /owning mod unknown/.test(run10('cfCalibrationFileHtml("x.sql", [])')));
+    check('ownership tooltips answer what-to-do-next',
+      /open it there/.test(divHtml10));
+  }
+  // Server side stays additive: existing divergence labels untouched, the mod
+  // lists ride alongside via a ComponentFiles-claimant lookup.
+  const srv10 = fs.readFileSync(path.join(PUB, '..', 'src', 'server.js'), 'utf8');
+  check('divergence mods resolve server-side and additively',
+    /assumedFirstMods/.test(srv10) && /assumedSecondMods/.test(srv10)
+    && /ComponentFiles/.test(srv10) && /fileClaimants/.test(srv10));
+}
+{
+  // Fix 3: panel sub-heads sit one step below the 16px h2.
+  const css10b = fs.readFileSync(path.join(PUB, 'style.css'), 'utf8');
+  const html10b = fs.readFileSync(path.join(PUB, 'index.html'), 'utf8');
+  const h3rule = /\.panel h3 \{[^}]*font-size:\s*(\d+(?:\.\d+)?)px/.exec(css10b);
+  check('a .panel h3 rule exists, smaller than the 16px h2',
+    !!h3rule && Number(h3rule[1]) < 16, h3rule ? `${h3rule[1]}px` : 'no rule');
+  check('the replay sub-heads stay h3 under the panel h2',
+    /<h2>DB collision replay/.test(html10b)
+    && /<h3>Files the replay skipped or stopped on<\/h3>/.test(html10b)
+    && /<h3>Log pairing report<\/h3>/.test(html10b));
+  check('the audited override sub-head stays h3 under the same rule',
+    /<h3>Where to put it<\/h3>/.test(html10b));
+}
+
+console.log('\nTest 11: assumed-setup verdicts read distinctly in the load-order list (game-setup 3.1)');
+{
+  // Same stubbed-DOM harness as Tests 7-10: the real loadorder.js render path
+  // headless. Rows decided by assertion carry `assumed` from the verdict API
+  // (src/loadorder.js task 2.1); measured rows never do.
+  const loSrc11 = fs.readFileSync(path.join(PUB, 'loadorder.js'), 'utf8');
+  const escStub11 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const renderStub11 = (s) => escStub11(String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ''));
+  const dollarStub11 = () => ({ addEventListener() {} });
+  let cx11 = null;
+  let cxErr11 = '';
+  try {
+    cx11 = vm.createContext({ $: dollarStub11, pages: {}, n: (v) => (v == null ? '' : Number(v).toLocaleString()),
+      esc: escStub11, renderCivText: renderStub11,
+      stripCivText: (s) => String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ' ').replace(/\s+/g, ' ').trim(),
+      api: async () => ({ ok: true }), toast() {}, window: {} });
+    vm.runInContext(loSrc11, cx11, { filename: 'loadorder.js' });
+  } catch (e) { cxErr11 = e.message; }
+  check('the load-order script loads headless under stubs', cx11 !== null, cxErr11);
+  if (cx11) {
+    const run11 = (expr) => vm.runInContext(expr, cx11);
+    const measured11 = (over) => Object.assign({
+      modId: null, modName: 'M', componentRowId: null, type: 'UpdateDatabase',
+      override: null, state: 'author default', misspelled: false, protected: true,
+      willRun: true, reason: null, unknown: [], assumed: false, inCompare: null,
+    }, over);
+    const runHtml11 = run11(`actionRow(${JSON.stringify(measured11({ willRun: true, assumed: true }))})`);
+    check('an assumed will-run row carries the marker',
+      /assumed setup/.test(runHtml11) && /lo-assumed/.test(runHtml11), runHtml11.slice(0, 200));
+    check('  with what-to-do-next wording, never a bare label',
+      /title="/.test(runHtml11) && /game-setup/.test(runHtml11), runHtml11.slice(0, 300));
+    const offHtml11 = run11(`conditionLine(${JSON.stringify({ willRun: false, reason: 'needs X', assumed: true, unknown: [] })})`);
+    check('an assumed not-run row carries the marker on its verdict line',
+      /not run/.test(offHtml11) && /assumed setup/.test(offHtml11), offHtml11.slice(0, 200));
+    const offRow11 = run11(`actionRow(${JSON.stringify(measured11({ willRun: false, reason: 'needs X', assumed: true }))})`);
+    check('  exactly once per row', (offRow11.match(/assumed setup/g) || []).length === 1, offRow11.slice(0, 300));
+    const measRun11 = run11(`actionRow(${JSON.stringify(measured11({ willRun: true }))})`);
+    const measOff11 = run11(`actionRow(${JSON.stringify(measured11({ willRun: false, reason: 'needs X' }))})`);
+    const measUnknown11 = run11(`conditionLine(${JSON.stringify({ willRun: null, reason: null, assumed: false, unknown: [{ why: 'needs X - undecidable here' }] })})`);
+    check('measured rows carry no marker',
+      !/assum/i.test(measRun11) && !/assum/i.test(measOff11) && !/assum/i.test(measUnknown11),
+      `${measRun11.slice(0, 120)} / ${measOff11.slice(0, 120)}`);
+    check('  and the measured not-run wording is unchanged',
+      /not run &mdash; needs X/.test(measOff11), measOff11.slice(0, 200));
+  }
+}
+
 console.log(`\n${'='.repeat(60)}`);
+console.log('\nTest 12: packaging findings and zero-rows display wiring');
+{
+  // Same stubbed-DOM harness as Tests 7-10: the real conflicts.js render
+  // path headless. The live packaging groups plus zero-rows rows, each naming
+  // the mod by display name with a plain-words reason and a what-to-do-next
+  // hint; clean states state so, never a blank hole. Backend coverage for the
+  // schema-mismatch check lives in phase 10; here the panel group for it
+  // plus the remaining groups and their empty states are pinned.
+  const cfSrc12 = fs.readFileSync(path.join(PUB, 'conflicts.js'), 'utf8');
+  const escStub12 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const renderStub12 = (s) => escStub12(String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ''));
+  const els12 = {};
+  const dollarStub12 = (id) => {
+    if (!els12[id]) els12[id] = { textContent: '', innerHTML: '', disabled: false, value: 'off', checked: false, addEventListener() {} };
+    return els12[id];
+  };
+  let cx12 = null;
+  let cxErr12 = '';
+  try {
+    cx12 = vm.createContext({ $: dollarStub12, pages: {}, n: (v) => (v == null ? '' : Number(v).toLocaleString()),
+      esc: escStub12, renderCivText: renderStub12,
+      stripCivText: (s) => String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ' ').replace(/\s+/g, ' ').trim(),
+      api: async () => ({ ok: true }), toast() {}, window: {} });
+    vm.runInContext(cfSrc12, cx12, { filename: 'conflicts.js' });
+  } catch (e) { cxErr12 = e.message; }
+  check('the conflicts script loads headless under stubs', cx12 !== null, cxErr12);
+  if (cx12) {
+    const run12 = (expr) => vm.runInContext(expr, cx12);
+    const unreg = run12('cfPackagingUnregHtml({ kind: "unregistered-file", modId: "guid-unreg-1", name: "[COLOR_GREEN]Green Mod[ENDCOLOR]", file: "UI/Extra.lua", reason: "listed by the mod but no action loads it, so it never reaches the game" })');
+    check('files no action loads name the mod display name, never the id',
+      /Green Mod/.test(unreg) && !/guid-unreg-1/.test(unreg) && !/\[COLOR/i.test(unreg), unreg.slice(0, 200));
+    check('  with the plain-words reason and a what-to-do-next hint',
+      /never reaches the game/.test(unreg) && /title="/.test(unreg) && /Add it to an action/.test(unreg));
+    const unlisted = run12('cfPackagingUnregHtml({ kind: "unregistered-file", modId: "guid-unreg-2", name: "Disk Mod", file: "Data/Orphan.sql", reason: "sits in the mod folder but the mod does not list it, so no action can load it" })');
+    check('  the unlisted variant points at the mod listing, not an action',
+      /List it in the mod/.test(unlisted) && !/Add it to an action/.test(unlisted));
+    const dup = run12('cfPackagingDupHtml({ kind: "duplicate-mod-id", modId: "guid-dup-1", key: "guid-dup-1", claimants: [{ modId: "guid-dup-1", name: "[COLOR_BLUE]Dupe One[ENDCOLOR]", folder: "/mods/Alpha" }, { modId: "guid-dup-1", name: "Dupe Two", folder: "/mods/Beta" }], reason: "is claimed by more than one mod folder, so the game cannot tell them apart" })');
+    check('shared-id rows name every claimant folder with no raw ids or markup',
+      /Dupe One/.test(dup) && /Dupe Two/.test(dup) && /\/mods\/Alpha/.test(dup) && /\/mods\/Beta/.test(dup)
+      && !/guid-dup-1/.test(dup) && !/\[COLOR/i.test(dup));
+    check('  with a give-one-a-different-id hint',
+      /different ModId/.test(dup));
+    const schema = run12('cfPackagingSchemaHtml({ kind: "schema-mismatch", modId: "guid-schema-1", name: "[COLOR_GREEN]Green Mod[ENDCOLOR]", file: "Data/Units.sql", table: "Units", side: "gameplay", expectedDb: "front-end", reason: "touches table Units, which lives in the front-end database, but the file loads in a gameplay action" })');
+    check('tables in the wrong database name the mod, file, table and expected database',
+      /Green Mod/.test(schema) && /Data\/Units\.sql/.test(schema) && /table Units/.test(schema) && /front-end database/.test(schema)
+      && !/guid-schema-1/.test(schema) && !/\[COLOR/i.test(schema), schema.slice(0, 220));
+    check('  with the plain-words reason and a what-to-do-next hint',
+      /lives in the front-end database/.test(schema) && /title="/.test(schema) && /Move the file into a front-end action/.test(schema));
+    const zero = run12('cfZeroRowsHtml({ modId: "guid-zero-1", modName: "[COLOR_GREEN]Zero Mod[ENDCOLOR]", fileLabel: "Data/T.sql", stmtIndex: 3, verb: "UPDATE" })');
+    check('zero-rows rows name the mod and file with the statement number',
+      /Zero Mod/.test(zero) && /Data\/T\.sql/.test(zero) && /#3/.test(zero)
+      && !/guid-zero-1/.test(zero) && !/\[COLOR/i.test(zero), zero.slice(0, 200));
+    check('  in plain words with a what-to-do-next hint, never backend jargon',
+      /matched no rows/.test(zero) && /open the file/.test(zero) && /title="/.test(zero)
+      && !/replay-relative/.test(zero));
+    run12('cfState.packaging = { ok: true, warnings: ['
+      + '{ kind: "unregistered-file", modId: "guid-u", name: "Green Mod", file: "UI/Extra.lua", reason: "listed by the mod but no action loads it" },'
+      + '{ kind: "duplicate-mod-id", modId: "guid-d", key: "k", claimants: [{ modId: "guid-d", name: "Dupe One", folder: "A" }, { modId: "guid-d", name: "Dupe Two", folder: "B" }], reason: "claimed by more than one" }'
+      + '] }');
+    run12('cfRenderPackaging()');
+    const packHtml = els12.cfPackagingList.innerHTML;
+    check('both groups render with their rows',
+      /Files no action loads/.test(packHtml)
+      && /Mods sharing one id/.test(packHtml) && /Green Mod/.test(packHtml) && /Dupe Two/.test(packHtml),
+      packHtml.slice(0, 200));
+    check('  and no raw mod ids leak anywhere in the panel',
+      !/guid-u|guid-d/.test(packHtml));
+    run12('cfState.packaging = { ok: true, warnings: ['
+      + '{ kind: "unregistered-file", modId: "guid-u", name: "Green Mod", file: "UI/Extra.lua", reason: "listed by the mod but no action loads it" },'
+      + '{ kind: "schema-mismatch", modId: "guid-s", name: "Schema Mod", file: "Data/X.sql", table: "T", side: "gameplay", expectedDb: "front-end", reason: "touches table T, which lives in the front-end database" },'
+      + '{ kind: "duplicate-mod-id", modId: "guid-d", key: "k", claimants: [{ modId: "guid-d", name: "Dupe One", folder: "A" }, { modId: "guid-d", name: "Dupe Two", folder: "B" }], reason: "claimed by more than one" }'
+      + '] }');
+    run12('cfRenderPackaging()');
+    const packSchemaHtml = els12.cfPackagingList.innerHTML;
+    check('the schema-mismatch group renders with its rows and no raw ids',
+      /Tables in the wrong database/.test(packSchemaHtml)
+      && /Schema Mod/.test(packSchemaHtml) && /Data\/X\.sql/.test(packSchemaHtml)
+      && /front-end database/.test(packSchemaHtml) && !/guid-s/.test(packSchemaHtml),
+      packSchemaHtml.slice(0, 220));
+    check('  and the header count includes the schema rows',
+      els12.cfPackagingCount.textContent === '3', els12.cfPackagingCount.textContent);
+    run12('cfState.packaging = { ok: true, warnings: [{ kind: "unregistered-file", modId: "guid-u", name: "Green Mod", file: "UI/Extra.lua", reason: "listed by the mod but no action loads it" }] }');
+    run12('cfRenderPackaging()');
+    check('quiet groups keep their empty state beside a firing one',
+      /Green Mod/.test(els12.cfPackagingList.innerHTML)
+      && /Every database file loads on one side only/.test(els12.cfPackagingList.innerHTML)
+      && /Every mod id belongs to exactly one mod folder/.test(els12.cfPackagingList.innerHTML)
+      && /Every table lives where its file loads/.test(els12.cfPackagingList.innerHTML));
+    run12('cfState.packaging = { ok: true, warnings: [] }');
+    run12('cfRenderPackaging()');
+    check('a clean library states so, never a blank hole',
+      /Packaging looks clean/.test(els12.cfPackagingList.innerHTML), els12.cfPackagingList.innerHTML.slice(0, 160));
+    run12('cfState.replay = {"ok":true,"envelopeLine":"env","fkMode":"off","profile":{"name":"P"},"limitationFlags":[],"unreadable":[],"skippedGated":0,"collisions":[],"gatedOut":[],"gatedUnknown":[],"perFile":[],"zeroRows":[{"modId":"guid-zero-9","modName":"[COLOR_GREEN]Zero Nine[ENDCOLOR]","fileLabel":"Data/Z.sql","stmtIndex":7,"verb":"DELETE"}],"differential":{"available":false,"reason":"no log"}}');
+    run12('cfRenderReplay()');
+    check('replay rows carry the zero-rows section with display names',
+      /Zero Nine/.test(els12.cfReplayZeroRows.innerHTML) && /Data\/Z\.sql/.test(els12.cfReplayZeroRows.innerHTML)
+      && !/guid-zero-9/.test(els12.cfReplayZeroRows.innerHTML) && !/\[COLOR/i.test(els12.cfReplayZeroRows.innerHTML),
+      els12.cfReplayZeroRows.innerHTML.slice(0, 200));
+    run12('cfState.replay = {"ok":true,"envelopeLine":"env","fkMode":"off","profile":{"name":"P"},"limitationFlags":[],"unreadable":[],"skippedGated":0,"collisions":[],"gatedOut":[],"gatedUnknown":[],"perFile":[],"differential":{"available":false,"reason":"no log"}}');
+    run12('cfRenderReplay()');
+    check('a replay with no zero-rows states so, never a blank hole',
+      /matched at least one row/.test(els12.cfReplayZeroRows.innerHTML));
+  }
+  {
+    // Server side stays additive: the packaging route is a GET beside the
+    // other two, and zeroRows rides alongside the replay fields, renaming
+    // nothing.
+    const srv12 = fs.readFileSync(path.join(PUB, '..', 'src', 'server.js'), 'utf8');
+    check('the packaging route is a read-only GET reusing the backend',
+      /req\.method === 'GET' && url\.pathname === '\/api\/conflicts\/packaging'/.test(srv12)
+      && /packaging\.collectPackagingWarnings/.test(srv12)
+      && /loOrder\.openDb/.test(srv12));
+    check('zeroRows rides the replay response additively with display names',
+      /zeroRows: withModDisplayNames\(report\.zeroRows/.test(srv12));
+    const html12 = fs.readFileSync(path.join(PUB, 'index.html'), 'utf8');
+    check('the conflicts page gains a packaging panel with its controls',
+      /id="cfRunPackaging"/.test(html12) && /id="cfPackagingList"/.test(html12) && /id="cfPackagingCount"/.test(html12));
+    check('zero-rows rows live inside the replay panel, never a new tab',
+      /id="cfReplayZeroRows"/.test(html12) && /Statements that changed nothing/.test(html12)
+      && !/data-nav="packaging"/.test(html12));
+  }
+}
+
+console.log('\nTest 13: packaging groups window large result sets');
+{
+  // Same stubbed-DOM harness as Test 12: 250 unregistered rows render capped
+  // with the full count in the header, then expand in place and collapse.
+  const cfSrc13 = fs.readFileSync(path.join(PUB, 'conflicts.js'), 'utf8');
+  const escStub13 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const renderStub13 = (s) => escStub13(String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ''));
+  const els13 = {};
+  const dollarStub13 = (id) => {
+    if (!els13[id]) els13[id] = { textContent: '', innerHTML: '', disabled: false, value: 'off', checked: false, addEventListener() {} };
+    return els13[id];
+  };
+  let cx13 = null;
+  let cxErr13 = '';
+  try {
+    cx13 = vm.createContext({ $: dollarStub13, pages: {}, n: (v) => (v == null ? '' : Number(v).toLocaleString()),
+      esc: escStub13, renderCivText: renderStub13,
+      stripCivText: (s) => String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ' ').replace(/\s+/g, ' ').trim(),
+      api: async () => ({ ok: true }), toast() {}, window: {} });
+    vm.runInContext(cfSrc13, cx13, { filename: 'conflicts.js' });
+  } catch (e) { cxErr13 = e.message; }
+  check('the conflicts script loads headless under stubs', cx13 !== null, cxErr13);
+  if (cx13) {
+    const run13 = (expr) => vm.runInContext(expr, cx13);
+    check('one group renders at most a hundred rows', run13('cfPackagingWindow') === 100, String(run13('cfPackagingWindow')));
+    run13('cfState.packagingExpanded = {}');
+    run13('cfState.packaging = { ok: true, warnings: Array.from({ length: 250 }, function (_, i) { return { kind: "unregistered-file", modId: "guid-u" + i, name: "Mod " + i, file: "Data/Extra" + i + ".sql", reason: "listed by the mod but no action loads it" }; }) }');
+    run13('cfRenderPackaging()');
+    const capped13 = els13.cfPackagingList.innerHTML;
+    const rows13 = (capped13.match(/Data\/Extra\d+\.sql/g) || []).length;
+    check('a 250-row group renders capped with the full count in its header',
+      rows13 === 100 && />250</.test(capped13) && /Files no action loads/.test(capped13),
+      rows13 + ' rows, header ' + (/>250</.test(capped13) ? 'exact' : 'wrong'));
+    check('  with an expand control naming the hidden remainder',
+      /and 150 more/.test(capped13) && /show all/.test(capped13));
+    run13('cfTogglePackagingGroup("unreg")');
+    const open13 = els13.cfPackagingList.innerHTML;
+    check('expanding shows every row with a way back',
+      (open13.match(/Data\/Extra\d+\.sql/g) || []).length === 250 && /show less/.test(open13));
+    run13('cfTogglePackagingGroup("unreg")');
+    const shut13 = els13.cfPackagingList.innerHTML;
+    check('collapsing caps the rows again with the count intact',
+      (shut13.match(/Data\/Extra\d+\.sql/g) || []).length === 100 && />250</.test(shut13));
+  }
+}
+
+console.log('\nTest 14: conflicts copy triage (words only, no behavior change)');
+{
+  // Banned mechanism-trivia is gone from the strings the page shows; each
+  // panel now opens with a start-here triage sentence.
+  const cfSrc14 = fs.readFileSync(path.join(PUB, 'conflicts.js'), 'utf8');
+  const html14 = fs.readFileSync(path.join(PUB, 'index.html'), 'utf8');
+  check('no never-on-page-load reassurance remains in conflicts strings',
+    !/never on page load/.test(cfSrc14) && !/never on page load/.test(html14));
+  check('no switched-off-cannot restatement remains in conflicts strings',
+    !/switched off, they cannot/.test(cfSrc14) && !/switched off, they cannot/.test(html14));
+  check('page hint triages cross-mod collisions and game-logged errors first',
+    /Start with cross-mod collisions and game-logged errors/.test(html14));
+  check('  and names shadowing no-winner rows as choices, not crashes',
+    /shadowing rows with no winner are choices to pin down, not crashes/.test(html14));
+  check('shadowing env names settled winners and choices that do not crash',
+    /rows with a winner are settled/.test(cfSrc14) && /choices to pin down or accept/.test(cfSrc14)
+    && /nothing here crashes/.test(cfSrc14));
+  check('replay env triages cross-mod first with a coverage note',
+    /cross-mod pairs first/.test(cfSrc14) && /same-mod pairs are one author/.test(cfSrc14)
+    && /did not cover/.test(cfSrc14));
+  check('packaging env and button triage never-loaded files and shared ids',
+    /never loads and mods sharing one id first/.test(cfSrc14)
+    && /Find files the game never loads, tables in the wrong database, and ids two mods share/.test(html14)
+    && /run this after adding or updating mods/.test(html14));
+}
+{
+  // Same stubbed-DOM harness as Tests 7/8/12/13: the pairing section renders
+  // headless, and its new guidance markup answers what-to-do-next.
+  const cfSrc14b = fs.readFileSync(path.join(PUB, 'conflicts.js'), 'utf8');
+  const escStub14 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const renderStub14 = (s) => escStub14(String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ''));
+  const els14 = {};
+  const dollarStub14 = (id) => {
+    if (!els14[id]) els14[id] = { textContent: '', innerHTML: '', disabled: false, value: 'off', checked: false, addEventListener() {} };
+    return els14[id];
+  };
+  let cx14 = null;
+  let cxErr14 = '';
+  try {
+    cx14 = vm.createContext({ $: dollarStub14, pages: {}, n: (v) => (v == null ? '' : Number(v).toLocaleString()),
+      esc: escStub14, renderCivText: renderStub14,
+      stripCivText: (s) => String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ' ').replace(/\s+/g, ' ').trim(),
+      api: async () => ({ ok: true }), toast() {}, window: {} });
+    vm.runInContext(cfSrc14b, cx14, { filename: 'conflicts.js' });
+  } catch (e) { cxErr14 = e.message; }
+  check('the conflicts script loads headless under stubs', cx14 !== null, cxErr14);
+  if (cx14) {
+    const run14 = (expr) => vm.runInContext(expr, cx14);
+    run14('cfState.diffFilter = ""; cfState.hideUnattributed = false');
+    run14('cfState.replay = {"ok":true,"envelopeLine":"env","fkMode":"off","profile":{"name":"P"},"limitationFlags":[],"unreadable":[],"skippedGated":0,"collisions":[],"gatedOut":[],"gatedUnknown":[],"perFile":[],"differential":{"available":true,"agreements":[{"responsibleModId":"m1","responsibleModName":"Green Mod","fileLabel":"A.xml","stmtIndex":0,"logLine":10,"logText":"boom","replayError":"boom","strength":"context-proven","approximate":false,"attribution":{}}],"replayOnly":[{"responsibleModId":"m2","responsibleModName":"Plain Mod","fileLabel":"B.sql","stmtIndex":1,"replayError":"no such table: Nope","strength":"replay","approximate":false}],"logOnly":[{"responsibleModId":null,"responsibleModName":null,"fileLabel":"C.xml","stmtIndex":null,"logLine":20,"logText":"lost","strength":"hint-matched","approximate":false,"attribution":{}}]},"calibration":{"available":true,"divergences":[{"assumedFirst":"m/a.sql","assumedSecond":"m/b.sql","assumedOrder":"m/a.sql before m/b.sql (assumed replay order)","observedOrder":"m/b.sql before m/a.sql (game-observed order)","assumedFirstMods":[],"assumedSecondMods":[]}]}}');
+    run14('cfRenderReplay()');
+    const diffHtml14 = els14.cfReplayDiff.innerHTML;
+    const envHtml14 = els14.cfReplayEnv.innerHTML;
+    check('pairing section opens with game-log-first guidance and a next-step title',
+      /Start with game-logged errors/.test(diffHtml14) && /actually broke something/.test(diffHtml14)
+      && /title="[^"]*Fix game-log rows/.test(diffHtml14), diffHtml14.slice(0, 200));
+    check('  where both sides agree reads as fix-first',
+      /Where both sides agree, fix first/.test(diffHtml14));
+    check('agree rows say start here, single-side rows read as leads vs breakage',
+      /Both sides report this — start here/.test(diffHtml14) && /a lead to check/.test(diffHtml14)
+      && /it actually broke something/.test(diffHtml14));
+    check('calibration divergences carry what-to-do-next guidance',
+      /title="[^"]*open the named files/.test(diffHtml14) && /Open the named files and check the order/.test(diffHtml14));
+    check('replay env triages cross-mod first with the coverage note',
+      /cross-mod pairs first/.test(envHtml14) && /did not cover/.test(envHtml14), envHtml14.slice(0, 200));
+  }
+}
+
 console.log(pass ? 'SCRIPTS: ALL CHECKS PASSED' : 'SCRIPTS: FAILURES PRESENT');
 console.log('='.repeat(60));
 process.exit(pass ? 0 : 1);

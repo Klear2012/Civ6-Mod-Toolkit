@@ -24,7 +24,7 @@
 //   node src/phase9-conflict-replay.js --provenance (task 2.1)
 //   node src/phase9-conflict-replay.js --differential (task 2.2)
 //   node src/phase9-conflict-replay.js --envelope (task 2.3)
-//   node src/phase9-conflict-replay.js --live-lock (reviewer WARNING 1)
+//   node src/phase9-conflict-replay.js --assumed-gates (game-setup task 2.2)
 //
 // Task 2.2 adds Database.log differential validation: parse Database.log
 // text into error entries and compare against replay abort findings,
@@ -32,6 +32,12 @@
 // replay-only), each naming file and statement.
 //
 // New file only: nothing under src/ or public/ is modified by this change.
+//
+// Game-setup task 2.2 adds assumed-setup replay gating: the gates context
+// carries asserted option keys (same KIND:BODY store the view reads),
+// asserted values satisfy matching undecidable gates, flagged assumed in gate
+// reporting (rec.gate.assumed, gatedAssumed, gatedOut assumed flags). Nothing
+// asserted behaves exactly as the 1.3 path.
 
 const fs = require('fs');
 const os = require('os');
@@ -689,6 +695,12 @@ function collectStatements(modSet, { preprocess = false, splitter = 'trigger-awa
 // replays normally but is flagged gateUnknown on the per-file record and in
 // gatedUnknown. No gates context means no gating at all (the 1.1 path).
 //
+// Game-setup task 2.2 addition: the gates context may carry `asserted` (the
+// assumed-setup store keys). An asserted value satisfying an otherwise
+// undecidable gate decides it, flagged assumed: rec.gate carries assumed,
+// assumed-satisfied files are named in gatedAssumed, and skipped-gated files
+// carry assumed in gatedOut. Undecided files are never flagged.
+//
 // Task-2.1 addition: optional { provenance: true } installs simonw-style
 // history triggers before replay and records (table, pk, column) ->
 // (file, statement index) for every committed write. Report carries
@@ -708,6 +720,8 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
   let skippedGated = 0;
   const gatedOut = [];
   const gatedUnknown = [];
+  const gatedAssumed = [];
+  const zeroRows = [];
   const gateCtx = gates ? gateContextOf(gates) : null;
   const provInstalled = new Set();
   let provWriters = null;
@@ -738,6 +752,7 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
         status: 'committed',
         error: null,
         failedAt: null,
+        zeroRows: [],
       };
       // Task 2.1: pick up tables created by earlier files. Runs outside the
       // per-file SAVEPOINT so the triggers persist like the tables do.
@@ -747,7 +762,7 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
       // land or collide. Undecidable gates replay but stay flagged.
       const verdict = gateCtx ? evaluateGate(file.gate || null, gateCtx) : null;
       if (verdict) {
-        rec.gate = { willRun: verdict.willRun, reason: verdict.reason };
+        rec.gate = { willRun: verdict.willRun, reason: verdict.reason, assumed: !!verdict.assumed };
         if (verdict.willRun === false) {
           rec.status = 'skipped-gated';
           skippedGated += file.statements.length;
@@ -756,6 +771,7 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
             fileLabel: file.fileLabel,
             statements: file.statements.length,
             reason: verdict.reason,
+            assumed: !!verdict.assumed,
           });
           perFile.push(rec);
           return;
@@ -768,6 +784,15 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
             statements: file.statements.length,
             reason: 'gate-undecidable-here',
             unknown: verdict.unknown,
+          });
+        }
+        // An assumed-satisfied gate replays like a measured one but is named
+        // in gatedAssumed, never as measured.
+        if (verdict.willRun === true && verdict.assumed) {
+          gatedAssumed.push({
+            modId: file.modId,
+            fileLabel: file.fileLabel,
+            statements: file.statements.length,
           });
         }
       }
@@ -787,6 +812,34 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
           db.exec(file.statements[s]);
           rec.executed += 1;
           executed += 1;
+          // Zero-rows-affected: an UPDATE/DELETE that runs clean but matches
+          // nothing is flagged, never an error — the statement stays executed
+          // and the file stays committed. SELECT changes() reflects the
+          // statement's own row count (trigger sub-statements excluded), so
+          // this reads correctly with provenance triggers installed too.
+          // Fidelity-limited by construction: zero rows matched in THIS
+          // replay, whose order, gates, and earlier aborts may differ from
+          // the game's, hence the replay-relative flag on every finding.
+          const verb = leadingVerb(file.statements[s]);
+          if (verb === 'UPDATE' || verb === 'DELETE') {
+            let affected = null;
+            try {
+              affected = db.prepare('SELECT changes() AS n').get().n;
+            } catch (_) {
+              affected = null;
+            }
+            if (affected === 0) {
+              rec.zeroRows.push(s);
+              zeroRows.push({
+                modId: file.modId,
+                fileLabel: file.fileLabel,
+                stmtIndex: s,
+                globalIndex: file.baseGlobalIndex + s,
+                verb,
+                fidelityLimited: ['replay-relative', ...fileLimitationFlags(file.stages)],
+              });
+            }
+          }
           // Task 2.1: tables born mid-file need triggers for later
           // statements in the same file. Installed inside the SAVEPOINT so
           // a later abort removes table and triggers together.
@@ -830,6 +883,8 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
     skippedGated,
     gatedOut,
     gatedUnknown,
+    gatedAssumed,
+    zeroRows,
     perFile,
     wallMs,
     stmtsPerSec: wallMs > 0 ? Math.round((executed / wallMs) * 1000) : executed,
@@ -1331,7 +1386,11 @@ function gateSetOf(list) {
 
 function gateContextOf(ctx) {
   const c = ctx || {};
-  return { enabled: gateSetOf(c.enabled), installed: gateSetOf(c.installed) };
+  return {
+    enabled: gateSetOf(c.enabled),
+    installed: gateSetOf(c.installed),
+    asserted: c.asserted !== undefined ? c.asserted : null,
+  };
 }
 
 // Why a condition cannot be read here, in checkable words (same shape as
@@ -1352,19 +1411,99 @@ function gateUnreadableWhy(cond) {
   }
 }
 
+// Assumed-setup keys for one gate condition, mirroring setupKeysFor in
+// loadorder.js (local: this phase script stays dependency-free, like the
+// normGateId note above). RuleSetInUse / GameCoreInUse / LeaderPlayable read
+// KIND:<Value>; ConfigurationValueMatches reads the Group/ConfigurationId/
+// Value triple (props first, cond-level fields as fallback) plus the
+// GAMEMODE:<id> shorthand for an enable triple. Anything else, or a row
+// missing the property its key needs, yields no key: never guessed.
+//
+// Comma lists read as OR, mirroring the view and the catalog: one condition
+// naming "Expansion1,Expansion2" yields one key per single (LeaderPlayable
+// singles reduce to their leader tail), and gateAssumedMatch below satisfies
+// the condition when ANY listed single is asserted.
+function gateCommaSingles(value) {
+  return String(value == null ? '' : value).split(',').map((s) => s.trim()).filter((s) => s);
+}
+
+function gateLeaderTail(single) {
+  const s = String(single == null ? '' : single).trim();
+  if (!s) return '';
+  return s.includes('::') ? s.slice(s.lastIndexOf('::') + 2).trim() : s;
+}
+
+function gateSetupKeysFor(cond) {
+  const c = cond || {};
+  if (c.type === 'RuleSetInUse' || c.type === 'GameCoreInUse' || c.type === 'LeaderPlayable') {
+    const kind = c.type === 'RuleSetInUse' ? 'RULESET' : c.type === 'GameCoreInUse' ? 'CORE' : 'LEADER';
+    const out = [];
+    for (const s of gateCommaSingles(c.value)) {
+      const single = c.type === 'LeaderPlayable' ? gateLeaderTail(s) : s;
+      if (!single) continue;
+      out.push(`${kind}:${single}`);
+    }
+    return [...new Set(out)];
+  }
+  if (c.type === 'ConfigurationValueMatches') {
+    const p = (c.props && typeof c.props === 'object') ? c.props : {};
+    const pick = (k) => (p[k] != null ? p[k] : c[k]);
+    const g = String(pick('Group') == null ? '' : pick('Group')).trim();
+    const cid = String(pick('ConfigurationId') == null ? '' : pick('ConfigurationId')).trim();
+    if (!g || !cid) return [];
+    const out = [];
+    for (const single of gateCommaSingles(pick('Value'))) {
+      out.push(`CONFIG:${g}/${cid}=${single}`);
+      if (single === '1' && (g === 'Game' || cid.startsWith('GAMEMODE_'))) out.push(`GAMEMODE:${cid}`);
+    }
+    return [...new Set(out)];
+  }
+  return [];
+}
+
+// Whether an asserted store holds a key satisfying this condition. Accepts a
+// key array, a Set, a raw asserted map, or a readSetup view, mirroring
+// isAsserted in gamesetup.js without importing it. Null or empty asserts
+// nothing; junk answers false, never throws.
+function gateIsAsserted(asserted, key) {
+  if (!asserted) return false;
+  if (asserted instanceof Set) return asserted.has(key);
+  if (Array.isArray(asserted)) return asserted.includes(key);
+  const map = asserted.asserted && typeof asserted.asserted === 'object' ? asserted.asserted : asserted;
+  return !!map && typeof map === 'object' && map[key] === true;
+}
+
+function gateAssumedMatch(cond, asserted) {
+  if (!asserted) return false;
+  const keys = gateSetupKeysFor(cond);
+  if (!keys.length) return false;
+  return keys.some((k) => {
+    try { return gateIsAsserted(asserted, k); } catch (_) { return false; }
+  });
+}
+
 // One condition, three ways: satisfied, not satisfied, or not readable here.
 // Mirrors evalCondition in loadorder.js, including the inverted-absence rule
 // (NOT ModInUse(absent-mod) is satisfied) and never guessing.
 function evalGateCondition(cond, ctx) {
   const c = cond || {};
   if (!GATE_DECIDABLE.has(c.type)) {
-    return { sat: null, needs: gateUnreadableWhy(c) };
+    // Assumed game setup (game-setup task 2.2), read-only: a matching
+    // assertion satisfies the condition, flagged assumed so the verdict can
+    // label it. Anything else stays undecidable with byte-identical wording,
+    // so measured verdicts never move when nothing is asserted.
+    if (ctx && ctx.asserted && gateAssumedMatch(c, ctx.asserted)) {
+      return c.inverse
+        ? { sat: false, needs: gateUnreadableWhy(c), assumed: true }
+        : { sat: true, needs: null, assumed: true };
+    }
+    return { sat: null, needs: gateUnreadableWhy(c), assumed: false };
   }
   const target = normGateId(c.value);
   if (!ctx.installed.has(target)) {
     return c.inverse
-      ? { sat: true, needs: null }
-      : { sat: false, needs: `needs ${c.value}, which is not installed` };
+      ? { sat: true, needs: null, assumed: false }
+      : { sat: false, needs: `needs ${c.value}, which is not installed`, assumed: false };
   }
   const on = ctx.enabled.has(target);
   return {
@@ -1372,25 +1511,37 @@ function evalGateCondition(cond, ctx) {
     needs: c.inverse
       ? `needs ${c.value} to be off in this profile`
       : `needs ${c.value} to be on in this profile`,
+    assumed: false,
   };
 }
 
-// One gate set to a verdict: { willRun, reason, unknown }. Absent gate or
+// One gate set to a verdict: { willRun, reason, unknown, assumed }. Absent gate or
 // no conditions means ungated (willRun true), matching verdictOf.
 function evaluateGate(gate, ctx) {
   const items = (gate && gate.conditions) || [];
-  if (items.length === 0) return { willRun: true, reason: null, unknown: [] };
+  if (items.length === 0) return { willRun: true, reason: null, unknown: [], assumed: false };
   const context = ctx && ctx.enabled instanceof Set ? ctx : gateContextOf(ctx);
   const unknown = [];
   const unmet = [];
   let read = 0;
   let met = 0;
+  let metAssumed = 0;
+  let metMeasured = 0;
+  let unmetAssumed = 0;
+  let unmetMeasured = 0;
   for (const cond of items) {
     const r = evalGateCondition(cond, context);
     if (r.sat === null) { unknown.push({ type: cond.type, why: r.needs }); continue; }
     read += 1;
-    if (r.sat) met += 1;
-    else unmet.push(r.needs);
+    if (r.sat) {
+      met += 1;
+      if (r.assumed) metAssumed += 1;
+      else metMeasured += 1;
+    } else {
+      unmet.push(r.needs);
+      if (r.assumed) unmetAssumed += 1;
+      else unmetMeasured += 1;
+    }
   }
   const any = !!(gate && gate.any);
   let willRun = null;
@@ -1401,9 +1552,18 @@ function evaluateGate(gate, ctx) {
     if (unmet.length > 0) willRun = false;
     else if (read > 0 && unknown.length === 0) willRun = true;
   }
-  if (willRun === true) return { willRun: true, reason: null, unknown };
-  if (willRun === false) return { willRun: false, reason: unmet.join('; ') || 'a condition is not met', unknown };
-  return { willRun: null, reason: null, unknown };
+  // Assumed verdicts mirror verdictOf in loadorder.js: true only where removing
+  // the assertions would leave a different willRun. Undecided rows are never
+  // flagged: fewer unknowns is not running.
+  let assumed = false;
+  if (willRun === true) {
+    assumed = any ? (metAssumed > 0 && metMeasured === 0) : metAssumed > 0;
+  } else if (willRun === false) {
+    assumed = any ? unmetAssumed > 0 : (unmetAssumed > 0 && unmetMeasured === 0);
+  }
+  if (willRun === true) return { willRun: true, reason: null, unknown, assumed };
+  if (willRun === false) return { willRun: false, reason: unmet.join('; ') || 'a condition is not met', unknown, assumed };
+  return { willRun: null, reason: null, unknown, assumed: false };
 }
 
 // ---------------------------------------------------------------------------
@@ -1582,6 +1742,36 @@ function formatCollision(c) {
   const flag = c.fidelityLimited.length ? ` [fidelity-limited: ${c.fidelityLimited.join(',')}]` : '';
   return `${c.table} pk=${c.pk} col=${c.column} writes=${c.writes} `
     + `winner=${who(c.winner)} losers=[${losers}]${flag}`;
+}
+
+// The leading SQL verb of a statement (UPDATE, DELETE, INSERT, ...), skipping
+// leading whitespace and -- / * * / comments the splitter keeps. Null when
+// there is no leading word. Only UPDATE/DELETE feed the zero-rows flag.
+function leadingVerb(sql) {
+  let s = String(sql == null ? '' : sql);
+  for (;;) {
+    s = s.replace(/^\s+/, '');
+    if (s.startsWith('--')) {
+      const nl = s.indexOf('\n');
+      if (nl < 0) return null;
+      s = s.slice(nl + 1);
+      continue;
+    }
+    if (s.startsWith('/*')) {
+      const end = s.indexOf('*/');
+      if (end < 0) return null;
+      s = s.slice(end + 2);
+      continue;
+    }
+    break;
+  }
+  const m = /^[A-Za-z]+/.exec(s);
+  return m ? m[0].toUpperCase() : null;
+}
+
+function formatZeroRows(z) {
+  const flag = z.fidelityLimited.length ? ` [fidelity-limited: ${z.fidelityLimited.join(',')}]` : '';
+  return `${z.verb} ${z.modId}/${z.fileLabel}#${z.stmtIndex} (global ${z.globalIndex}) matched no rows${flag}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -2754,6 +2944,68 @@ function runEnvelope() {
   destroyTempCopy(c1.tmpDir);
   check('source content unchanged', sha256(sourceDbPath) === beforeHash);
 
+  console.log('\nZero-rows-affected: UPDATE/DELETE matching nothing flags, never errors');
+  const zeroSource = path.join(scratch, 'DebugGameplayZero.sqlite');
+  {
+    const zeroSeed = new DatabaseSync(zeroSource);
+    try {
+      zeroSeed.exec(`CREATE TABLE ZeroCheck(Id TEXT PRIMARY KEY, V INTEGER);
+        INSERT INTO ZeroCheck VALUES('real', 1);`);
+    } finally {
+      zeroSeed.close();
+    }
+  }
+  const zeroBefore = sha256(zeroSource);
+  const zeroSet = [
+    {
+      modId: 'mod-zero',
+      files: [
+        {
+          label: 'fix.sql',
+          text: `-- retune one row, then one that names nothing
+            UPDATE ZeroCheck SET V = 2 WHERE Id = 'real';
+            UPDATE ZeroCheck SET V = 9 WHERE Id = 'ghost';`,
+        },
+        {
+          label: 'prune.sql',
+          text: `DELETE FROM ZeroCheck WHERE Id = 'ghost';
+            INSERT INTO ZeroCheck VALUES('new', 3);`,
+        },
+      ],
+    },
+  ];
+  const zeroCopy = createTempCopy(zeroSource);
+  const zeroRep = replayOrdered(zeroCopy.tempDbPath, collectStatements(zeroSet));
+  zeroRep.zeroRows.forEach((z) => console.log(`  zero-rows: ${formatZeroRows(z)}`));
+  check('both files stay committed (flagged, never an error)',
+    zeroRep.perFile.every((f) => f.status === 'committed'),
+    zeroRep.perFile.map((f) => `${f.fileLabel}:${f.status}`).join(', '));
+  check('executed counts every statement', zeroRep.executed === 4, `got ${zeroRep.executed}`);
+  check('exactly the two no-match statements flag',
+    zeroRep.zeroRows.length === 2
+    && zeroRep.zeroRows[0].verb === 'UPDATE' && zeroRep.zeroRows[0].fileLabel === 'fix.sql'
+    && zeroRep.zeroRows[0].stmtIndex === 1 && zeroRep.zeroRows[0].globalIndex === 1
+    && zeroRep.zeroRows[1].verb === 'DELETE' && zeroRep.zeroRows[1].fileLabel === 'prune.sql'
+    && zeroRep.zeroRows[1].stmtIndex === 0 && zeroRep.zeroRows[1].globalIndex === 2,
+    JSON.stringify(zeroRep.zeroRows.map((z) => `${z.verb} ${z.fileLabel}#${z.stmtIndex}`)));
+  check('every finding carries the replay-relative fidelity flag',
+    zeroRep.zeroRows.every((z) => z.fidelityLimited.includes('replay-relative')),
+    JSON.stringify(zeroRep.zeroRows.map((z) => z.fidelityLimited)));
+  check('per-file records carry their own statement indexes',
+    JSON.stringify(zeroRep.perFile[0].zeroRows) === JSON.stringify([1])
+    && JSON.stringify(zeroRep.perFile[1].zeroRows) === JSON.stringify([0]),
+    JSON.stringify(zeroRep.perFile.map((f) => f.zeroRows)));
+  check('the matching UPDATE and the INSERT stay unflagged',
+    !zeroRep.zeroRows.some((z) => (z.fileLabel === 'fix.sql' && z.stmtIndex === 0)
+      || (z.fileLabel === 'prune.sql' && z.stmtIndex === 1)));
+  const zeroVal = (() => {
+    const db = new DatabaseSync(zeroCopy.tempDbPath, { readOnly: true });
+    try { return db.prepare("SELECT V FROM ZeroCheck WHERE Id = 'real'").get().V; } finally { db.close(); }
+  })();
+  check('the matching UPDATE still applied', zeroVal === 2, `got ${zeroVal}`);
+  destroyTempCopy(zeroCopy.tmpDir);
+  check('zero-rows source content unchanged', sha256(zeroSource) === zeroBefore);
+
   console.log('\nLimitation flags: mixed fixture with fidelity-limited provenance (gate section)');
   const limSource = path.join(scratch, 'DebugGameplayLim.sqlite');
   {
@@ -2905,6 +3157,180 @@ function runLiveLock() {
   return pass;
 }
 
+// ---------------------------------------------------------------------------
+// --assumed-gates (game-setup task 2.2): the gates context carries asserted
+// option keys (same KIND:BODY store the view reads); asserted values satisfy
+// matching undecidable gates, flagged assumed in gate reporting. Measured
+// gates and empty-asserted runs behave exactly as the --gates path.
+// Temp copies only, as ever.
+// ---------------------------------------------------------------------------
+
+function runAssumedGates() {
+  let pass = true;
+  const check = (label, cond, extra = '') => {
+    console.log(`  [${cond ? 'PASS' : 'FAIL'}] ${label}${extra ? ` :: ${extra}` : ''}`);
+    if (!cond) pass = false;
+  };
+
+  const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'civ6-conflict-replay-assumed-')));
+  console.log(`conflict-replay --assumed-gates (game-setup task 2.2)\nscratch dir: ${scratch}`);
+  const sourceDbPath = path.join(scratch, 'DebugGameplay.sqlite');
+  {
+    const seed = new DatabaseSync(sourceDbPath);
+    try {
+      seed.exec('CREATE TABLE SetupCheck(Id TEXT PRIMARY KEY, Value INTEGER);'
+        + "INSERT INTO SetupCheck VALUES('base', 0);");
+    } finally {
+      seed.close();
+    }
+  }
+  const beforeHash = sha256(sourceDbPath);
+  const beforeMtime = fs.statSync(sourceDbPath).mtimeMs;
+
+  const ON_ID = 'mod-setup-on-1111';
+  const OFF_ID = 'mod-setup-off-2222';
+  const RULESET = 'RULESET:RULESET_EXPANSION_2';
+  const MODE = 'GAMEMODE:GAMEMODE_MONOPOLIES';
+  const CONFIG = 'CONFIG:Map/MapSize=MAPSIZE_DUEL';
+  const ctx = { enabled: [ON_ID], installed: [ON_ID, OFF_ID], asserted: [RULESET, MODE, CONFIG] };
+  const bare = { enabled: [ON_ID], installed: [ON_ID, OFF_ID] };
+  const gMeasuredIn = { any: false, conditions: [{ type: 'ModInUse', value: ON_ID }] };
+  const gRuleset = { any: false, conditions: [{ type: 'RuleSetInUse', value: 'RULESET_EXPANSION_2' }] };
+  const gMode = { any: false, conditions: [{ type: 'ConfigurationValueMatches', value: '1', props: { Group: 'Game', ConfigurationId: 'GAMEMODE_MONOPOLIES', Value: '1' } }] };
+  const gConfig = { any: false, conditions: [{ type: 'ConfigurationValueMatches', value: 'MAPSIZE_DUEL', props: { Group: 'Map', ConfigurationId: 'MapSize', Value: 'MAPSIZE_DUEL' } }] };
+  const gConfigBare = { any: false, conditions: [{ type: 'ConfigurationValueMatches', value: 'MAPSIZE_DUEL' }] };
+  const gOther = { any: false, conditions: [{ type: 'RuleSetInUse', value: 'RULESET_NEVER_ASSERTED' }] };
+  const gMeasuredOut = { any: false, conditions: [{ type: 'ModInUse', value: OFF_ID }] };
+  const gNotRuleset = { any: false, conditions: [{ type: 'RuleSetInUse', value: 'RULESET_EXPANSION_2', inverse: true }] };
+
+  console.log('\nTest 1: asserted values satisfy matching undecidable gates, distinctly');
+  const vMeasured = evaluateGate(gMeasuredIn, ctx);
+  check('measured will-run carries no assumed flag', vMeasured.willRun === true && vMeasured.assumed === false, JSON.stringify(vMeasured));
+  const vRuleset = evaluateGate(gRuleset, ctx);
+  check('asserted ruleset runs, flagged assumed', vRuleset.willRun === true && vRuleset.assumed === true, JSON.stringify(vRuleset));
+  const vMode = evaluateGate(gMode, ctx);
+  check('asserted game mode runs, flagged assumed', vMode.willRun === true && vMode.assumed === true, JSON.stringify(vMode));
+  const vConfig = evaluateGate(gConfig, ctx);
+  check('asserted config triple runs, flagged assumed', vConfig.willRun === true && vConfig.assumed === true, JSON.stringify(vConfig));
+  check('a value-only config condition never guesses', evaluateGate(gConfigBare, ctx).willRun === null);
+  check('an unasserted ruleset stays undecided', (() => {
+    const v = evaluateGate(gOther, ctx);
+    return v.willRun === null && v.assumed === false && v.unknown.length === 1;
+  })(), JSON.stringify(evaluateGate(gOther, ctx).unknown));
+  const vNot = evaluateGate(gNotRuleset, ctx);
+  check('NOT an asserted value is assumed not to run', vNot.willRun === false && vNot.assumed === true, JSON.stringify(vNot));
+  check('a measured miss stays measured (never assumed)', (() => {
+    const v = evaluateGate(gMeasuredOut, ctx);
+    return v.willRun === false && v.assumed === false;
+  })());
+
+  console.log('\nTest 1b: assumed depends on the outcome, like the view');
+  const andBoth = { any: false, conditions: [{ type: 'ModInUse', value: ON_ID }, { type: 'RuleSetInUse', value: 'RULESET_EXPANSION_2' }] };
+  check('AND measured+assumed runs assumed (without it: undecided)', evaluateGate(andBoth, ctx).assumed === true);
+  check('AND measured-only runs measured',
+    evaluateGate({ any: false, conditions: [{ type: 'ModInUse', value: ON_ID }, { type: 'ModInUse', value: ON_ID }] }, ctx).assumed === false);
+  const orBoth = { any: true, conditions: [{ type: 'ModInUse', value: ON_ID }, { type: 'RuleSetInUse', value: 'RULESET_EXPANSION_2' }] };
+  check('OR carried by measured runs measured', evaluateGate(orBoth, ctx).assumed === false);
+  const orAssumed = { any: true, conditions: [{ type: 'ModInUse', value: OFF_ID }, { type: 'RuleSetInUse', value: 'RULESET_EXPANSION_2' }] };
+  check('OR carried by assumed alone runs assumed', evaluateGate(orAssumed, ctx).assumed === true);
+  check('undecided rows are never flagged',
+    evaluateGate({ any: true, conditions: [{ type: 'ModInUse', value: OFF_ID }, { type: 'RuleSetInUse', value: 'RULESET_X' }] }, ctx).assumed === false);
+  check('store-view, Set, and array shapes all match',
+    evaluateGate(gRuleset, { enabled: [ON_ID], installed: [ON_ID], asserted: { asserted: { [RULESET]: true } } }).assumed === true
+    && evaluateGate(gRuleset, { enabled: [ON_ID], installed: [ON_ID], asserted: new Set([RULESET]) }).assumed === true);
+  check('junk asserted never throws, never matches',
+    evaluateGate(gRuleset, { enabled: [], installed: [], asserted: 42 }).willRun === null
+    && evaluateGate(gRuleset, { enabled: [], installed: [], asserted: ['junk-without-a-kind'] }).willRun === null);
+
+  console.log('\nTest 2: replay runs assumed-satisfied files, reported distinctly');
+  const modSet = [
+    {
+      modId: 'mod-setup',
+      files: [
+        { label: 'measured.sql', text: "INSERT INTO SetupCheck VALUES('measured', 1);", gate: gMeasuredIn },
+        { label: 'ruleset.sql', text: "INSERT INTO SetupCheck VALUES('ruleset', 2);", gate: gRuleset },
+        { label: 'mode.sql', text: "INSERT INTO SetupCheck VALUES('mode', 3);", gate: gMode },
+        { label: 'unknown.sql', text: "INSERT INTO SetupCheck VALUES('unknown', 4);", gate: gOther },
+        { label: 'off.sql', text: "INSERT INTO SetupCheck VALUES('off', 5);", gate: gMeasuredOut },
+        { label: 'not-ruleset.sql', text: "INSERT INTO SetupCheck VALUES('not-ruleset', 6);", gate: gNotRuleset },
+      ],
+    },
+  ];
+  const collected = collectStatements(modSet);
+  const c1 = createTempCopy(sourceDbPath);
+  const report = replayOrdered(c1.tempDbPath, collected, { gates: ctx });
+  console.log(`  replay: total=${report.total} executed=${report.executed} skippedGated=${report.skippedGated}`);
+  report.perFile.forEach((f) => {
+    console.log(`  per-file: ${f.modId}/${f.fileLabel} ${f.status}`
+      + (f.gate ? ` willRun=${f.gate.willRun} assumed=${!!f.gate.assumed}` : '')
+      + (f.gate && f.gate.reason ? ` :: ${f.gate.reason}` : ''));
+  });
+  console.log(`  gated-assumed: ${report.gatedAssumed.map((g) => g.fileLabel).join(', ') || '(none)'}`);
+  check('measured and assumed files all commit', report.perFile.slice(0, 4).every((f) => f.status === 'committed'),
+    report.perFile.map((f) => `${f.fileLabel}:${f.status}`).join(', '));
+  check('both gated-out files skipped, never replayed',
+    report.perFile[4].status === 'skipped-gated' && report.perFile[5].status === 'skipped-gated');
+  check('assumed-satisfied files named distinctly from measured ones',
+    report.gatedAssumed.map((g) => g.fileLabel).join(',') === 'ruleset.sql,mode.sql',
+    JSON.stringify(report.gatedAssumed));
+  check('measured commit carries no assumed flag', report.perFile[0].gate.assumed === false);
+  check('assumed commits carry the flag', report.perFile[1].gate.assumed === true && report.perFile[2].gate.assumed === true);
+  check('undecidable files stay flagged unknown, never assumed',
+    report.gatedUnknown.length === 1 && report.gatedUnknown[0].fileLabel === 'unknown.sql' && report.perFile[3].gate.assumed === false,
+    JSON.stringify(report.gatedUnknown));
+  check('gated-out assumed flag tells the two misses apart',
+    report.gatedOut.find((g) => g.fileLabel === 'off.sql').assumed === false
+    && report.gatedOut.find((g) => g.fileLabel === 'not-ruleset.sql').assumed === true,
+    JSON.stringify(report.gatedOut));
+  check('executed counts the four replayed statements', report.executed === 4 && report.skippedGated === 2,
+    `executed=${report.executed} skippedGated=${report.skippedGated}`);
+  const rows = (() => {
+    const db = new DatabaseSync(c1.tempDbPath, { readOnly: true });
+    try { return db.prepare('SELECT Id FROM SetupCheck').all().map((r) => r.Id).sort(); } finally { db.close(); }
+  })();
+  check('assumed-satisfied rows landed', rows.includes('ruleset') && rows.includes('mode'), rows.join(','));
+  check('gated-out rows never landed', !rows.includes('off') && !rows.includes('not-ruleset'), rows.join(','));
+  destroyTempCopy(c1.tmpDir);
+
+  console.log('\nTest 3: nothing asserted behaves exactly as the --gates path');
+  const shapes = [gMeasuredIn, gRuleset, gMode, gConfig, gOther, gMeasuredOut, gNotRuleset];
+  check('empty-asserted verdicts match bare-context verdicts', shapes.every((g) => {
+    const a = evaluateGate(g, bare);
+    const b = evaluateGate(g, { enabled: [ON_ID], installed: [ON_ID, OFF_ID], asserted: [] });
+    return a.willRun === b.willRun && (a.reason || null) === (b.reason || null)
+      && JSON.stringify(a.unknown) === JSON.stringify(b.unknown) && b.assumed === false;
+  }));
+  const c2 = createTempCopy(sourceDbPath);
+  const plain = replayOrdered(c2.tempDbPath, collected, { gates: bare });
+  check('no assumed flags anywhere without assertions',
+    plain.gatedAssumed.length === 0 && plain.perFile.every((f) => !f.gate || f.gate.assumed === false)
+    && plain.gatedOut.every((g) => g.assumed === false));
+  check('unasserted setup files replay as unknown (1.3 behavior)',
+    plain.gatedUnknown.map((g) => g.fileLabel).join(',') === 'ruleset.sql,mode.sql,unknown.sql,not-ruleset.sql',
+    JSON.stringify(plain.gatedUnknown.map((g) => g.fileLabel)));
+  check('measured outcomes unchanged without assertions',
+    plain.perFile[0].status === 'committed' && plain.perFile[4].status === 'skipped-gated'
+    && plain.perFile[5].status === 'committed' && plain.executed === 5 && plain.skippedGated === 1,
+    plain.perFile.map((f) => `${f.fileLabel}:${f.status}`).join(', '));
+  destroyTempCopy(c2.tmpDir);
+
+  console.log('\nTest 4: temp-copy lifecycle (live DB never written)');
+  check('source content unchanged', sha256(sourceDbPath) === beforeHash);
+  check('source mtime unchanged', fs.statSync(sourceDbPath).mtimeMs === beforeMtime);
+  const liveRows = (() => {
+    const db = new DatabaseSync(sourceDbPath, { readOnly: true });
+    try { return db.prepare('SELECT Id FROM SetupCheck').all(); } finally { db.close(); }
+  })();
+  check('source holds only its seed row', liveRows.length === 1 && liveRows[0].Id === 'base', JSON.stringify(liveRows));
+
+  if (pass) fs.rmSync(scratch, { recursive: true, force: true });
+
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(pass ? 'CONFLICT-REPLAY ASSUMED-GATES: ALL CHECKS PASSED' : 'CONFLICT-REPLAY ASSUMED-GATES: FAILURES PRESENT');
+  console.log('='.repeat(60));
+  return pass;
+}
+
 module.exports = {
   createTempCopy,
   destroyTempCopy,
@@ -2922,6 +3348,9 @@ module.exports = {
   convertXmlToSql,
   normGateId,
   gateContextOf,
+  gateSetupKeysFor,
+  gateIsAsserted,
+  gateAssumedMatch,
   evalGateCondition,
   evaluateGate,
   qIdent,
@@ -2935,6 +3364,8 @@ module.exports = {
   fileLimitationFlags,
   buildCollisions,
   formatCollision,
+  leadingVerb,
+  formatZeroRows,
   runProvenance,
   parseDatabaseLog,
   resolveLogSourceMod,
@@ -2966,6 +3397,7 @@ module.exports = {
   holdLiveExclusiveForCopy,
   lockedCopyTrial,
   runLiveLock,
+  runAssumedGates,
 };
 
 if (require.main === module) {
@@ -2998,6 +3430,10 @@ if (require.main === module) {
     const ok = runLiveLock();
     process.exit(ok ? 0 : 1);
   }
-  console.error(`unknown flag ${arg}; usage: node src/phase9-conflict-replay.js [--check|--fidelity|--gates|--provenance|--differential|--envelope|--live-lock]`);
+  if (arg === '--assumed-gates') {
+    const ok = runAssumedGates();
+    process.exit(ok ? 0 : 1);
+  }
+  console.error(`unknown flag ${arg}; usage: node src/phase9-conflict-replay.js [--check|--fidelity|--gates|--provenance|--differential|--envelope|--live-lock|--assumed-gates]`);
   process.exit(2);
 }

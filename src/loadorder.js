@@ -21,6 +21,7 @@ const { normId } = require('./modinfo');
 const { atomicWrite } = require('./editor');
 const { fileTimeOf, mutateDb, MOD_NAME_SQL, prettyName } = require('./modsdb');
 const { gameStatus } = require('./game');
+const { readSetup, isAsserted, gameSetupFile, splitCommaList, leaderTail, idKey } = require('./gamesetup');
 
 const VERSION = 1;
 // A key is a type, an id and a file list. Nothing in the library makes one this
@@ -1067,17 +1068,20 @@ function readProfile(db, groupId) {
 
   // Properties are read whole and attached, rather than pivoted into columns,
   // because which property carries the meaning depends on the criterion type and
-  // the reasons below need to name it.
+  // the reasons below need to name it. Keyed through idKey like the catalog:
+  // the same two id domains meet in JS here, and an affinity split must never
+  // silently detach properties from their conditions.
   const critProps = new Map();
   for (const p of db.prepare('SELECT CriterionRowId AS id, Name AS name, Value AS value FROM CriterionProperties').all()) {
-    if (!critProps.has(p.id)) critProps.set(p.id, {});
-    critProps.get(p.id)[p.name] = p.value;
+    const id = idKey(p.id);
+    if (!critProps.has(id)) critProps.set(id, {});
+    critProps.get(id)[p.name] = p.value;
   }
 
   const conds = new Map();
   for (const c of condRows) {
     if (!conds.has(c.cr)) conds.set(c.cr, { any: !!c.any, items: [] });
-    const kv = critProps.get(c.id) || {};
+    const kv = critProps.get(idKey(c.id)) || {};
     conds.get(c.cr).items.push({
       type: c.type,
       inverse: !!c.inverse,
@@ -1153,6 +1157,77 @@ function unreadableWhy(c) {
   }
 }
 
+// Assumed game setup: which store keys satisfy one undecidable condition.
+//
+// The store (src/gamesetup.js) holds KIND:BODY keys - RULESET:<id>, CORE:<id>,
+// LEADER:<id>, GAMEMODE:<id>, CONFIG:<Group>/<ConfigurationId>=<Value> - and
+// asserting one marks matching RuleSetInUse / GameCoreInUse / LeaderPlayable /
+// ConfigurationValueMatches conditions satisfied. Nothing else is readable
+// here, and ModInUse / ModIsEnabled measurement is untouched by design.
+//
+// A non-matching assertion proves nothing: one ruleset asserted does not prove
+// another ruleset is off for verdict purposes, so only an exact match satisfies
+// and everything else stays undecided. The inverted form of a match (NOT X
+// where X is asserted) is the one assumed false.
+//
+// Comma lists read as OR: one condition naming "Expansion1,Expansion2" yields
+// one key per single (LeaderPlayable singles reduce to their leader tail, the
+// same reduction the catalog mines), and isAssumedMatch below satisfies the
+// condition when ANY listed single is asserted.
+function setupKeysFor(c) {
+  if (!c) return [];
+  if (c.type === 'RuleSetInUse' || c.type === 'GameCoreInUse' || c.type === 'LeaderPlayable') {
+    if (c.value == null) return [];
+    const kind = c.type === 'RuleSetInUse' ? 'RULESET' : c.type === 'GameCoreInUse' ? 'CORE' : 'LEADER';
+    const out = [];
+    for (const s of splitCommaList(c.value)) {
+      const single = c.type === 'LeaderPlayable' ? leaderTail(s) : s;
+      if (!single) continue;
+      out.push(`${kind}:${single}`);
+    }
+    return [...new Set(out)];
+  }
+  if (c.type === 'ConfigurationValueMatches') {
+    const p = c.props || {};
+    if (p.Group == null || p.ConfigurationId == null || p.Value == null) return [];
+    const g = String(p.Group).trim();
+    const cid = String(p.ConfigurationId).trim();
+    if (!g || !cid) return [];
+    const out = [];
+    for (const single of splitCommaList(p.Value)) {
+      out.push(`CONFIG:${g}/${cid}=${single}`);
+      // Game-mode shorthand: the library gates modes as ConfigurationValueMatches
+      // with Group Game, ConfigurationId GAMEMODE_*, Value 1. Asserting
+      // GAMEMODE:<id> satisfies that enable triple, so a catalog that lists modes
+      // by id still matches. A triple asking for another value (e.g. 0) is not
+      // satisfied by the mode being on - only the exact triple is.
+      if (single === '1' && (g === 'Game' || cid.startsWith('GAMEMODE_'))) {
+        out.push(`GAMEMODE:${cid}`);
+      }
+    }
+    return [...new Set(out)];
+  }
+  return [];
+}
+
+// Whether an asserted store holds a key satisfying this condition. The store
+// reader never throws (a hand-edit typo answers false), and a Set or array of
+// keys is accepted as well as the readSetup view or raw map, so callers and
+// tests can pass whichever they hold. Null or empty asserts nothing.
+function isAssumedMatch(c, asserted) {
+  if (!asserted) return false;
+  const keys = setupKeysFor(c);
+  if (!keys.length) return false;
+  for (const k of keys) {
+    try {
+      if (isAsserted(asserted, k)) return true;
+    } catch (_) { /* isAsserted never throws; a typo answers false */ }
+    if (asserted instanceof Set && asserted.has(k)) return true;
+    if (Array.isArray(asserted) && asserted.includes(k)) return true;
+  }
+  return false;
+}
+
 // One condition, three ways: satisfied, not satisfied, or not something this
 // view can read. Never a guess, and an inverted condition is inverted here
 // rather than skipped - skipping it made "NOT ModInUse(X)" read as satisfied
@@ -1163,7 +1238,16 @@ function evalCondition(c, ctx) {
     // `needs`, not `why`: verdictOf reads one key off every branch, and a branch
     // that spells it differently yields a reason of undefined - which is a row
     // saying "cannot tell" with nothing after it.
-    return { sat: MAYBE, needs: unreadableWhy(c) };
+    //
+    // Assumed setup, read-only: a matching assertion satisfies the condition,
+    // flagged assumed so the verdict can label it. Anything else stays
+    // undecided with byte-identical wording, so measured verdicts never move
+    // when nothing is asserted.
+    if (ctx && ctx.asserted && isAssumedMatch(c, ctx.asserted)) {
+      if (c.inverse) return { sat: false, needs: unreadableWhy(c), assumed: true };
+      return { sat: true, needs: null, assumed: true };
+    }
+    return { sat: MAYBE, needs: unreadableWhy(c), assumed: false };
   }
   const target = ctx.installed.get(normId(c.value));
   if (!target) {
@@ -1171,8 +1255,8 @@ function evalCondition(c, ctx) {
     // meant - the case that was decidable before the probe too. Inverted, the
     // absence is exactly what is being asked for.
     return c.inverse
-      ? { sat: true, needs: null }
-      : { sat: false, needs: `needs ${c.value}, which is not installed` };
+      ? { sat: true, needs: null, assumed: false }
+      : { sat: false, needs: `needs ${c.value}, which is not installed`, assumed: false };
   }
   // ModInUse and ModIsEnabled come to the same test, which is what the probe
   // measured rather than assumed. They stay separate names so the code says
@@ -1183,22 +1267,34 @@ function evalCondition(c, ctx) {
     needs: c.inverse
       ? `needs ${target.name} to be off in this profile`
       : `needs ${target.name} to be on in this profile`,
+    assumed: false,
   };
 }
 
 function verdictOf(entry, ctx) {
-  if (!entry || entry.items.length === 0) return { willRun: true, reason: null, unknown: [] };
+  if (!entry || entry.items.length === 0) return { willRun: true, reason: null, unknown: [], assumed: false };
 
   const unknown = [];
   const unmet = [];
   let read = 0;
   let met = 0;
+  let metAssumed = 0;
+  let metMeasured = 0;
+  let unmetAssumed = 0;
+  let unmetMeasured = 0;
   for (const c of entry.items) {
     const r = evalCondition(c, ctx);
     if (r.sat === MAYBE) { unknown.push({ type: c.type, why: r.needs }); continue; }
     read++;
-    if (r.sat) met++;
-    else unmet.push(r.needs);
+    if (r.sat) {
+      met++;
+      if (r.assumed) metAssumed++;
+      else metMeasured++;
+    } else {
+      unmet.push(r.needs);
+      if (r.assumed) unmetAssumed++;
+      else unmetMeasured++;
+    }
   }
 
   // Criteria.Any is the author's own declaration and means what it says. Measured
@@ -1226,9 +1322,26 @@ function verdictOf(entry, ctx) {
     else if (read > 0 && unknown.length === 0) willRun = true;
   }
 
-  if (willRun === true) return { willRun: true, reason: null, unknown };
-  if (willRun === false) return { willRun: false, reason: unmet.join('; ') || 'a condition is not met', unknown };
-  return { willRun: null, reason: null, unknown };
+  // Assumed verdicts: true only where the outcome relies on an assertion -
+  // removing the asserted values would leave a different willRun. An OR runs
+  // when one met condition carries it, so it depends on assumed only when no
+  // measured condition is met; an AND runs only when every decided condition
+  // is met with nothing unread, so any assumed met means without it the row
+  // would be undecided. The false cases mirror: an OR is false only when every
+  // decided condition is unmet with nothing unread, so any assumed unmet makes
+  // it dependent, while an AND is defeated by one unmet, so it depends on
+  // assumed only when no measured unmet defeats it alone. Undecided rows are
+  // never flagged: fewer unknowns is not running.
+  let assumed = false;
+  if (willRun === true) {
+    assumed = entry.any ? (metAssumed > 0 && metMeasured === 0) : metAssumed > 0;
+  } else if (willRun === false) {
+    assumed = entry.any ? unmetAssumed > 0 : (unmetAssumed > 0 && unmetMeasured === 0);
+  }
+
+  if (willRun === true) return { willRun: true, reason: null, unknown, assumed };
+  if (willRun === false) return { willRun: false, reason: unmet.join('; ') || 'a condition is not met', unknown, assumed };
+  return { willRun: null, reason: null, unknown, assumed: false };
 }
 
 // Which overrides point where, so a row can be labelled without building an
@@ -1296,7 +1409,23 @@ function profileLoadOrder(dbPath, opts = {}) {
     const group = groups.find((g) => g.id === groupId);
 
     const { on, rowToNorm, actions, declared, conds } = readProfile(db, groupId);
-    const ctx = { installed: installedMods(db), on };
+    // Assumed game setup, read-only. opts.asserted overrides the file for
+    // tests; opts.gameSetupFile / opts.gameSetupKnown override the path and
+    // the prune set the catalog will supply. A missing, empty or unusable file
+    // reads as no assertions - measured-only, byte-identical - and nothing
+    // here ever writes the store or the game database.
+    let asserted = null;
+    if (opts.asserted !== undefined && opts.asserted !== null) {
+      asserted = opts.asserted;
+    } else {
+      try {
+        const v = readSetup(opts.gameSetupFile || gameSetupFile(), opts.gameSetupKnown || null);
+        asserted = (v && v.asserted) || {};
+      } catch (_) {
+        asserted = null;
+      }
+    }
+    const ctx = { installed: installedMods(db), on, asserted };
     const { index, unmatched } = overrideIndex(db, stored);
 
     // Comparing two profiles is cheaper than it looks: ComponentRowId belongs to
@@ -1343,6 +1472,7 @@ function profileLoadOrder(dbPath, opts = {}) {
         willRun: v.willRun,
         reason: v.reason,
         unknown: v.unknown,
+        assumed: !!v.assumed,
         // null when nothing is being compared, so the client can tell "not
         // compared" from "compared and absent".
         inCompare: compareOn ? compareOn.has(modId) : null,
@@ -1391,6 +1521,7 @@ function profileLoadOrder(dbPath, opts = {}) {
         undeclared: undeclared.length,
         willNotRun: rows.filter((r) => r.willRun === false).length,
         unknown: rows.filter((r) => r.willRun === null).length,
+        assumed: rows.filter((r) => r.assumed).length,
         distinctValues: distinct.length,
         min: distinct.length ? distinct[0] : null,
         max: distinct.length ? distinct[distinct.length - 1] : null,
@@ -1762,7 +1893,7 @@ module.exports = {
   readOverrides, writeOverrides, setOverride, clearOverride,
   modFile, stampFor, stampIsStale,
   applyOverrides, applyBulk, resetOverride, resetModOverrides, discardModOverrides, syncOverrides, staleMods, listOverrides,
-  profileLoadOrder,
+  profileLoadOrder, verdictOf, evalCondition, setupKeysFor, isAssumedMatch,
   actionFiles, actionFilesOf, modActionFilesOf,
   describeBlock, proposeBlock, occupiedOf,
   buildEvenSpacing, buildOverflow, buildManual,

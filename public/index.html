@@ -17,6 +17,7 @@
       <a href="#/conflicts" data-nav="conflicts">Conflicts</a>
     </nav>
     <span id="gamePill" class="pill" title="Whether Civilization VI is running">Checking game…</span>
+    <button id="gsBanner" class="pill bad" type="button" hidden title="Some verdicts assume game setup you asserted — click to review or withdraw it">Assuming game setup</button>
   </header>
 
   <!-- ===== Dashboard ===== -->
@@ -269,6 +270,18 @@
       <span class="meta" id="loShown"></span>
     </div>
 
+    <section class="panel" id="gsPanel">
+      <div class="panel-head">
+        <h2>Game setup you play with <span id="gsCount" class="count"></span></h2>
+        <div class="panel-actions">
+          <button id="gsClear" type="button" class="secondary" title="Withdraw every asserted option — all verdicts go back to measured-only">Withdraw all</button>
+        </div>
+      </div>
+      <p class="hint">Assert the rulesets, game modes and settings your games use. Matching actions stop saying they require it, and every verdict decided this way is marked assumed — never measured. This changes verdicts only; the game is never touched.</p>
+      <div id="gsError"></div>
+      <div id="gsGroups"></div>
+    </section>
+
     <section class="panel">
       <div class="panel-head">
         <h2>Load order <span id="loCount" class="count"></span></h2>
@@ -374,7 +387,7 @@
   <!-- ===== Conflicts (read-only diagnostics) ===== -->
   <section class="page" id="page-conflicts" hidden>
     <div id="cfAlerts"></div>
-    <p class="hint">Diagnostics for the active profile. Both reports are read-only — they write no config and never touch the live game database — and each runs only when you click its button, never on page load.</p>
+    <p class="hint">Diagnostics for the active profile. Start with cross-mod collisions and game-logged errors — those break games; shadowing rows with no winner are choices to pin down, not crashes.</p>
 
     <section class="panel">
       <div class="panel-head">
@@ -391,12 +404,25 @@
 
     <section class="panel">
       <div class="panel-head">
+        <h2>Mod packaging <span id="cfPackagingCount" class="count"></span></h2>
+        <div class="panel-actions">
+          <button id="cfRunPackaging" type="button" class="secondary" title="Find files the game never loads, tables in the wrong database, and ids two mods share — run this after adding or updating mods, then fix the rows it lists">Check packaging</button>
+        </div>
+      </div>
+      <div class="panel-body">
+        <div class="note" id="cfPackagingEnv"></div>
+        <div class="list" id="cfPackagingList"></div>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
         <h2>DB collision replay <span id="cfReplayCount" class="count"></span></h2>
         <div class="panel-actions">
-          <label class="meta" for="cfFkMode">Missing references</label>
-          <select id="cfFkMode" title="Off runs like the game: a statement with a missing reference is skipped and the rest still run. On is a strict comparison: a file stops at the first missing reference.">
-            <option value="off">Off — like the game: keep going when references are missing</option>
-            <option value="on">On — strict check: stop each file at the first missing reference</option>
+          <label class="meta" for="cfFkMode">How to handle missing references</label>
+          <select id="cfFkMode" title="Leave Off to replay like the game: a statement with a missing reference is skipped and the rest still run. Switch On for a strict comparison: each file stops at the first missing reference.">
+            <option value="off">Off — game-like: skip past missing references</option>
+            <option value="on">On — strict: stop each file at the first missing reference</option>
           </select>
           <button id="cfRunReplay" type="button" class="secondary">Run replay</button>
         </div>
@@ -406,12 +432,14 @@
         <div class="list tall" id="cfReplayCollisions"></div>
         <h3>Files the replay skipped or stopped on</h3>
         <div class="list" id="cfReplayGated"></div>
-        <h3>Game log vs replay: what each side reports</h3>
+        <h3>Statements that changed nothing</h3>
+        <div class="list" id="cfReplayZeroRows"></div>
+        <h3>Log pairing report</h3>
         <div class="toolbar">
           <input id="cfDiffFilter" class="filter" type="search" placeholder="Type a mod&rsquo;s full name&hellip;" title="Show only the mod with exactly this full name — type the whole name" />
           <label class="toggle" title="Hide the findings no mod could be named for. The count says how many are hidden — untick to show them again."><input type="checkbox" id="cfHideUnattributed" /> Hide unnamed findings</label>
-          <span class="meta" id="cfDiffNote"></span>
         </div>
+        <div class="meta" id="cfDiffNote"></div>
         <div class="list" id="cfReplayDiff"></div>
       </div>
     </section>
@@ -436,5 +464,6 @@
   <script src="loadorder.js"></script>
   <script src="looverrides.js"></script>
   <script src="conflicts.js"></script>
+  <script src="gamesetup.js"></script>
 </body>
 </html>

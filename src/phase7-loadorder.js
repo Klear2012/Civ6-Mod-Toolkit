@@ -930,7 +930,12 @@ if (real && fs.existsSync(real)) {
   console.log('\nTest 14: the load order view');
   {
     try { fs.unlinkSync(OV_PATH); } catch (_) { /* absent */ }
-    const v = lo.profileLoadOrder(DB_PATH, { file: OV_PATH });
+    // Measured-only: the view reads the assumed-setup store beside the repo by
+    // default, and an assertion naming GAMEMODE_MONOPOLIES legitimately decides
+    // the GameOption row below through an assumed verdict. The measured
+    // contract pinned here must not depend on that ambient file, so every view
+    // in this test asserts nothing and the assumed contract gets its own block.
+    const v = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, asserted: {} });
     check('the view builds', v.ok === true, v.error || '');
     check('  and names the profile in use', v.profile && v.profile.name === 'Main', JSON.stringify(v.profile));
     check('  and offers every profile to choose from', v.groups.length === 2, JSON.stringify(v.groups.map((g) => g.name)));
@@ -1005,7 +1010,7 @@ if (real && fs.existsSync(real)) {
       JSON.stringify(v.undeclared.map((u) => u.name)));
     // Declared up here rather than at its original place: the assertion below
     // needs it, and reaching forward threw a ReferenceError that ended the run.
-    const small = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 2 });
+    const small = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 2, asserted: {} });
 
     check('  the same mod being on in ANOTHER profile does not rescue it here',
       v.summary.modsOn === 2 && small.summary.modsOn === 2,
@@ -1064,6 +1069,8 @@ if (real && fs.existsSync(real)) {
     check('  and the unknown count is exactly the undecided ones',
       undecided.length === v.summary.unknown,
       undecided.length + ' vs ' + v.summary.unknown);
+    check('  and nothing is assumed without assertions - an ambient store must never move these rows',
+      v.summary.assumed === 0, String(v.summary.assumed));
     check('  and no row decided false is left without saying why',
       decided.every((a) => a.willRun === true || a.reason),
       JSON.stringify(decided.filter((a) => !a.reason).map((a) => a.id)));
@@ -1078,6 +1085,25 @@ if (real && fs.existsSync(real)) {
       byId('GameOption').unknown[0].why);
     check('  and it is left undecided rather than guessed',
       byId('GameOption').willRun === null, String(byId('GameOption').willRun));
+    // The assumed contract: asserting the mode the GameOption row gates on
+    // decides it, flagged assumed rather than measured - while a ruleset gate
+    // with no matching assertion stays undecided, a non-match proving nothing.
+    {
+      const av = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, asserted: { 'GAMEMODE:GAMEMODE_MONOPOLIES': true } });
+      const aById = (cid) => av.bands.flatMap((b) => b.actions || []).find((a) => a.id === cid);
+      check('an asserted game option decides its row instead of leaving it undecided',
+        aById('GameOption').willRun === true, JSON.stringify(aById('GameOption')));
+      check('  and the row is flagged assumed, carrying no unknown',
+        aById('GameOption').assumed === true && aById('GameOption').unknown.length === 0,
+        JSON.stringify(aById('GameOption')));
+      check('  and the summary counts the one assumed row and one fewer unknown',
+        av.summary.assumed === 1 && av.summary.unknown === v.summary.unknown - 1,
+        JSON.stringify(av.summary));
+      check('  while a ruleset gate with no matching assertion stays undecided, naming it exactly once',
+        aById('PatchOne').willRun === null && aById('PatchOne').unknown.length === 1
+        && aById('PatchOne').assumed === false,
+        JSON.stringify(aById('PatchOne')));
+    }
     check('a ruleset condition names the ruleset, and says who picks it',
       /RULESET_EXPANSION_1/.test(byId('PatchOne').unknown[0].why)
       && /when you start a game/.test(byId('PatchOne').unknown[0].why),
@@ -1107,7 +1133,7 @@ if (real && fs.existsSync(real)) {
       small.summary.modsOn === 2, String(small.summary.modsOn));
     check('  and mod 3 is the difference between the two profiles',
       v.summary.modsOn === 2 && small.summary.modsOn === 2, `${v.summary.modsOn} / ${small.summary.modsOn}`);
-    const cmp = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 1, compareGroupId: 2 });
+    const cmp = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, groupId: 1, compareGroupId: 2, asserted: {} });
     check('and the two can be compared', cmp.compare && cmp.compare.id === 2, JSON.stringify(cmp.compare));
     const marked = cmp.bands.flatMap((b) => b.actions || []).filter((a) => a.inCompare !== null);
     check('  marking every action as in or not in the other profile', marked.length > 0, String(marked.length));
@@ -1118,7 +1144,7 @@ if (real && fs.existsSync(real)) {
     // separately rather than silently disappearing.
     const k = keyOf('PatchOne');
     await lo.applyOverrides(DB_PATH, [{ modId: M1, key: k, value: 777 }], { file: OV_PATH, statusFn: OPEN });
-    const withOv = lo.profileLoadOrder(DB_PATH, { file: OV_PATH });
+    const withOv = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, asserted: {} });
     const row = withOv.bands.flatMap((b) => b.actions || []).find((a) => a.id === 'PatchOne');
     check('an override shows on its row, with the author value beside it',
       row.state === 'overridden' && row.override.declared !== null, JSON.stringify(row.override));
@@ -1131,7 +1157,7 @@ if (real && fs.existsSync(real)) {
     // "restored" an empty file.
     const orphan = lo.readOverrides(OV_PATH).overrides;
     lo.writeOverrides(OV_PATH, { [normId(M1)]: { 'UpdateDatabase\nGone\nGone.sql': { value: 1 } } });
-    const withOrphan = lo.profileLoadOrder(DB_PATH, { file: OV_PATH });
+    const withOrphan = lo.profileLoadOrder(DB_PATH, { file: OV_PATH, asserted: {} });
     check('an override that no longer matches is listed, not hidden',
       withOrphan.unmatched.length === 1 && withOrphan.unmatched[0].state === 'orphaned', JSON.stringify(withOrphan.unmatched));
     check('  and the row it belonged to no longer claims to be overridden',

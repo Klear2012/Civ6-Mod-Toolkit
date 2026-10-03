@@ -24,3 +24,4 @@ AGENTS.md
 
 # load order overrides - one file per user, and it names an action by a key we compute
 load-order-overrides.json
+game-setup.json

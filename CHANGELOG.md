@@ -10,6 +10,21 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
+## v1.9.1 — 3 October 2026
+
+### Fixed and added
+
+- The Conflicts differential is grouped by responsible mod with per-mod counts,
+  repeated same-failure files collapsed into one finding, attributed groups
+  first, exact-match mod search, and a toggle hiding unnamed findings.
+- Game-log error attribution (workshop mapping, Modding.log bracketing,
+  calibration divergences) plus assumed-setup verdicts in view and replay.
+- Dashboard folder setup lists the game Logs and Cache folders.
+- Packaging checks scope to the active profile, silence asset noise and DLC
+  content, and window large result lists.
+- Game-setup round toggles for rulesets, modes, and settings with assumed
+  verdict labeling (multi-value criteria split into singles, OR semantics).
+
 ## v1.9.0 — 2 October 2026
 
 ### Added
