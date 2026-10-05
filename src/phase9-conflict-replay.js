@@ -25,6 +25,7 @@
 //   node src/phase9-conflict-replay.js --differential (task 2.2)
 //   node src/phase9-conflict-replay.js --envelope (task 2.3)
 //   node src/phase9-conflict-replay.js --assumed-gates (game-setup task 2.2)
+//   node src/phase9-conflict-replay.js --text-tables (replay-text-tables 1.1 + 1.2)
 //
 // Task 2.2 adds Database.log differential validation: parse Database.log
 // text into error entries and compare against replay abort findings,
@@ -706,8 +707,246 @@ function collectStatements(modSet, { preprocess = false, splitter = 'trigger-awa
 // (file, statement index) for every committed write. Report carries
 // provenance: { writes, collisions } or null when disabled (default off).
 // ---------------------------------------------------------------------------
+// replay-text-tables change (tasks 1.1, 1.2): environmental localization
+// misses plus minimal-schema text replay. Statements targeting localization
+// tables (LocalizedText, EnglishText, BaseGameText and *Text kin, unless the
+// table was created earlier in this replay) run on a purpose-built empty
+// text-schema database in its own temp dir — created lazily, only when a
+// text-targeting statement executes, and destroyed with the replay, so the
+// live game DB is never touched. Gameplay replay is otherwise unchanged:
+//   - a `no such table` miss naming a localization table is environmental,
+//     never a finding: the file rolls back like an abort but records status
+//     skipped-text, and the report states the skip once
+//     (report.textTables: which tables, how many files) instead of
+//     per-file rows, so the differential stops drowning in replay-only
+//     text noise;
+//   - genuine text errors surface normally: bad statements and duplicate
+//     keys abort their file; a duplicate key whose earlier writers are all
+//     the same mod carries sameMod like collision rows (through the
+//     differential, which spreads it; the per-file row stays an abort);
+//   - a text-side `no such column` (schema drift: the mod names a column
+//     outside Language/Tag/Text/Gender/Plurality) falls back to current
+//     behavior: the file replays whole on the gameplay copy and the
+//     fallback is recorded — never failing the replay itself;
+//   - mixed files replay statement-by-statement on whichever copy owns the
+//     target (separable-statements rule); a single statement reading both
+//     sides runs on the gameplay copy with a fallback flag, since the
+//     minimal schema cannot evaluate cross-side reads;
+//   - DDL (CREATE/DROP/ALTER) always runs on the gameplay copy, so a mod
+//     shipping its own text table keeps working exactly as before.
+// Opt out per replay via { textTables: false } (gameplay copy only, with
+// the 1.1 skip-note still applied).
+// ---------------------------------------------------------------------------
 
-function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStubs = true, gates = null, provenance = false } = {}) {
+// Localization tables the gameplay copy never carries: the three named in
+// the field (LocalizedText, EnglishText, BaseGameText) and kin —
+// localization tables are *Text tables, and the measured gameplay schema
+// carries no *Text tables of its own.
+const TEXT_TABLE_NAMES = ['LocalizedText', 'EnglishText', 'BaseGameText'];
+
+// Measured text column set (design: Language/Tag/Text/Gender/Plurality as
+// measured from the game database). The minimal schema below carries exactly
+// these columns with the (Language, Tag) key and no FKs. Payload columns
+// stay nullable so the replay never invents NOT NULL failures; the key is
+// strict so duplicate tags fail exactly like duplicate keys should.
+const TEXT_TABLE_COLUMNS = ['Language', 'Tag', 'Text', 'Gender', 'Plurality'];
+
+// Strip quoting, bracketing, and any schema prefix: [main].[LocalizedText]
+// and "LocalizedText" both read as LocalizedText.
+function cleanSqlIdent(name) {
+  let s = String(name == null ? '' : name).trim();
+  const dot = s.lastIndexOf('.');
+  if (dot >= 0) s = s.slice(dot + 1);
+  return s.replace(/^["'`[]+|["'`\]]+$/g, '');
+}
+
+// Intentional breadth: any *Text suffix counts, so a custom *Text typo
+// skips as environmental — accepted trade-off per the spec's "and kin".
+function isTextTableName(name) {
+  const clean = cleanSqlIdent(name);
+  if (!clean) return false;
+  const lower = clean.toLowerCase();
+  if (lower === 'localizedtext' || lower === 'englishtext' || lower === 'basegametext') return true;
+  return lower.length > 4 && lower.slice(-4) === 'text';
+}
+
+// A `no such table` miss naming a localization table is environmental (the
+// gameplay copy carries no text tables), never a mod finding. Returns the
+// table name as written, or null for any other error.
+function textTableMiss(error) {
+  const msg = String((error && error.message) || error || '');
+  const m = /no such table:\s*["'`[]?([^\s;"'`\]]+)/i.exec(msg);
+  if (!m) return null;
+  const table = cleanSqlIdent(m[1]);
+  return table && isTextTableName(table) ? table : null;
+}
+
+// A text-side column miss: { table, column } with table null when the
+// message names none. Only text-table misses fall back; anything else is a
+// genuine error for the abort path.
+function textColumnMiss(error) {
+  const msg = String((error && error.message) || error || '');
+  let m = /table\s+([^\s]+)\s+has no column named\s+([^\s;]+)/i.exec(msg);
+  if (m) return { table: cleanSqlIdent(m[1]), column: cleanSqlIdent(m[2]) };
+  m = /no such column:\s*([^\s;]+)/i.exec(msg);
+  if (!m) return null;
+  const raw = cleanSqlIdent(m[1]);
+  const parts = raw.split('.');
+  if (parts.length > 1) {
+    return { table: parts.slice(0, -1).join('.'), column: parts[parts.length - 1] };
+  }
+  return { table: null, column: raw };
+}
+
+// Table half of a UNIQUE-constraint failure, or null for other errors.
+function uniqueMissTable(error) {
+  const msg = String((error && error.message) || error || '');
+  const m = /UNIQUE constraint failed:\s*([A-Za-z_$][\w$]*)/i.exec(msg);
+  if (!m) return null;
+  return cleanSqlIdent(m[1].split('.')[0]);
+}
+
+// Whether a text-side column miss falls back (unknown column on a
+// text-table target) rather than aborting. Bare `no such column: X` (no
+// table named) falls back: the statement only targets text tables.
+function textColumnFallback(error, targets) {
+  const miss = textColumnMiss(error);
+  if (!miss) return null;
+  if (miss.table && !isTextTableName(miss.table)) return null;
+  if (miss.table && !(targets || []).some((t) => String(t).toLowerCase() === String(miss.table).toLowerCase())) {
+    return null;
+  }
+  return miss.column || 'unknown';
+}
+
+function textSchemaSql() {
+  const cols = 'Language TEXT NOT NULL, Tag TEXT NOT NULL, Text TEXT, Gender TEXT, Plurality TEXT,'
+    + ' PRIMARY KEY(Language, Tag)';
+  return TEXT_TABLE_NAMES.map((t) => `CREATE TABLE ${t}(${cols});`).join('\n');
+}
+
+// Fresh empty text-schema database in its own temp dir: the text leg of the
+// temp-copy discipline (created, replayed, path reported, destroyed — never
+// the live game DB, of which there is no text copy to take).
+function createTextSchemaCopy({ prefix = 'civ6-conflict-replay-text-' } = {}) {
+  const tmpDir = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), prefix)));
+  const tempDbPath = path.join(tmpDir, 'DebugLocalization.sqlite');
+  const init = new DatabaseSync(tempDbPath);
+  try {
+    init.exec(textSchemaSql());
+  } catch (e) {
+    try { init.close(); } finally { destroyTempCopy(tmpDir); }
+    throw e;
+  }
+  init.close();
+  return { tmpDir, tempDbPath };
+}
+
+// Blank string literals and comments so target extraction never reads SQL
+// out of a text value. Quoted identifiers (`.."..`, [..]) keep their inner
+// text (those quotes are never string literals); "..." spans keep theirs
+// only when identifier-shaped, else they blank like the value-position
+// literals the double-quote rewrite exists for. Heuristic, declared: a
+// comment marker inside a string literal eats to end-of-line (fails safe
+// toward the gameplay copy), and a spaceless "..." literal in a non-target
+// position reads bare (harmless outside INTO/FROM/JOIN/UPDATE positions).
+function blankSqlLiterals(sqlText) {
+  return String(sqlText || '')
+    .replace(/--[^\n]*/g, ' ')
+    .replace(/\/\*[\s\S]*?\*\//g, ' ')
+    .replace(/'(?:[^']|'')*'/g, "''")
+    .replace(/`((?:``|[^`])*)`/g, (_, inner) => inner.replace(/``/g, '`'))
+    .replace(/\[([^\]]*)\]/g, (_, inner) => inner)
+    .replace(/"((?:""|[^"])*)"/g, (m, inner) => {
+      const unesc = inner.replace(/""/g, '"');
+      return /^[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*$/.test(unesc) ? unesc : '""';
+    });
+}
+
+const TEXT_TBL_REF = '([A-Za-z_$][\\w$]*(?:\\.[A-Za-z_$][\\w$]*)?)';
+
+// Every table a statement reads or writes (deduped, first-seen order).
+// Covers the DML the splitter emits; DDL needs no targets (it always runs
+// on the gameplay copy).
+function stmtTargets(sql) {
+  const flat = blankSqlLiterals(sql).replace(/\s+/g, ' ');
+  const out = [];
+  const push = (raw) => {
+    const t = cleanSqlIdent(raw);
+    if (t && !out.some((x) => x.toLowerCase() === t.toLowerCase())) out.push(t);
+  };
+  let m;
+  const intoRe = new RegExp('\\b(?:INSERT(?:\\s+OR\\s+(?:ABORT|FAIL|IGNORE|REPLACE|ROLLBACK))?|REPLACE)\\s+INTO\\s+'
+    + TEXT_TBL_REF, 'gi');
+  while ((m = intoRe.exec(flat)) !== null) push(m[1]);
+  const updRe = new RegExp('\\bUPDATE(?:\\s+OR\\s+\\w+)?\\s+' + TEXT_TBL_REF + '(?=\\s+SET\\b)', 'gi');
+  while ((m = updRe.exec(flat)) !== null) push(m[1]);
+  const delRe = new RegExp('\\bDELETE\\s+FROM\\s+' + TEXT_TBL_REF, 'gi');
+  while ((m = delRe.exec(flat)) !== null) push(m[1]);
+  const fromRe = new RegExp('\\b(?:FROM|JOIN)\\s+' + TEXT_TBL_REF, 'gi');
+  while ((m = fromRe.exec(flat)) !== null) push(m[1]);
+  return out;
+}
+
+// Which copy owns a statement: 'text' only when every target is a
+// localization table the replay has not created on the gameplay copy.
+// Anything else (gameplay tables, mod-created tables, target-less
+// statements) stays where it has always run.
+function routeStatementTargets(targets, gameplayTables) {
+  const known = (t) => (gameplayTables || new Set()).has(String(t).toLowerCase());
+  const text = (targets || []).filter((t) => isTextTableName(t) && !known(t));
+  const game = (targets || []).filter((t) => !isTextTableName(t) || known(t));
+  if (text.length > 0 && game.length === 0) return 'text';
+  return 'gameplay';
+}
+
+const TEXT_CREATE_REF = '("[^"]+"|`[^`]+`|\\[[^\\]]+\\]|[A-Za-z_$][\\w$]*)';
+
+function createdTableOf(sql) {
+  const m = new RegExp('\\bCREATE\\s+(?:TEMP\\s+|TEMPORARY\\s+)?TABLE\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?'
+    + TEXT_CREATE_REF, 'i').exec(String(sql || ''));
+  return m ? cleanSqlIdent(m[1]).toLowerCase() : null;
+}
+
+function droppedTableOf(sql) {
+  const m = new RegExp('\\bDROP\\s+TABLE\\s+(?:IF\\s+EXISTS\\s+)?' + TEXT_CREATE_REF, 'i')
+    .exec(String(sql || ''));
+  return m ? cleanSqlIdent(m[1]).toLowerCase() : null;
+}
+
+// Zero-rows-affected: an UPDATE/DELETE that runs clean but matches nothing
+// is flagged, never an error. Shared by both copies: the statement stays
+// executed and the file stays committed either way.
+function recordZeroRows(conn, sql, file, s, rec, zeroRows) {
+  const verb = leadingVerb(sql);
+  if (verb !== 'UPDATE' && verb !== 'DELETE') return;
+  let affected = null;
+  try {
+    affected = conn.prepare('SELECT changes() AS n').get().n;
+  } catch (_) {
+    affected = null;
+  }
+  if (affected === 0) {
+    rec.zeroRows.push(s);
+    zeroRows.push({
+      modId: file.modId,
+      fileLabel: file.fileLabel,
+      stmtIndex: s,
+      globalIndex: file.baseGlobalIndex + s,
+      verb,
+      fidelityLimited: ['replay-relative', ...fileLimitationFlags(file.stages)],
+    });
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Ordered replay with per-file SAVEPOINT abort emulation (see the
+// replay-text-tables notes above for the text leg): the first failing
+// statement rolls back only its own file (ROLLBACK TO + RELEASE on every
+// copy the file touched) and replay continues with the next file.
+// ---------------------------------------------------------------------------
+
+function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStubs = true, gates = null, provenance = false, textTables = true } = {}) {
   assertTempPath(tempDbPath);
   const db = new DatabaseSync(tempDbPath);
   const started = Date.now();
@@ -726,6 +965,18 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
   const provInstalled = new Set();
   let provWriters = null;
   let provCollisions = null;
+  // Text leg (replay-text-tables 1.1/1.2): tables the gameplay copy carries
+  // (seeded from its schema, plus every table DDL creates there as the
+  // replay runs) route gameplay-side even when *Text-named, so a mod
+  // shipping its own text table replays exactly as before.
+  const gameplayTables = new Set(listUserTables(db).map((t) => String(t).toLowerCase()));
+  let textDb = null;
+  let textTmp = null;
+  const textWriters = new Map();
+  const skippedTextTables = new Map();
+  let skippedTextFiles = 0;
+  let routedTextFiles = 0;
+  const textFallback = [];
   try {
     db.exec(`PRAGMA foreign_keys=${fkMode}`);
     if (provenance) {
@@ -742,6 +993,7 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
         makeHashStubReason = 'stub-disabled';
       }
     }
+    const textHashNeeded = needsMakeHash(allStmts);
     collected.files.forEach((file, i) => {
       const sp = `cr_file_${i}`;
       const rec = {
@@ -753,6 +1005,7 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
         error: null,
         failedAt: null,
         zeroRows: [],
+        routed: 'gameplay',
       };
       // Task 2.1: pick up tables created by earlier files. Runs outside the
       // per-file SAVEPOINT so the triggers persist like the tables do.
@@ -798,55 +1051,151 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
       }
       db.exec(`SAVEPOINT "${sp}"`);
       const provSnapshot = new Set(provInstalled);
+      const zrMark = zeroRows.length;
+      let tSp = null;
+      let touchedText = false;
+      let touchedGame = false;
+      let forceGameplay = false;
+      let fileFallback = null;
+      const liveTextTables = new Set();
+      const flagFallback = (reason) => {
+        if (fileFallback) return;
+        fileFallback = reason;
+        textFallback.push({ modId: file.modId, fileLabel: file.fileLabel, reason });
+      };
+      const ensureText = () => {
+        if (!textDb) {
+          textTmp = createTextSchemaCopy();
+          assertTempPath(textTmp.tempDbPath);
+          textDb = new DatabaseSync(textTmp.tempDbPath);
+          textDb.exec(`PRAGMA foreign_keys=${fkMode}`);
+          if (textHashNeeded && installStubs) installMakeHashStub(textDb);
+        }
+        if (!tSp) {
+          tSp = `cr_text_${i}`;
+          textDb.exec(`SAVEPOINT "${tSp}"`);
+        }
+      };
       let failed = false;
       for (let s = 0; s < file.statements.length; s += 1) {
-        try {
-          if (provenance) {
-            setProvenanceWriter(db, {
-              modId: file.modId,
-              fileLabel: file.fileLabel,
-              stmtIndex: s,
-              globalIndex: file.baseGlobalIndex + s,
-            });
+        const sql = file.statements[s];
+        const verb = leadingVerb(sql);
+        const ddl = verb === 'CREATE' || verb === 'DROP' || verb === 'ALTER';
+        let targets = [];
+        let side = 'gameplay';
+        if (textTables && !forceGameplay && !ddl && verb) {
+          targets = stmtTargets(sql);
+          side = routeStatementTargets(targets, gameplayTables);
+          if (side === 'gameplay'
+            && targets.some((t) => isTextTableName(t) && !gameplayTables.has(t.toLowerCase()))) {
+            // One statement reading both sides: the minimal schema cannot
+            // evaluate cross-side reads, so it runs where it always has,
+            // flagged. (Separable-statements rule, non-separable case.)
+            flagFallback('cross-side-statement-uses-text-and-gameplay-tables');
           }
-          db.exec(file.statements[s]);
-          rec.executed += 1;
-          executed += 1;
-          // Zero-rows-affected: an UPDATE/DELETE that runs clean but matches
-          // nothing is flagged, never an error — the statement stays executed
-          // and the file stays committed. SELECT changes() reflects the
-          // statement's own row count (trigger sub-statements excluded), so
-          // this reads correctly with provenance triggers installed too.
-          // Fidelity-limited by construction: zero rows matched in THIS
-          // replay, whose order, gates, and earlier aborts may differ from
-          // the game's, hence the replay-relative flag on every finding.
-          const verb = leadingVerb(file.statements[s]);
-          if (verb === 'UPDATE' || verb === 'DELETE') {
-            let affected = null;
-            try {
-              affected = db.prepare('SELECT changes() AS n').get().n;
-            } catch (_) {
-              affected = null;
+        }
+        try {
+          if (side === 'text') {
+            ensureText();
+            textDb.exec(sql);
+            touchedText = true;
+            for (const t of targets) {
+              if (isTextTableName(t)) liveTextTables.add(t.toLowerCase());
             }
-            if (affected === 0) {
-              rec.zeroRows.push(s);
-              zeroRows.push({
+            rec.executed += 1;
+            executed += 1;
+            recordZeroRows(textDb, sql, file, s, rec, zeroRows);
+          } else {
+            if (provenance) {
+              setProvenanceWriter(db, {
                 modId: file.modId,
                 fileLabel: file.fileLabel,
                 stmtIndex: s,
                 globalIndex: file.baseGlobalIndex + s,
-                verb,
-                fidelityLimited: ['replay-relative', ...fileLimitationFlags(file.stages)],
               });
             }
-          }
-          // Task 2.1: tables born mid-file need triggers for later
-          // statements in the same file. Installed inside the SAVEPOINT so
-          // a later abort removes table and triggers together.
-          if (provenance && /^\s*CREATE\s+(TEMP\s+|TEMPORARY\s+)?TABLE\b/i.test(file.statements[s])) {
-            installProvenanceTriggers(db, provInstalled);
+            db.exec(sql);
+            touchedGame = true;
+            rec.executed += 1;
+            executed += 1;
+            // Zero-rows-affected: an UPDATE/DELETE that runs clean but
+            // matches nothing is flagged, never an error — the statement
+            // stays executed and the file stays committed. SELECT changes()
+            // reflects the statement's own row count (trigger sub-statements
+            // excluded), so this reads correctly with provenance triggers
+            // installed too. Fidelity-limited by construction: zero rows
+            // matched in THIS replay, whose order, gates, and earlier aborts
+            // may differ from the game's, hence the replay-relative flag on
+            // every finding.
+            recordZeroRows(db, sql, file, s, rec, zeroRows);
+            if (verb === 'CREATE') {
+              const created = createdTableOf(sql);
+              if (created) gameplayTables.add(created);
+            } else if (verb === 'DROP') {
+              const dropped = droppedTableOf(sql);
+              if (dropped) gameplayTables.delete(dropped);
+            }
+            // Task 2.1: tables born mid-file need triggers for later
+            // statements in the same file. Installed inside the SAVEPOINT so
+            // a later abort removes table and triggers together.
+            if (provenance && /^\s*CREATE\s+(TEMP\s+|TEMPORARY\s+)?TABLE\b/i.test(sql)) {
+              installProvenanceTriggers(db, provInstalled);
+            }
           }
         } catch (e) {
+          if (!forceGameplay && side === 'text') {
+            const fallbackColumn = textColumnFallback(e, targets);
+            if (fallbackColumn) {
+              // Schema drift (a column outside the minimal set): roll both
+              // copies back and replay the whole file on the gameplay copy
+              // (current behavior), flagged. Never fails the replay itself.
+              flagFallback(`unknown-column:${fallbackColumn}`);
+              db.exec(`ROLLBACK TO "${sp}"`);
+              if (tSp) textDb.exec(`ROLLBACK TO "${tSp}"`);
+              rolledBack += rec.executed;
+              executed -= rec.executed;
+              rec.executed = 0;
+              rec.zeroRows.length = 0;
+              zeroRows.length = zrMark;
+              liveTextTables.clear();
+              forceGameplay = true;
+              s = -1;
+              continue;
+            }
+          }
+          const miss = textTableMiss(e);
+          if (miss) {
+            // 1.1: environmental localization miss (on either copy — the
+            // minimal schema carries only the three named tables, so *Text
+            // kin misses there too). Rolls back like an abort but records
+            // skipped-text: no per-file row, aggregated into the once-per-
+            // replay note instead.
+            rec.status = 'skipped-text';
+            rec.error = e.message;
+            rec.failedAt = file.baseGlobalIndex + s;
+            rolledBack += rec.executed;
+            executed -= rec.executed;
+            rec.executed = 0;
+            skippedTextFiles += 1;
+            if (!skippedTextTables.has(miss.toLowerCase())) skippedTextTables.set(miss.toLowerCase(), miss);
+            failed = true;
+            break;
+          }
+          if (side === 'text') {
+            // 1.2: duplicate text keys abort their file like any genuine
+            // error. Same-mod layering (every earlier writer of the key's
+            // table is this mod — the text copy starts empty, so the
+            // conflicting row can only come from an earlier committed file
+            // or this file's own rolled-back statements) carries sameMod
+            // like collision rows; cross-mod stays untagged and surfaces
+            // normally. Table-level and conservative by design: it tags only
+            // when no other mod has touched the table.
+            const dupTable = uniqueMissTable(e);
+            if (dupTable) {
+              const writers = textWriters.get(dupTable.toLowerCase()) || new Set();
+              if ([...writers].every((m) => m === file.modId)) rec.sameMod = true;
+            }
+          }
           rec.status = 'aborted';
           rec.error = e.message;
           rec.failedAt = file.baseGlobalIndex + s;
@@ -865,6 +1214,21 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
         provSnapshot.forEach((t) => provInstalled.add(t));
       }
       db.exec(`RELEASE "${sp}"`);
+      if (tSp) {
+        if (failed) textDb.exec(`ROLLBACK TO "${tSp}"`);
+        textDb.exec(`RELEASE "${tSp}"`);
+      }
+      if (!failed) {
+        for (const t of liveTextTables) {
+          if (!textWriters.has(t)) textWriters.set(t, new Set());
+          textWriters.get(t).add(file.modId);
+        }
+      }
+      // Files whose final replay touched the text copy count as routed;
+      // fallbacks belong to the fallback list (their final replay ran on
+      // the gameplay copy), whatever they attempted first.
+      if (touchedText && !fileFallback) routedTextFiles += 1;
+      rec.routed = fileFallback ? 'fallback' : (touchedText ? (touchedGame ? 'split' : 'text') : 'gameplay');
       perFile.push(rec);
     });
     if (provenance) {
@@ -873,8 +1237,17 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
     }
   } finally {
     db.close();
+    if (textDb) {
+      try { textDb.close(); } finally { destroyTempCopy(textTmp.tmpDir); }
+    }
   }
   const wallMs = Date.now() - started;
+  const skippedTables = [...skippedTextTables.values()]
+    .sort((a, b) => (a.toLowerCase() < b.toLowerCase() ? -1 : a.toLowerCase() > b.toLowerCase() ? 1 : 0));
+  const textNote = skippedTables.length > 0
+    ? `skipped ${skippedTextFiles} text file(s) naming tables the gameplay copy does not carry`
+      + ` (${skippedTables.join(', ')}): environmental misses, stated once here instead of per file`
+    : null;
   return {
     tempDbPath,
     total: collected.total,
@@ -892,6 +1265,14 @@ function replayOrdered(tempDbPath, collected, { foreignKeys = false, installStub
     makeHashStub,
     makeHashStubReason,
     provenance: provenance ? { writes: provWriters, collisions: provCollisions } : null,
+    textTables: {
+      note: textNote,
+      tables: skippedTables,
+      files: skippedTextFiles,
+      routed: routedTextFiles,
+      textDbPath: textTmp ? textTmp.tempDbPath : null,
+      fallback: textFallback,
+    },
   };
 }
 
@@ -2473,6 +2854,7 @@ function collectReplayErrors(report, collected) {
       stmtIndex,
       globalIndex: typeof rec.failedAt === 'number' ? rec.failedAt : null,
       error: rec.error,
+      ...(rec.sameMod === true ? { sameMod: true } : {}),
     });
   });
   return out;
@@ -2502,6 +2884,7 @@ function differentialValidate(report, logInput, collected) {
         stmtIndex: re.stmtIndex,
         globalIndex: re.globalIndex,
         replayError: re.error,
+        ...(re.sameMod === true ? { sameMod: true } : {}),
         logLine: logErrors[hit].line,
         logText: logErrors[hit].text,
       });
@@ -3331,6 +3714,303 @@ function runAssumedGates() {
   return pass;
 }
 
+// ---------------------------------------------------------------------------
+// --text-tables (replay-text-tables 1.1 + 1.2): localization-table misses
+// skip with a once-per-replay note, and text-targeting files replay against
+// a minimal text-schema copy with genuine-error surfacing. Temp scratch
+// fixtures only, never a real game DB.
+// ---------------------------------------------------------------------------
+
+function runTextTables() {
+  let pass = true;
+  const check = (label, cond, extra = '') => {
+    console.log(`  [${cond ? 'PASS' : 'FAIL'}] ${label}${extra ? ` :: ${extra}` : ''}`);
+    if (!cond) pass = false;
+  };
+  const tmpRoot = fs.realpathSync.native(os.tmpdir());
+
+  const scratch = fs.realpathSync.native(fs.mkdtempSync(path.join(os.tmpdir(), 'civ6-conflict-replay-text-')));
+  console.log(`conflict-replay --text-tables (replay-text-tables 1.1 + 1.2)\nscratch dir: ${scratch}`);
+  const makeSource = (name, seedSql) => {
+    const p = path.join(scratch, name);
+    const db = new DatabaseSync(p);
+    try { db.exec(seedSql); } finally { db.close(); }
+    return p;
+  };
+  const tmpUnder = (p) => typeof p === 'string' && p.startsWith(tmpRoot);
+
+  const GAME_SEED = 'CREATE TABLE Units(UnitType TEXT PRIMARY KEY);'
+    + "INSERT INTO Units VALUES('WARRIOR');";
+  const TEXT_CLEAN = [
+    {
+      modId: 'mod-text',
+      files: [
+        {
+          label: 'text.sql',
+          text: 'INSERT INTO LocalizedText (Language, Tag, Text)'
+            + " VALUES ('en_US', 'LOC_HELLO', 'Hello');\n"
+            + 'INSERT INTO LocalizedText (Language, Tag, Text, Gender)'
+            + " VALUES ('en_US', 'LOC_BYE', 'Bye', 'Masculine');",
+        },
+        {
+          label: 'more.xml',
+          text: '<GameData><LocalizedText>'
+            + '<Row Language="en_US" Tag="LOC_XML" Text="From XML"/>'
+            + '</LocalizedText></GameData>',
+        },
+      ],
+    },
+  ];
+
+  console.log('\nTest 1 (1.1): text misses skip with a once-per-replay note, zero abort rows');
+  const srcA = makeSource('game-a.sqlite', GAME_SEED);
+  const beforeA = sha256(srcA);
+  const cA = createTempCopy(srcA);
+  console.log(`temp copy: ${cA.tempDbPath}`);
+  const collectedA = collectStatements(TEXT_CLEAN, { preprocess: true });
+  const repA = replayOrdered(cA.tempDbPath, collectedA, { textTables: false });
+  console.log(`  note: ${repA.textTables.note}`);
+  repA.perFile.forEach((f) => {
+    console.log(`  per-file: ${f.modId}/${f.fileLabel} ${f.status} (${f.executed}/${f.statements})`
+      + (f.error ? ` :: ${f.error}` : ''));
+  });
+  check('both text files skipped-text, none aborted',
+    repA.perFile.length === 2 && repA.perFile.every((f) => f.status === 'skipped-text'),
+    repA.perFile.map((f) => `${f.fileLabel}:${f.status}`).join(', '));
+  check('zero abort rows on the text fixture',
+    repA.perFile.every((f) => f.status !== 'aborted'));
+  check('note states the table set and the file count',
+    !!repA.textTables.note && repA.textTables.note.includes('LocalizedText')
+    && repA.textTables.tables.join(',') === 'LocalizedText' && repA.textTables.files === 2,
+    repA.textTables.note);
+  check('nothing executed (miss at statement 0)', repA.executed === 0, `got ${repA.executed}`);
+  const diffA = differentialValidate(repA, [], collectedA);
+  check('no replay-only text noise in the differential', diffA.replayOnly.length === 0,
+    `got ${diffA.replayOnly.length}`);
+  destroyTempCopy(cA.tmpDir);
+  check('source content unchanged', sha256(srcA) === beforeA);
+
+  console.log('\nTest 2 (1.2): clean text files replay against the minimal text-schema copy');
+  const srcB = makeSource('game-b.sqlite', GAME_SEED);
+  const beforeB = sha256(srcB);
+  const cB = createTempCopy(srcB);
+  const repB = replayOrdered(cB.tempDbPath, collectStatements(TEXT_CLEAN, { preprocess: true }));
+  console.log(`  text copy: ${repB.textTables.textDbPath}`);
+  repB.perFile.forEach((f) => {
+    console.log(`  per-file: ${f.modId}/${f.fileLabel} ${f.status} (${f.executed}/${f.statements}) routed=${f.routed}`);
+  });
+  check('clean text files commit', repB.perFile.every((f) => f.status === 'committed'),
+    repB.perFile.map((f) => `${f.fileLabel}:${f.status}`).join(', '));
+  check('every text statement executed', repB.executed === 3, `got ${repB.executed}`);
+  check('both files routed to the text copy', repB.textTables.routed === 2
+    && repB.perFile.every((f) => f.routed === 'text'), `got routed=${repB.textTables.routed}`);
+  check('no skip note when nothing skipped', repB.textTables.note === null);
+  check('text copy path reported under the OS temp dir', tmpUnder(repB.textTables.textDbPath),
+    repB.textTables.textDbPath);
+  check('text copy destroyed with the replay', !fs.existsSync(repB.textTables.textDbPath));
+  destroyTempCopy(cB.tmpDir);
+  check('gameplay temp copy cleaned up', !fs.existsSync(cB.tempDbPath));
+  check('source content unchanged', sha256(srcB) === beforeB);
+
+  console.log('\nMinimal schema semantics (own temp copy, direct)');
+  const sc = createTextSchemaCopy({ prefix: 'civ6-conflict-replay-text-schema-' });
+  check('schema copy lives under the OS temp dir', tmpUnder(sc.tempDbPath), sc.tempDbPath);
+  const scDb = new DatabaseSync(sc.tempDbPath);
+  let dupErr = '';
+  let badErr = '';
+  let colErr = '';
+  try {
+    scDb.exec("INSERT INTO LocalizedText (Language, Tag, Text) VALUES ('en_US', 'LOC_S', 'S');");
+    try {
+      scDb.exec("INSERT INTO LocalizedText (Language, Tag, Text) VALUES ('en_US', 'LOC_S', 'again');");
+    } catch (e) { dupErr = e.message; }
+    try {
+      scDb.exec('INSERT INTO LocalizedText (Language, Tag, Text VALUES (1);');
+    } catch (e) { badErr = e.message; }
+    try {
+      scDb.exec("INSERT INTO LocalizedText (Language, Tag, Text, FutureCol) VALUES ('en_US', 'LOC_F', 'F', 'x');");
+    } catch (e) { colErr = e.message; }
+    const got = scDb.prepare("SELECT Text FROM LocalizedText WHERE Tag = 'LOC_S'").get().Text;
+    check('named-column inserts land', got === 'S', `got ${got}`);
+  } finally {
+    scDb.close();
+  }
+  check('duplicate keys fail UNIQUE', /UNIQUE constraint failed/i.test(dupErr), dupErr);
+  check('bad statements fail (not silently kept)', !!badErr && !textTableMiss(badErr), badErr);
+  check('unknown columns fail as column misses', !!textColumnMiss(colErr), colErr);
+  destroyTempCopy(sc.tmpDir);
+  check('schema copy cleaned up', !fs.existsSync(sc.tempDbPath));
+
+  console.log('\nTest 3 (1.2): bad text statements surface normally');
+  const srcC = makeSource('game-c.sqlite', GAME_SEED);
+  const cC = createTempCopy(srcC);
+  const badSet = [
+    {
+      modId: 'mod-bad',
+      files: [
+        { label: 'bad.sql', text: 'INSERT INTO LocalizedText (Language, Tag, Text VALUES (1);' },
+      ],
+    },
+  ];
+  const repC = replayOrdered(cC.tempDbPath, collectStatements(badSet));
+  console.log(`  per-file: ${repC.perFile[0].status} :: ${repC.perFile[0].error}`);
+  check('bad text file aborts', repC.perFile[0].status === 'aborted');
+  check('abort is genuine (not a table miss)', !textTableMiss(repC.perFile[0].error));
+  const diffC = differentialValidate(repC, [], collectStatements(badSet));
+  check('bad statement surfaces in the differential',
+    diffC.replayOnly.length === 1 && diffC.replayOnly[0].fileLabel === 'bad.sql'
+    && diffC.replayOnly[0].sameMod === undefined,
+    JSON.stringify(diffC.replayOnly.map((r) => r.fileLabel)));
+  destroyTempCopy(cC.tmpDir);
+
+  console.log('\nTest 4 (1.2): cross-mod duplicate keys surface normally, untagged');
+  const srcD = makeSource('game-d.sqlite', GAME_SEED);
+  const cD = createTempCopy(srcD);
+  const dupRow = "INSERT INTO LocalizedText (Language, Tag, Text) VALUES ('en_US', 'LOC_DUP', 'D');";
+  const crossSet = [
+    { modId: 'mod-a', files: [{ label: 'a.sql', text: dupRow }] },
+    { modId: 'mod-b', files: [{ label: 'b.sql', text: dupRow }] },
+  ];
+  const collectedD = collectStatements(crossSet);
+  const repD = replayOrdered(cD.tempDbPath, collectedD);
+  repD.perFile.forEach((f) => {
+    console.log(`  per-file: ${f.modId}/${f.fileLabel} ${f.status}` + (f.error ? ` :: ${f.error}` : ''));
+  });
+  check('first writer commits', repD.perFile[0].status === 'committed');
+  check('second writer aborts UNIQUE',
+    repD.perFile[1].status === 'aborted' && /UNIQUE constraint failed/i.test(repD.perFile[1].error || ''),
+    repD.perFile[1].error);
+  check('cross-mod duplicate carries no same-mod tag', repD.perFile[1].sameMod === undefined);
+  const diffD = differentialValidate(repD, [], collectedD);
+  check('cross-mod duplicate surfaces untagged in the differential',
+    diffD.replayOnly.length === 1 && diffD.replayOnly[0].sameMod === undefined);
+  destroyTempCopy(cD.tmpDir);
+
+  console.log('\nTest 5 (1.2): same-mod duplicates carry the same-mod tag');
+  const srcE = makeSource('game-e.sqlite', GAME_SEED);
+  const cE = createTempCopy(srcE);
+  const sameSet = [
+    {
+      modId: 'mod-a',
+      files: [
+        { label: 'first.sql', text: dupRow },
+        { label: 'second.sql', text: dupRow },
+      ],
+    },
+  ];
+  const collectedE = collectStatements(sameSet);
+  const repE = replayOrdered(cE.tempDbPath, collectedE);
+  repE.perFile.forEach((f) => {
+    console.log(`  per-file: ${f.modId}/${f.fileLabel} ${f.status}`
+      + (f.sameMod ? ' [same mod]' : '') + (f.error ? ` :: ${f.error}` : ''));
+  });
+  check('layered file aborts UNIQUE', repE.perFile[1].status === 'aborted'
+    && /UNIQUE constraint failed/i.test(repE.perFile[1].error || ''));
+  check('same-mod duplicate tagged on the per-file row', repE.perFile[1].sameMod === true);
+  const errsE = collectReplayErrors(repE, collectedE);
+  check('tag rides the replay error row', errsE.length === 1 && errsE[0].sameMod === true);
+  const diffE = differentialValidate(repE, [], collectedE);
+  check('tag rides the replay-only row',
+    diffE.replayOnly.length === 1 && diffE.replayOnly[0].sameMod === true);
+  const logErr = repE.perFile[1].error;
+  const diffAgree = differentialValidate(repE,
+    [{ line: 3, text: `[3] [Gameplay] ERROR: ${logErr}`, message: logErr }], collectedE);
+  check('tag rides the agreement row when the log matches',
+    diffAgree.agreements.length === 1 && diffAgree.agreements[0].sameMod === true);
+  destroyTempCopy(cE.tmpDir);
+
+  console.log('\nTest 6 (1.2): unknown columns fall back to current behavior, never fail the replay');
+  const srcF = makeSource('game-f.sqlite', GAME_SEED);
+  const cF = createTempCopy(srcF);
+  const driftSet = [
+    {
+      modId: 'mod-drift',
+      files: [
+        {
+          label: 'drift.sql',
+          text: "INSERT INTO LocalizedText (Language, Tag, Text, FutureCol) VALUES ('en_US', 'LOC_F', 'F', 'x');",
+        },
+      ],
+    },
+  ];
+  let repF = null;
+  let threw = false;
+  try {
+    repF = replayOrdered(cF.tempDbPath, collectStatements(driftSet));
+  } catch (e) {
+    threw = true;
+    console.log(`  threw: ${e.message}`);
+  }
+  check('replay never throws on drift', !threw && !!repF);
+  if (repF) {
+    console.log(`  per-file: ${repF.perFile[0].status} routed=${repF.perFile[0].routed} :: ${repF.perFile[0].error}`);
+    console.log(`  fallback: ${JSON.stringify(repF.textTables.fallback)}`);
+    check('drift file falls back with its reason',
+      repF.textTables.fallback.length === 1
+      && repF.textTables.fallback[0].fileLabel === 'drift.sql'
+      && /^unknown-column:/.test(repF.textTables.fallback[0].reason),
+      JSON.stringify(repF.textTables.fallback));
+    check('drift file ends skipped-text on the gameplay copy', repF.perFile[0].status === 'skipped-text');
+    check('skip note still states the miss', !!repF.textTables.note
+      && repF.textTables.note.includes('LocalizedText'), repF.textTables.note);
+  }
+  destroyTempCopy(cF.tmpDir);
+
+  console.log('\nTest 7 (1.2): mixed files replay each statement on its own copy');
+  const srcG = makeSource('game-g.sqlite', GAME_SEED);
+  const cG = createTempCopy(srcG);
+  const mixSet = [
+    {
+      modId: 'mod-mix',
+      files: [
+        {
+          label: 'mix.sql',
+          text: "INSERT INTO Units VALUES('SCOUT');\n"
+            + "INSERT INTO LocalizedText (Language, Tag, Text) VALUES ('en_US', 'LOC_SCOUT', 'Scout');",
+        },
+      ],
+    },
+  ];
+  const repG = replayOrdered(cG.tempDbPath, collectStatements(mixSet));
+  console.log(`  per-file: ${repG.perFile[0].status} routed=${repG.perFile[0].routed}`
+    + ` (${repG.perFile[0].executed}/${repG.perFile[0].statements})`);
+  check('mixed file commits', repG.perFile[0].status === 'committed');
+  check('mixed file marked split', repG.perFile[0].routed === 'split', repG.perFile[0].routed);
+  const landed = (() => {
+    const db = new DatabaseSync(cG.tempDbPath, { readOnly: true });
+    try { return db.prepare("SELECT count(*) AS n FROM Units WHERE UnitType = 'SCOUT'").get().n; }
+    finally { db.close(); }
+  })();
+  check('gameplay statement lands in the gameplay copy', landed === 1, `got ${landed}`);
+  destroyTempCopy(cG.tmpDir);
+
+  console.log('\nTest 8: miss/table helpers');
+  check('three named tables route text-side',
+    isTextTableName('LocalizedText') && isTextTableName('englishtext') && isTextTableName('BaseGameText'));
+  check('*Text kin counts, gameplay tables do not',
+    isTextTableName('FrenchText') && !isTextTableName('Units') && !isTextTableName('NoSuchTable'));
+  check('table misses parse (quoted and schema-qualified)',
+    textTableMiss('no such table: LocalizedText') === 'LocalizedText'
+    && textTableMiss('no such table: "EnglishText"') === 'EnglishText'
+    && textTableMiss('no such table: main.BaseGameText') === 'BaseGameText');
+  check('gameplay misses are not table misses',
+    textTableMiss('no such table: NoSuchTable') === null
+    && textTableMiss('UNIQUE constraint failed: T.Id') === null
+    && textTableMiss('near "VALUES": syntax error') === null);
+  check('duplicate-key tables parse', uniqueMissTable('UNIQUE constraint failed: LocalizedText.Language') === 'LocalizedText');
+  check('column misses parse',
+    (textColumnMiss('table LocalizedText has no column named FutureCol') || {}).column === 'FutureCol'
+    && (textColumnMiss('no such column: FutureCol') || {}).column === 'FutureCol'
+    && textColumnMiss('no such table: LocalizedText') === null);
+
+  if (pass) fs.rmSync(scratch, { recursive: true, force: true });
+
+  console.log(`\n${'='.repeat(60)}`);
+  console.log(pass ? 'CONFLICT-REPLAY TEXT-TABLES: ALL CHECKS PASSED' : 'CONFLICT-REPLAY TEXT-TABLES: FAILURES PRESENT');
+  console.log('='.repeat(60));
+  return pass;
+}
+
 module.exports = {
   createTempCopy,
   destroyTempCopy,
@@ -3391,9 +4071,22 @@ module.exports = {
   formatReplayEnvelope,
   envelopeFixtureModSet,
   runEnvelope,
+  TEXT_TABLE_NAMES,
+  TEXT_TABLE_COLUMNS,
+  cleanSqlIdent,
+  isTextTableName,
+  textTableMiss,
+  textColumnMiss,
+  uniqueMissTable,
+  textColumnFallback,
+  textSchemaSql,
+  createTextSchemaCopy,
+  stmtTargets,
+  routeStatementTargets,
   preprocessFile,
   collectStatements,
   replayOrdered,
+  runTextTables,
   holdLiveExclusiveForCopy,
   lockedCopyTrial,
   runLiveLock,
@@ -3434,6 +4127,10 @@ if (require.main === module) {
     const ok = runAssumedGates();
     process.exit(ok ? 0 : 1);
   }
-  console.error(`unknown flag ${arg}; usage: node src/phase9-conflict-replay.js [--check|--fidelity|--gates|--provenance|--differential|--envelope|--live-lock|--assumed-gates]`);
+  if (arg === '--text-tables') {
+    const ok = runTextTables();
+    process.exit(ok ? 0 : 1);
+  }
+  console.error(`unknown flag ${arg}; usage: node src/phase9-conflict-replay.js [--check|--fidelity|--gates|--provenance|--differential|--envelope|--live-lock|--assumed-gates|--text-tables]`);
   process.exit(2);
 }

@@ -9,7 +9,7 @@ civ6-paths.json
 mod-labels.json
 
 # AI agent environment - planning artifacts and session state, never shipped
-openspec/
+openspec/changes/
 .opencode/
 .agents/
 .openchamber/
@@ -25,3 +25,7 @@ AGENTS.md
 # load order overrides - one file per user, and it names an action by a key we compute
 load-order-overrides.json
 game-setup.json
+
+# local-only planning index and decision log (point into gitignored openspec/changes/)
+docs/TRACEABILITY.md
+docs/decisions/

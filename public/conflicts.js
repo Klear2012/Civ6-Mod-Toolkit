@@ -426,6 +426,14 @@ function cfDiffSideLabel(side) {
   return 'Game log only';
 }
 
+// Same-mod duplicates (replay-text-tables): a duplicate text key whose
+// earlier writers are all the same mod reads as one author's layering, like
+// same-mod collision rows. Plain words with a what-to-do-next tooltip.
+function cfSameModTag(r) {
+  if (!r || !r.sameMod) return '';
+  return ' <span class="lo-tag" title="The same mod wrote this twice — open the file at the named statement and keep one.">same mod</span>';
+}
+
 function cfDiffRowHtml(f) {
   const r = f.first;
   const files = [...new Set(f.rows.map((x) => x.fileLabel || '(no file hint)'))];
@@ -448,7 +456,7 @@ function cfDiffRowHtml(f) {
     : r.side === 'replay-only'
       ? 'Only the replay raised this — a lead to check; open the file at the named statement.'
       : 'Only the game log reports this — it actually broke something; read the line, then open the named file if there is one.';
-  return `<div class="lo-row" title="${tip}"><span class="lo-mod">${esc(cfDiffSideLabel(r.side))}: ${what}</span>${cfStrengthTag(r)}`
+  return `<div class="lo-row" title="${tip}"><span class="lo-mod">${esc(cfDiffSideLabel(r.side))}: ${what}</span>${cfStrengthTag(r)}${cfSameModTag(r)}`
     + `<span class="lo-detail">${detail}</span></div>`;
 }
 
@@ -513,6 +521,10 @@ function cfAssumedTag(g) {
   return ' <span class="lo-tag lo-assumed" title="Decided by your asserted game setup, never measured — change it in the game-setup panel">assumed setup</span>';
 }
 
+// Text-table skip note (replay-text-tables): the backend states the skip
+// once per replay (report.textTables.note), so the page renders that note
+// verbatim - no table parsing here.
+
 function cfRenderReplay() {
   const d = cfState.replay;
   if (!d || !d.ok) return;
@@ -522,6 +534,16 @@ function cfRenderReplay() {
   if (d.limitationFlags.length) bits.push(`limited by: ${esc(d.limitationFlags.join(', '))}`);
   if (d.unreadable.length) bits.push(`${esc(n(d.unreadable.length))} unreadable file(s) skipped`);
   if (d.skippedGated) bits.push(`${esc(n(d.skippedGated))} statement(s) gated out`);
+  const textNote = d.textTables && d.textTables.note;
+  if (textNote) bits.push(esc(textNote));
+  const textFallback = (d.textTables && d.textTables.fallback) || [];
+  if (textFallback.length) {
+    const reasons = textFallback.map((fb) => {
+      const why = /^unknown-column:(.+)$/.exec(String((fb && fb.reason) || ''));
+      return `${fb.fileLabel} (${why ? `names column ${why[1]}, outside the text replay` : 'reads both text and gameplay tables'})`;
+    }).join('; ');
+    bits.push(`${esc(n(textFallback.length))} text file${textFallback.length === 1 ? '' : 's'} replayed on the gameplay copy instead — ${esc(reasons)}. Open the file and check the named column or statement.`);
+  }
   $('cfReplayEnv').innerHTML = `<p>${bits.join(' · ')}</p>`
     + '<p>Start here: cross-mod pairs first — same-mod pairs are one author\u2019s layering. '
     + 'The gated and skipped lists below explain what the replay did not cover.</p>';
@@ -549,7 +571,7 @@ function cfRenderReplay() {
   }
   const aborted = d.perFile.filter((f) => f.status === 'aborted');
   for (const f of aborted) {
-    gated.push(`<div class="lo-row" title="Nothing after that statement ran — open the file at that statement and fix it."><span class="lo-mod">${renderCivText(f.modName || f.modId)} / ${esc(f.fileLabel)}</span>`
+    gated.push(`<div class="lo-row" title="Nothing after that statement ran — open the file at that statement and fix it."><span class="lo-mod">${renderCivText(f.modName || f.modId)} / ${esc(f.fileLabel)}</span>${cfSameModTag(f)}`
       + `<span class="lo-detail">stopped at statement ${esc(n(f.failedAt))} — ${esc(f.error)}</span></div>`);
   }
   $('cfReplayGated').innerHTML = gated.length

@@ -875,6 +875,11 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
   const envelope = conflictReplay.buildReplayEnvelope(report);
   const nameById = conflictModNameIndex();
   const folderMap = conflictLogFolderMap();
+  // Text-schema fallback files (replay-text-tables): files the replay ran
+  // whole on the gameplay copy, so the page can state the drift instead of
+  // staying silent about it.
+  const fallbackFiles = new Set((((report.textTables || {}).fallback) || [])
+    .map((fb) => `${fb.modId}\x1f${fb.fileLabel}`));
   const perFile = report.perFile.map((f) => ({
     modId: f.modId,
     modName: conflictDisplayName(f.modId, nameById),
@@ -886,10 +891,13 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
     failedAt: f.failedAt,
     gate: f.gate || null,
     gateUnknown: !!f.gateUnknown,
+    ...(f.sameMod === true ? { sameMod: true } : {}),
     flags: conflictReplay.fileLimitationFlags(
-      (collected.files.find((c) => c.modId === f.modId && c.fileLabel === f.fileLabel) || {}).stages),
+      (collected.files.find((c) => c.modId === f.modId && c.fileLabel === f.fileLabel) || {}).stages)
+      .concat(fallbackFiles.has(`${f.modId}\x1f${f.fileLabel}`) ? ['text-schema-fallback'] : []),
   }));
-  const limitationFlags = [...new Set((report.provenance.collisions || []).flatMap((c) => c.fidelityLimited))].sort();
+  const limitationFlags = [...new Set((report.provenance.collisions || []).flatMap((c) => c.fidelityLimited)
+    .concat(fallbackFiles.size > 0 ? ['text-schema-fallback'] : []))].sort();
 
   // Differential validation against Database.log, when the log is there to
   // read. Absent or oversized is reported, never silent and never fatal.
@@ -955,6 +963,7 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
     envelopeLine: conflictReplay.formatReplayEnvelope(envelope),
     collisions: conflictCollisionDisplay(report.provenance.collisions, nameById),
     limitationFlags,
+    textTables: report.textTables,
     stages: conflictStageTotals(collected),
     gatedOut: withModDisplayNames(report.gatedOut, nameById),
     gatedUnknown: withModDisplayNames(report.gatedUnknown, nameById),

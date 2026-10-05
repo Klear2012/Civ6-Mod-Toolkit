@@ -10,6 +10,12 @@ licence and with the original copyright left intact.
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
 
+## [Unreleased]
+
+### Added
+
+### Fixed
+
 ## v1.9.1 — 3 October 2026
 
 ### Fixed and added
