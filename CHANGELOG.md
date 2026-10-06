@@ -21,6 +21,8 @@ Versions are tagged, and each tag produces a Windows zip on the
 - Phase 4 profiles (299), Phase 8 browser-scripts (140), Phase 10 packaging (73), and shadowing (59) proofs gain `node:test` mirrors (`tests/profiles.test.js`, `tests/browser-scripts.test.js`, `tests/packaging.test.js`, `tests/shadowing.test.js`) for filtered dev-loop runs. No behavior change; phase scripts + `check:release` stay authoritative.
 - Phase 7 loadorder (339) and Phase 9 conflict-replay (253) proofs gain `node:test` mirrors (`tests/loadorder.test.js`, `tests/conflict-replay.test.js`) plus lib extraction (`src/conflict-replay.js`, `src/server.js` require swap, thin wrapper). No behavior change; phase scripts + `check:release` stay authoritative.
 
+- Server and load-order internals split with no behavior change: selfcheck to `src/server-selfcheck.js`, criteria gating to `src/gates.js`, fit geometry to `src/loadorder-fit.js`, store layer to `src/loadorder-store.js`, and the `handleApi` if-chain to a first-match `ROUTES` table (conflict builders deliberately stay in `src/server.js` — split 4 dropped per ADR-012). Export-equality and route-inventory diffs identical; `tests/` mirrors + `check:release` stay authoritative.
+
 ### Fixed
 
 ## v1.9.1 — 3 October 2026

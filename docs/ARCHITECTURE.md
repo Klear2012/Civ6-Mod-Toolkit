@@ -5,7 +5,10 @@ and conflicts here; the game database is never written.
 
 ## Entry and pipeline
 
-Entry: `src/server.js`. The pipeline keeps the phase order; the checks that
+Entry: `src/server.js`, fanned out to split modules (`server-selfcheck.js`,
+`gates.js`, `loadorder-fit.js`, `loadorder-store.js`) with API dispatch
+through a first-match `ROUTES` table — pure restructure, no behavior change.
+The pipeline keeps the phase order; the checks that
 used to be phase scripts are now stdlib `node:test` mirrors (`tests/` is the
 single source of truth):
 
