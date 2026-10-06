@@ -629,7 +629,7 @@ function secondXmlRoot(clean, tok) {
 }
 
 // Operation tags the game understands inside a table: the converter's own
-// XML_OP_CANON set (see phase9-conflict-replay.js). Anything else nested in a
+// XML_OP_CANON set (see conflict-replay.js). Anything else nested in a
 // table is skipped by the game, so it is provably dead content worth naming.
 const XML_TABLE_OPS = new Set(['row', 'replace', 'update', 'delete', 'insertorignore']);
 

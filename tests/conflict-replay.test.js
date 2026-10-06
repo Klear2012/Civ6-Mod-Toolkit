@@ -1,7 +1,7 @@
 'use strict';
 
-// tests/conflict-replay.test.js — node:test mirror of
-// src/phase9-conflict-replay.js (9 suites, 253 executed checks).
+// tests/conflict-replay.test.js — node:test mirror of the conflict-replay
+// library (src/conflict-replay.js; 9 suites, 253 executed checks).
 //
 // Record-then-replay (Wave 3 phase4 pattern): node:test runs every describe
 // body before any it(), so the scratch-DB flows CANNOT live in describe
