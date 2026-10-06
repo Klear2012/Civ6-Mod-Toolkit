@@ -11,7 +11,7 @@
     "phase2": "node src/phase2-save.js",
     "phase4": "node src/phase4-profiles.js",
     "phase5": "node src/phase5-labels.js",
-    "phase6": "node src/phase6-sorting.js",
+    "test:sorting": "node --test tests/sorting.test.js",
     "phase7": "node src/phase7-loadorder.js",
     "phase8": "node src/phase8-scripts.js",
     "phase9-replay": "node src/phase9-conflict-replay.js --envelope && node src/phase9-conflict-replay.js --text-tables",
@@ -20,7 +20,7 @@
     "phase9-selfcheck": "node src/server.js --selfcheck",
     "phase-game-setup": "node src/phase-game-setup.js",
     "phaseclean": "node src/phase-clean.js",
-    "check:release": "npm run phase4 && npm run phase5 && npm run phase6 && npm run phase7 && npm run phase8 && npm run phase9-replay && npm run phase9-shadowing && npm run phase10-packaging && npm run phase9-selfcheck && npm run phase-game-setup && npm run phaseclean",
+    "check:release": "npm run phase4 && npm run phase5 && npm run test:sorting && npm run phase7 && npm run phase8 && npm run phase9-replay && npm run phase9-shadowing && npm run phase10-packaging && npm run phase9-selfcheck && npm run phase-game-setup && npm run phaseclean",
     "edit": "node src/edit-config.js"
   },
   "author": "cru121 (Steam: evzenhouzvicka), maintained by Klear2012",
