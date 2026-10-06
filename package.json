@@ -18,9 +18,9 @@
     "phase9-shadowing": "node src/phase9-shadowing.js --envelope",
     "phase10-packaging": "node src/phase10-packaging.js",
     "phase9-selfcheck": "node src/server.js --selfcheck",
-    "phase-game-setup": "node src/phase-game-setup.js",
+    "test:game-setup": "node --test tests/game-setup.test.js",
     "phaseclean": "node src/phase-clean.js",
-    "check:release": "npm run phase4 && npm run test:labels && npm run test:sorting && npm run phase7 && npm run phase8 && npm run phase9-replay && npm run phase9-shadowing && npm run phase10-packaging && npm run phase9-selfcheck && npm run phase-game-setup && npm run phaseclean",
+    "check:release": "npm run phase4 && npm run test:labels && npm run test:sorting && npm run phase7 && npm run phase8 && npm run phase9-replay && npm run phase9-shadowing && npm run phase10-packaging && npm run phase9-selfcheck && npm run test:game-setup && npm run phaseclean",
     "edit": "node src/edit-config.js"
   },
   "author": "cru121 (Steam: evzenhouzvicka), maintained by Klear2012",
