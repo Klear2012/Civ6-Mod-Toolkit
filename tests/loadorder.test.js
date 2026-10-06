@@ -1,6 +1,6 @@
 'use strict';
 
-// tests/loadorder.test.js — node:test mirror of src/phase7-loadorder.js.
+// tests/loadorder.test.js — node:test suite for load-order overrides (cut over from src/phase7-loadorder.js).
 //
 // Record-then-replay (Wave 3 phase4 pattern, async extension): node:test runs
 // every describe body before any it(), so the sequential shared-DB flow
@@ -15,8 +15,9 @@
 //
 // Scratch discipline: the child owns its TMP (own synthetic Mods.sqlite,
 // own overrides file, spawned servers on test ports against scratch copies
-// with CIV6_* env overrides); the live game DB is never named. Old script
-// stays authoritative (dual-run); this file is additive.
+// with CIV6_* env overrides); the live game DB is never named. Cut over in
+// cutover-gate-to-node-test: the phase script is deleted and this file is
+// authoritative.
 
 const { describe, it, after } = require('node:test');
 const { makeTmp, assert } = require('./helpers');
@@ -108,7 +109,7 @@ async function runRecordFlow() {
     try { await fn(); } finally { current = prev; }
   };
 
-  // ---- fixtures (src/phase7-loadorder.js seed/addAction, verbatim) ----
+  // ---- fixtures (deleted src/phase7-loadorder.js seed/addAction, verbatim) ----
 
   seed();
 

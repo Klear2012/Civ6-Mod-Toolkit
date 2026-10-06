@@ -246,7 +246,7 @@ pages['load-overrides'] = { show: lovEditShow };
 //
 // Every new top-level name here carries the lovEdit prefix: classic <script>
 // tags share one global scope, so a bare `post`/`load`-style name risks the
-// concatenated-parse failure src/phase8-scripts.js exists to catch.
+// concatenated-parse failure tests/browser-scripts.test.js exists to catch.
 //
 // Split of duties: the preview is computed client-side from GET
 // /api/load-order bands with the fit/offset algorithm from design.md, and

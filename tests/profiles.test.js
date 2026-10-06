@@ -1,7 +1,7 @@
 'use strict';
 
-// Mirror of src/phase4-profiles.js (Tests 1-21 plus Test 20a) as
-// node:test + node:assert.
+// Suite for mod groups / player profiles, cut over from
+// src/phase4-profiles.js (Tests 1-21 plus Test 20a).
 //
 // One it() per executed check(), fixtures and expectations verbatim, so the
 // executed-check count gate (299) proves 1:1 cover. Run the whole file with
@@ -21,8 +21,8 @@
 // standalone. The argv-gated real-database block (13 sites, needs a game
 // install) is excluded exactly like the no-arg baseline run excludes it.
 //
-// The old script stays authoritative (dual-run); this file never replaces it
-// in this change.
+// Cut over in cutover-gate-to-node-test: the phase script is deleted and
+// this file is authoritative.
 
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');

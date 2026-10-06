@@ -14,7 +14,8 @@
 //
 // Scratch discipline: every suite builds its own scratch dir via
 // fs.realpathSync.native + os.tmpdir(); the live game DB is never named.
-// Old wrapper stays authoritative (dual-run); this file is additive.
+// Cut over in cutover-gate-to-node-test: the wrapper is deleted and this file
+// (via src/conflict-replay.js) is authoritative.
 
 const { describe, it } = require('node:test');
 const { assert } = require('./helpers');

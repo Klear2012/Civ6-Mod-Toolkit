@@ -5,29 +5,32 @@ and conflicts here; the game database is never written.
 
 ## Entry and pipeline
 
-Entry: `src/server.js`. Work flows through `src/phase*.js` in order:
+Entry: `src/server.js`. The pipeline keeps the phase order; the checks that
+used to be phase scripts are now stdlib `node:test` mirrors (`tests/` is the
+single source of truth):
 
-| Phase | Script | Owns |
+| Phase | Gate step | Owns |
 |---|---|---|
-| 0 | `phase0-roundtrip.js` | `.Civ6Cfg` parse/edit/save round-trip proof |
-| 1 | `phase1-inventory.js` | Mod inventory and diff |
-| 2 | `phase2-save.js` | Save-adjacent handling |
-| 4 | `phase4-profiles.js` | Profiles (mod groups) |
-| 5 | `phase5-labels.js` | Mod labels |
-| 6 | `phase6-sorting.js` | Sorting |
-| 7 | `phase7-loadorder.js` | Load order resolution |
-| 8 | `phase8-scripts.js` | Script handling |
-| 9 | `phase9-conflict-replay.js`, `phase9-shadowing.js` | Conflict replay + UI shadowing |
-| 10 | `phase10-packaging.js` | Release packaging |
-| game-setup | `phase-game-setup.js` | Setup rounds and verdicts |
-| clean | `phase-clean.js` | Stray-artifact gate |
+| 0 | `phase0-roundtrip.js` (manual tool, out of gate) | `.Civ6Cfg` parse/edit/save round-trip proof |
+| 1 | `phase1-inventory.js` (manual tool, out of gate) | Mod inventory and diff |
+| 2 | `phase2-save.js` (manual tool, out of gate) | Save-adjacent handling |
+| 4 | `test:profiles` (`tests/profiles.test.js`) | Profiles (mod groups) |
+| 5 | `test:labels` (`tests/labels.test.js`) | Mod labels |
+| 6 | `test:sorting` (`tests/sorting.test.js`) | Sorting |
+| 7 | `test:loadorder` (`tests/loadorder.test.js`) | Load order resolution |
+| 8 | `test:scripts` (`tests/browser-scripts.test.js`) | Script handling |
+| 9 | `test:replay` (`tests/conflict-replay.test.js`), `test:shadowing` (`tests/shadowing.test.js`) | Conflict replay + UI shadowing |
+| 10 | `test:packaging` (`tests/packaging.test.js`) | Release packaging |
+| game-setup | `test:game-setup` (`tests/game-setup.test.js`) | Setup rounds and verdicts |
+| selfcheck | `phase9-selfcheck` (`node src/server.js --selfcheck`, product code) | Conflict-diagnosis selfcheck |
+| clean | `phaseclean` (`node src/phase-clean.js`) | Stray-artifact gate |
 
-Each phase script runs alone with `node`. Full gate: `npm run check:release`
-(phases 4–8 plus replay, shadowing, packaging, selfcheck, game-setup, clean).
-No test framework; phase scripts are the verification. Phases 4 (profiles), 5 (labels), 6
-(sorting), 7 (loadorder), 8 (browser-scripts), 9-shadowing, 9-replay, and 10 (packaging) plus game-setup additionally have stdlib `node:test` mirrors
-(`tests/profiles.test.js`, `tests/labels.test.js`, `tests/sorting.test.js`, `tests/loadorder.test.js`, `tests/browser-scripts.test.js`, `tests/shadowing.test.js`, `tests/conflict-replay.test.js`, `tests/packaging.test.js`, `tests/game-setup.test.js`)
-for filtered runs; the phase scripts stay authoritative.
+Each mirror runs alone with `node --test tests/<name>.test.js`, or one slice
+with `node --test --test-name-pattern="<name>" tests/<name>.test.js`.
+Full gate: `npm run check:release` (the `test:*` steps plus selfcheck and
+clean). No test framework beyond the Node standard library; the `tests/`
+mirrors are the verification. The old `src/phase4`-up proof scripts were
+deleted at cutover after 1:1 cover was proven per file.
 
 ## Data model
 

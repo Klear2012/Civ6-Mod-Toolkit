@@ -1,6 +1,6 @@
 'use strict';
 
-// Mirror of src/phase9-shadowing.js (all four suites) as node:test + node:assert.
+// Suite for UI file-shadowing enumeration (cut over from src/phase9-shadowing.js, all four suites).
 //
 // One it() per check(), seeds and expectations verbatim, so the
 // check()-to-it() count gate (59) proves 1:1 cover. Run the whole file with
@@ -8,8 +8,8 @@
 // `node --test --test-name-pattern="<name>" tests/shadowing.test.js`
 // (this Node rejects the `-t` shorthand — always spell it out).
 //
-// The old script stays authoritative (dual-run); this file never replaces it
-// in this change. Unlike the script's CLI flags (--contested/--winners/
+// Cut over in cutover-gate-to-node-test: the phase script is deleted and
+// this file is authoritative. Unlike the script's CLI flags (--contested/--winners/
 // --envelope/--warnings select suites), this file seeds and runs every suite
 // unconditionally against its own scratch database, so one process covers
 // all 59 checks.

@@ -1,6 +1,6 @@
 'use strict';
 
-// Mirror of src/phase5-labels.js (Tests 1-11) as node:test + node:assert.
+// node:test suite cut over from src/phase5-labels.js (Tests 1-11).
 //
 // One it() per check(), fixtures and expectations verbatim, so the
 // check()-to-it() count gate (124) proves 1:1 cover. Run the whole file with
@@ -8,8 +8,8 @@
 // `node --test --test-name-pattern="<name>" tests/labels.test.js`
 // (this Node rejects the `-t` shorthand — always spell it out).
 //
-// The old script stays authoritative (dual-run); this file never replaces it
-// in this change.
+// Cut over in cutover-gate-to-node-test: the phase script is deleted and
+// this file is authoritative.
 
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');

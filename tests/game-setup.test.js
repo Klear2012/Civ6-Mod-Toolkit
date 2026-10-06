@@ -1,14 +1,14 @@
 'use strict';
 
-// Mirror of src/phase-game-setup.js (Tests 1-8 of 1-15) as node:test + node:assert.
+// node:test suite cut over from src/phase-game-setup.js (Tests 1-8 of 1-15).
 //
 // One it() per check(), fixtures and expectations verbatim, so the
 // check(-to-it( count gate (116) proves 1:1 cover. Run the whole file with
 // `node --test tests/game-setup.test.js`, or one slice with
 // `node --test --test-name-pattern="<name>" tests/game-setup.test.js`.
 //
-// The old script stays authoritative (dual-run); this file never replaces it
-// in this change.
+// Cut over in cutover-gate-to-node-test: the phase script is deleted and
+// this file is authoritative.
 
 const { describe, it, after } = require('node:test');
 const assert = require('node:assert/strict');

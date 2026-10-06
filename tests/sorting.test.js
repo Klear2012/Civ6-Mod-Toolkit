@@ -1,14 +1,14 @@
 'use strict';
 
-// Mirror of src/phase6-sorting.js (Tests 1-11) as node:test + node:assert.
+// node:test suite cut over from src/phase6-sorting.js (Tests 1-11).
 //
 // One it() per check(), labels and expectations verbatim, so the
 // check(-to-it( count gate (59) proves 1:1 cover. Run the whole file with
 // `node --test tests/sorting.test.js`, or one slice with
 // `node --test tests/sorting.test.js -t "wiring"`.
 //
-// The old script stays authoritative (dual-run); this file never replaces it
-// in this change.
+// Cut over in cutover-gate-to-node-test: the phase script is deleted and
+// this file is authoritative.
 
 const { describe, it } = require('node:test');
 const assert = require('node:assert/strict');
@@ -21,7 +21,7 @@ const readPage = (file) => fs.readFileSync(path.join(__dirname, '..', 'public', 
 const names = (list) => list.map((m) => m.name);
 const str = (list) => names(list).join(', ');
 
-// Fixture verbatim from src/phase6-sorting.js library().
+// Fixture kept verbatim from the deleted src/phase6-sorting.js library().
 function library() {
   return [
     { name: 'Zeta', sortName: 'Zeta', source: 'local', enabled: false, labels: [] },

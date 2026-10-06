@@ -1,6 +1,7 @@
 'use strict';
 
-// Mirror of src/phase8-scripts.js (Tests 1-14) as node:test + node:assert.
+// Suite for the browser page's scripts, checked the way a browser loads them
+// (cut over from src/phase8-scripts.js, Tests 1-14).
 //
 // One it() per executed check(), labels and expectations verbatim
 // (per-script and per-nav loops unroll to one it() per execution), so the
@@ -9,8 +10,8 @@
 // `node --test --test-name-pattern="<name>" tests/browser-scripts.test.js`
 // (this Node rejects the `-t` shorthand — always spell it out).
 //
-// The old script stays authoritative (dual-run); this file never replaces it
-// in this change.
+// Cut over in cutover-gate-to-node-test: the phase script is deleted and
+// this file is authoritative.
 //
 // Why the combination check exists: classic <script> tags share ONE global
 // scope, so a top-level `const` in two files is a SyntaxError the browser

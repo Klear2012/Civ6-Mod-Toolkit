@@ -1,6 +1,6 @@
 'use strict';
 
-// Mirror of src/phase10-packaging.js (Tests 1-5) as node:test + node:assert.
+// Suite for static packaging checks (cut over from src/phase10-packaging.js, Tests 1-5).
 //
 // One it() per check(), fixtures and expectations verbatim, so the
 // check()-to-it() count gate (73) proves 1:1 cover. Run the whole file with
@@ -8,8 +8,8 @@
 // `node --test --test-name-pattern="<name>" tests/packaging.test.js`
 // (this Node rejects the `-t` shorthand — always spell it out).
 //
-// The old script stays authoritative (dual-run); this file never replaces it
-// in this change.
+// Cut over in cutover-gate-to-node-test: the phase script is deleted and
+// this file is authoritative.
 
 const { describe, it, before, after } = require('node:test');
 const assert = require('node:assert/strict');

@@ -14,6 +14,8 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 ### Added
 
+- Release gate cut over from phase scripts to `node:test` mirrors: `check:release` now runs `test:sorting`, `test:labels`, `test:game-setup`, `test:scripts`, `test:packaging`, `test:shadowing`, `test:profiles`, `test:loadorder`, and `test:replay` (same suites, same content — names only change; shadowing/replay full-file runs are content supersets of the old flagged invocations). The 9 `src/phase*-up` proof scripts are deleted; `tests/` is the single source of truth. `check:release` name and order kept; `phaseclean`, `phase9-selfcheck`, and `phase0/1/2` manual tools untouched. Known limitation: argv-gated real-DB checks stay out of the mirrors per ADR-008.
+
 - Phase 6 sorting proof gains a `node:test` mirror (`tests/sorting.test.js`, 59 expectations 1:1) for filtered dev-loop runs. No behavior change; `node src/phase6-sorting.js` and `npm run check:release` stay authoritative.
 - Phase 5 labels (124 expectations) and game-setup (116 expectations) proofs gain `node:test` mirrors (`tests/labels.test.js`, `tests/game-setup.test.js`) for filtered dev-loop runs. No behavior change; phase scripts and `check:release` stay authoritative.
 - Phase 4 profiles (299), Phase 8 browser-scripts (140), Phase 10 packaging (73), and shadowing (59) proofs gain `node:test` mirrors (`tests/profiles.test.js`, `tests/browser-scripts.test.js`, `tests/packaging.test.js`, `tests/shadowing.test.js`) for filtered dev-loop runs. No behavior change; phase scripts + `check:release` stay authoritative.
