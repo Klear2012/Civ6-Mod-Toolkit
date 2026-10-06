@@ -16,6 +16,7 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 - Phase 6 sorting proof gains a `node:test` mirror (`tests/sorting.test.js`, 59 expectations 1:1) for filtered dev-loop runs. No behavior change; `node src/phase6-sorting.js` and `npm run check:release` stay authoritative.
 - Phase 5 labels (124 expectations) and game-setup (116 expectations) proofs gain `node:test` mirrors (`tests/labels.test.js`, `tests/game-setup.test.js`) for filtered dev-loop runs. No behavior change; phase scripts and `check:release` stay authoritative.
+- Phase 4 profiles (299), Phase 8 browser-scripts (140), Phase 10 packaging (73), and shadowing (59) proofs gain `node:test` mirrors (`tests/profiles.test.js`, `tests/browser-scripts.test.js`, `tests/packaging.test.js`, `tests/shadowing.test.js`) for filtered dev-loop runs. No behavior change; phase scripts + `check:release` stay authoritative.
 
 ### Fixed
 

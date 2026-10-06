@@ -24,9 +24,9 @@ Entry: `src/server.js`. Work flows through `src/phase*.js` in order:
 
 Each phase script runs alone with `node`. Full gate: `npm run check:release`
 (phases 4–8 plus replay, shadowing, packaging, selfcheck, game-setup, clean).
-No test framework; phase scripts are the verification. Phases 5 (labels) and 6
-(sorting) plus game-setup additionally have stdlib `node:test` mirrors
-(`tests/labels.test.js`, `tests/sorting.test.js`, `tests/game-setup.test.js`)
+No test framework; phase scripts are the verification. Phases 4 (profiles), 5 (labels), 6
+(sorting), 8 (browser-scripts), 9-shadowing, and 10 (packaging) plus game-setup additionally have stdlib `node:test` mirrors
+(`tests/profiles.test.js`, `tests/labels.test.js`, `tests/sorting.test.js`, `tests/browser-scripts.test.js`, `tests/shadowing.test.js`, `tests/packaging.test.js`, `tests/game-setup.test.js`)
 for filtered runs; the phase scripts stay authoritative.
 
 ## Data model
