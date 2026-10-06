@@ -14,6 +14,8 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 ### Added
 
+- Phase 6 sorting proof gains a `node:test` mirror (`tests/sorting.test.js`, 59 expectations 1:1) for filtered dev-loop runs. No behavior change; `node src/phase6-sorting.js` and `npm run check:release` stay authoritative.
+
 ### Fixed
 
 ## v1.9.1 — 3 October 2026
