@@ -11,6 +11,12 @@
 //
 // The old script stays authoritative (dual-run); this file never replaces it
 // in this change.
+//
+// Why the combination check exists: classic <script> tags share ONE global
+// scope, so a top-level `const` in two files is a SyntaxError the browser
+// punishes by discarding BOTH files (once unreachable-override-surfaced as a
+// router bug). Per-file `node --check` cannot see this by construction — each
+// file is valid alone — so this file checks the combination, like a browser.
 
 const { describe, it, before } = require('node:test');
 const assert = require('node:assert/strict');
