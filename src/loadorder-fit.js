@@ -5,29 +5,20 @@
 // src/loadorder.js (facade re-export there). Read-only: nothing here
 // writes the database, the store, or a backup.
 //
-// Loadorder-owned deps (modFile, stampIsStale, cleanValue, SENTINEL,
-// MIN/MAX_VALUE) arrive via initFit, called once by the facade - the
-// parameter-passing fallback from the split design: the store module that
-// would own cleanValue/SENTINEL does not exist yet, so fit cannot require
-// them without a cycle. normId/MISSPELLINGS come from leaf modules.
+// DB-layer deps (modFile, stampIsStale) arrive via initFit, called once by
+// the facade. Store consts and cleanValue come from ./loadorder-store.js
+// (their single owner); normId/MISSPELLINGS come from leaf modules.
 
 const { normId } = require('./modinfo');
 const { MISSPELLINGS } = require('./gates');
+const { cleanValue, SENTINEL, MIN_VALUE, MAX_VALUE } = require('./loadorder-store');
 
 let modFile;
 let stampIsStale;
-let cleanValue;
-let SENTINEL;
-let MIN_VALUE;
-let MAX_VALUE;
 
 function initFit(deps) {
   modFile = deps.modFile;
   stampIsStale = deps.stampIsStale;
-  cleanValue = deps.cleanValue;
-  SENTINEL = deps.SENTINEL;
-  MIN_VALUE = deps.MIN_VALUE;
-  MAX_VALUE = deps.MAX_VALUE;
 }
 
 // Block-move proposal (load-order-edit 1.1, 1.2). Read-only: nothing below
