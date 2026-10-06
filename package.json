@@ -9,7 +9,7 @@
     "phase0": "node src/phase0-roundtrip.js",
     "phase1": "node src/phase1-inventory.js",
     "phase2": "node src/phase2-save.js",
-    "phase4": "node src/phase4-profiles.js",
+    "test:profiles": "node --test tests/profiles.test.js",
     "test:labels": "node --test tests/labels.test.js",
     "test:sorting": "node --test tests/sorting.test.js",
     "phase7": "node src/phase7-loadorder.js",
@@ -20,7 +20,7 @@
     "phase9-selfcheck": "node src/server.js --selfcheck",
     "test:game-setup": "node --test tests/game-setup.test.js",
     "phaseclean": "node src/phase-clean.js",
-    "check:release": "npm run phase4 && npm run test:labels && npm run test:sorting && npm run phase7 && npm run test:scripts && npm run phase9-replay && npm run test:shadowing && npm run test:packaging && npm run phase9-selfcheck && npm run test:game-setup && npm run phaseclean",
+    "check:release": "npm run test:profiles && npm run test:labels && npm run test:sorting && npm run phase7 && npm run test:scripts && npm run phase9-replay && npm run test:shadowing && npm run test:packaging && npm run phase9-selfcheck && npm run test:game-setup && npm run phaseclean",
     "edit": "node src/edit-config.js"
   },
   "author": "cru121 (Steam: evzenhouzvicka), maintained by Klear2012",
