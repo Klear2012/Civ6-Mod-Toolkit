@@ -981,807 +981,864 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
   };
 }
 
-async function handleApi(req, res, url) {
-  // GET /api/state -> paths, config list, installed inventory
-  if (req.method === 'GET' && url.pathname === '/api/state') {
-    const sources = paths.getSources();
-    const installed = scanMods(sources);
+// -------- API routes (internal table, split 6) ----------------------------
+//
+// handleApi dispatches through ROUTES below: first match wins, in the
+// order the if-chain used. `match` is an exact pathname except the single
+// POST `/api/modgroups/` prefix entry (kind: 'prefix'). Each branch body
+// moved verbatim into its named handler; match order, fallthrough
+// (none: every branch returns), terminal 404, and in-handler 404s are
+// behavior-identical.
+
+// GET /api/state -> paths, config list, installed inventory
+async function handleGetState(req, res, url) {
+  const sources = paths.getSources();
+  const installed = scanMods(sources);
+  return send(res, 200, {
+    sources,
+    saves: paths.getSavesDir(),
+    logs: paths.getLogsDir(),
+    cache: paths.getCacheDir(),
+    pathsError: paths.overridesStatus().error,
+    ...listConfigs(),
+    installed: installed.map((m) => ({ id: m.id, idNorm: m.idNorm, name: m.name, type: m.type })),
+  });
+}
+
+// GET /api/load-order -> the profile's load order, read-only.
+async function handleGetLoadOrder(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 200, { ok: false, error: 'Mod database not found.', groups: [], profile: null, bands: [], summary: {} });
+  return send(res, 200, loadOrderResponse(modsDb, url));
+}
+
+// GET /api/action-files -> one action's file list (?componentRowId=N) or one
+// mod's actions with theirs (?modId=<guid>). Read-only: resolved strictly
+// from the database (ComponentFiles -> ModFiles), basenames only, and like
+// every other GET it works while Civ6 runs. No path parameter is accepted
+// and none is ever echoed.
+async function handleGetActionFiles(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const cr = url.searchParams.get('componentRowId');
+  const mid = url.searchParams.get('modId');
+  try {
+    if (cr !== null) return send(res, 200, loOrder.actionFilesOf(modsDb.path, cr));
+    if (mid !== null) return send(res, 200, loOrder.modActionFilesOf(modsDb.path, mid));
+    return send(res, 400, { error: 'which action?' });
+  } catch (e) {
+    if (e.code === 'NOT_FOUND') return send(res, 404, { error: e.message });
+    return send(res, 400, { error: e.message });
+  }
+}
+
+// ===== Conflict diagnosis: read-only reports (no .Civ6Cfg writes, ======
+// no live game-DB writes) =================================================
+//
+// Both reports reuse the phase backends and reimplement nothing:
+// shadowing enumerates contested UI paths from Mods.sqlite (read-only
+// open), and replay runs ordered statements into a TEMP COPY of
+// DebugGameplay.sqlite (the live game DB is only read, via the copy).
+// Both routes are GETs served only when the Conflicts page's buttons are
+// clicked - never on page load and never at server start. There is
+// deliberately no POST anywhere under /api/conflicts.
+// GET /api/conflicts/shadowing -> contested UI paths for the active
+// profile, with winners decided only by max declared LoadOrder.
+async function handleGetConflictsShadowing(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  try {
+    return send(res, 200, conflictShadowing(modsDb.path));
+  } catch (e) {
+    return send(res, 500, { error: e.message });
+  }
+}
+
+// GET /api/conflicts/replay?fk=off|on -> ordered DB-collision replay for
+// the active profile into a temp copy, with provenance collisions and a
+// Database.log differential. Expensive: the page runs it only on click.
+async function handleGetConflictsReplay(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const fk = url.searchParams.get('fk');
+  if (fk !== null && fk !== 'off' && fk !== 'on') return send(res, 400, { error: 'fk must be off or on' });
+  try {
+    return send(res, 200, await conflictReplayReport(modsDb.path, { foreignKeys: fk === 'on' }));
+  } catch (e) {
+    return send(res, 400, { error: e.message });
+  }
+}
+
+// GET /api/conflicts/packaging -> static packaging findings for the active
+// profile's enabled mods, with display names on every finding. Cheap enough to run on
+// click like the other two reports, and like them a GET only: there is
+// deliberately no POST anywhere under /api/conflicts.
+async function handleGetConflictsPackaging(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  try {
+    return send(res, 200, conflictPackaging(modsDb.path));
+  } catch (e) {
+    return send(res, 500, { error: e.message });
+  }
+}
+
+// ===== Load order overrides: problem 2, a separate screen =============
+// Every route here writes, and every one of them refuses while Civ6 has the
+// database open. loadorder does that check itself and awaits it, because a
+// check that cannot fail is not a check - the investigation's own script read
+// an async gameStatus() as a plain object and its guard never fired.
+// GET /api/load-overrides -> every stored override and its current state
+async function handleGetLoadOverrides(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 200, { ok: false, error: 'Mod database not found.', overrides: [], count: 0, groups: [] });
+  try {
+    return send(res, 200, loOrder.listOverrides(modsDb.path));
+  } catch (e) {
+    return send(res, 500, { error: e.message, overrides: [], count: 0, groups: [] });
+  }
+}
+
+// POST /api/load-overrides -> set one action's position
+async function handlePostLoadOverrides(req, res, url) {
+  const body = await readBody(req);
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  try {
+    const r = await loOrder.applyOverrides(modsDb.path, [{ modId: body.modId, key: body.key, value: body.value }]);
     return send(res, 200, {
-      sources,
-      saves: paths.getSavesDir(),
-      logs: paths.getLogsDir(),
-      cache: paths.getCacheDir(),
-      pathsError: paths.overridesStatus().error,
-      ...listConfigs(),
-      installed: installed.map((m) => ({ id: m.id, idNorm: m.idNorm, name: m.name, type: m.type })),
+      ...loOrder.listOverrides(modsDb.path),
+      applied: r.applied,
+      orphans: r.orphans,
+      ambiguous: r.ambiguous,
+      unprotectable: r.unprotectable,
+      sentinels: r.sentinels,
+      backupPath: r.backupPath,
     });
+  } catch (e) {
+    return send(res, 400, { error: e.message });
   }
+}
 
-  // GET /api/load-order -> the profile's load order, read-only.
-  if (req.method === 'GET' && url.pathname === '/api/load-order') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 200, { ok: false, error: 'Mod database not found.', groups: [], profile: null, bands: [], summary: {} });
-    return send(res, 200, loadOrderResponse(modsDb, url));
+// POST /api/load-overrides/bulk -> apply a block move: one entry per action,
+// each { modId, key?, componentRowId?, value }. Entries naming a
+// componentRowId are resolved server-side via resolveAction inside applyBulk,
+// so a stale row reports orphaned and twins report ambiguous, never written.
+// One mutateDb transaction, one backup; refused while Civ6 runs.
+async function handlePostLoadOverridesBulk(req, res, url) {
+  const body = await readBody(req);
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  if (!Array.isArray(body.entries) || !body.entries.length) return send(res, 400, { error: 'no overrides to apply' });
+  const g = await gameStatus();
+  if (g.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
+  try {
+    const r = await loOrder.applyBulk(modsDb.path, body.entries);
+    return send(res, 200, {
+      ...loOrder.listOverrides(modsDb.path),
+      applied: r.applied,
+      orphans: r.orphans,
+      ambiguous: r.ambiguous,
+      unprotectable: r.unprotectable,
+      sentinels: r.sentinels,
+      backupPath: r.backupPath,
+    });
+  } catch (e) {
+    if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
+    return send(res, 400, { error: e.message });
   }
+}
 
-  // GET /api/action-files -> one action's file list (?componentRowId=N) or one
-  // mod's actions with theirs (?modId=<guid>). Read-only: resolved strictly
-  // from the database (ComponentFiles -> ModFiles), basenames only, and like
-  // every other GET it works while Civ6 runs. No path parameter is accepted
-  // and none is ever echoed.
-  if (req.method === 'GET' && url.pathname === '/api/action-files') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    const cr = url.searchParams.get('componentRowId');
-    const mid = url.searchParams.get('modId');
-    try {
-      if (cr !== null) return send(res, 200, loOrder.actionFilesOf(modsDb.path, cr));
-      if (mid !== null) return send(res, 200, loOrder.modActionFilesOf(modsDb.path, mid));
-      return send(res, 400, { error: 'which action?' });
-    } catch (e) {
-      if (e.code === 'NOT_FOUND') return send(res, 404, { error: e.message });
-      return send(res, 400, { error: e.message });
-    }
+// POST /api/load-overrides/reset -> put one action back to the author's value,
+// in the database and in the store.
+async function handlePostLoadOverridesReset(req, res, url) {
+  const body = await readBody(req);
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  try {
+    const r = await loOrder.resetOverride(modsDb.path, body.modId, body.key);
+    return send(res, 200, { ...loOrder.listOverrides(modsDb.path), restored: r.restored, backupPath: r.backupPath });
+  } catch (e) {
+    return send(res, 400, { error: e.message });
   }
+}
 
-  // ===== Conflict diagnosis: read-only reports (no .Civ6Cfg writes, ======
-  // no live game-DB writes) =================================================
-  //
-  // Both reports reuse the phase backends and reimplement nothing:
-  // shadowing enumerates contested UI paths from Mods.sqlite (read-only
-  // open), and replay runs ordered statements into a TEMP COPY of
-  // DebugGameplay.sqlite (the live game DB is only read, via the copy).
-  // Both routes are GETs served only when the Conflicts page's buttons are
-  // clicked - never on page load and never at server start. There is
-  // deliberately no POST anywhere under /api/conflicts.
-
-  // GET /api/conflicts/shadowing -> contested UI paths for the active
-  // profile, with winners decided only by max declared LoadOrder.
-  if (req.method === 'GET' && url.pathname === '/api/conflicts/shadowing') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    try {
-      return send(res, 200, conflictShadowing(modsDb.path));
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
+// POST /api/load-overrides/discard -> forget an override WITHOUT touching the
+// database. The value stays where the last apply put it, which the client
+// says in its confirm: discarding is not the same as resetting, and only one
+// of them undoes what the override did.
+async function handlePostLoadOverridesDiscard(req, res, url) {
+  const body = await readBody(req);
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  try {
+    loOrder.clearOverride(loOrder.overridesFile(), body.modId, body.key);
+    return send(res, 200, loOrder.listOverrides(modsDb.path));
+  } catch (e) {
+    return send(res, 400, { error: e.message });
   }
+}
 
-  // GET /api/conflicts/replay?fk=off|on -> ordered DB-collision replay for
-  // the active profile into a temp copy, with provenance collisions and a
-  // Database.log differential. Expensive: the page runs it only on click.
-  if (req.method === 'GET' && url.pathname === '/api/conflicts/replay') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    const fk = url.searchParams.get('fk');
-    if (fk !== null && fk !== 'off' && fk !== 'on') return send(res, 400, { error: 'fk must be off or on' });
-    try {
-      return send(res, 200, await conflictReplayReport(modsDb.path, { foreignKeys: fk === 'on' }));
-    } catch (e) {
-      return send(res, 400, { error: e.message });
-    }
+// POST /api/load-overrides/reset-mod -> put every override of one mod back
+// to its recorded author value, in the database and in the store. One
+// transaction, one backup; refused when any entry lacks a recorded value
+// with nothing half-done. Refused while Civ6 runs like all writes.
+async function handlePostLoadOverridesResetMod(req, res, url) {
+  const body = await readBody(req);
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const gResetMod = await gameStatus();
+  if (gResetMod.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
+  try {
+    const r = await loOrder.resetModOverrides(modsDb.path, body.modId);
+    return send(res, 200, { ...loOrder.listOverrides(modsDb.path), restored: r.restored, backupPath: r.backupPath });
+  } catch (e) {
+    if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
+    return send(res, 400, { error: e.message });
   }
+}
 
-  // GET /api/conflicts/packaging -> static packaging findings for the active
-  // profile's enabled mods, with display names on every finding. Cheap enough to run on
-  // click like the other two reports, and like them a GET only: there is
-  // deliberately no POST anywhere under /api/conflicts.
-  if (req.method === 'GET' && url.pathname === '/api/conflicts/packaging') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    try {
-      return send(res, 200, conflictPackaging(modsDb.path));
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
+// POST /api/load-overrides/discard-mod -> forget every override of one mod
+// WITHOUT touching the database. The values stay where the last apply put
+// them, which the client says in its confirm. Refused while Civ6 runs like
+// all writes.
+async function handlePostLoadOverridesDiscardMod(req, res, url) {
+  const body = await readBody(req);
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const gDiscardMod = await gameStatus();
+  if (gDiscardMod.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
+  try {
+    const r = await loOrder.discardModOverrides(modsDb.path, body.modId);
+    return send(res, 200, { ...loOrder.listOverrides(modsDb.path), discarded: r.discarded });
+  } catch (e) {
+    if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
+    return send(res, 400, { error: e.message });
   }
+}
 
-  // ===== Load order overrides: problem 2, a separate screen =============
-  // Every route here writes, and every one of them refuses while Civ6 has the
-  // database open. loadorder does that check itself and awaits it, because a
-  // check that cannot fail is not a check - the investigation's own script read
-  // an async gameStatus() as a plain object and its guard never fired.
-
-  // GET /api/load-overrides -> every stored override and its current state
-  if (req.method === 'GET' && url.pathname === '/api/load-overrides') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 200, { ok: false, error: 'Mod database not found.', overrides: [], count: 0, groups: [] });
-    try {
-      return send(res, 200, loOrder.listOverrides(modsDb.path));
-    } catch (e) {
-      return send(res, 500, { error: e.message, overrides: [], count: 0, groups: [] });
-    }
+// POST /api/load-overrides/sync -> re-apply everything now, for a server that
+// has been left running across a Steam sync.
+async function handlePostLoadOverridesSync(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const g = await gameStatus();
+  if (g.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
+  try {
+    const r = loOrder.syncOverrides(modsDb.path);
+    return send(res, 200, {
+      ...loOrder.listOverrides(modsDb.path),
+      sync: { changed: r.changed, applied: r.applied.length, drifted: r.drifted, orphans: r.orphans, ambiguous: r.ambiguous },
+    });
+  } catch (e) {
+    return send(res, 500, { error: e.message });
   }
+}
 
-  // POST /api/load-overrides -> set one action's position
-  if (req.method === 'POST' && url.pathname === '/api/load-overrides') {
-    const body = await readBody(req);
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    try {
-      const r = await loOrder.applyOverrides(modsDb.path, [{ modId: body.modId, key: body.key, value: body.value }]);
-      return send(res, 200, {
-        ...loOrder.listOverrides(modsDb.path),
-        applied: r.applied,
-        orphans: r.orphans,
-        ambiguous: r.ambiguous,
-        unprotectable: r.unprotectable,
-        sentinels: r.sentinels,
-        backupPath: r.backupPath,
-      });
-    } catch (e) {
-      return send(res, 400, { error: e.message });
-    }
-  }
+// GET /api/dashboard -> counts, folder setup, game status
+async function handleGetDashboard(req, res, url) {
+  const sources = paths.getSources();
+  const installed = scanMods(sources);
+  const modsDb = paths.getModsDb();
+  const dbState = modsDb.exists ? readModState(modsDb.path) : { ok: false, error: 'Mod database not found.', mods: [] };
+  const byNorm = new Map(dbState.mods.map((m) => [m.idNorm, m]));
 
-  // POST /api/load-overrides/bulk -> apply a block move: one entry per action,
-  // each { modId, key?, componentRowId?, value }. Entries naming a
-  // componentRowId are resolved server-side via resolveAction inside applyBulk,
-  // so a stale row reports orphaned and twins report ambiguous, never written.
-  // One mutateDb transaction, one backup; refused while Civ6 runs.
-  if (req.method === 'POST' && url.pathname === '/api/load-overrides/bulk') {
-    const body = await readBody(req);
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    if (!Array.isArray(body.entries) || !body.entries.length) return send(res, 400, { error: 'no overrides to apply' });
-    const g = await gameStatus();
-    if (g.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
-    try {
-      const r = await loOrder.applyBulk(modsDb.path, body.entries);
-      return send(res, 200, {
-        ...loOrder.listOverrides(modsDb.path),
-        applied: r.applied,
-        orphans: r.orphans,
-        ambiguous: r.ambiguous,
-        unprotectable: r.unprotectable,
-        sentinels: r.sentinels,
-        backupPath: r.backupPath,
-      });
-    } catch (e) {
-      if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
-      return send(res, 400, { error: e.message });
-    }
-  }
-
-  // POST /api/load-overrides/reset -> put one action back to the author's value,
-  // in the database and in the store.
-  if (req.method === 'POST' && url.pathname === '/api/load-overrides/reset') {
-    const body = await readBody(req);
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    try {
-      const r = await loOrder.resetOverride(modsDb.path, body.modId, body.key);
-      return send(res, 200, { ...loOrder.listOverrides(modsDb.path), restored: r.restored, backupPath: r.backupPath });
-    } catch (e) {
-      return send(res, 400, { error: e.message });
-    }
-  }
-
-  // POST /api/load-overrides/discard -> forget an override WITHOUT touching the
-  // database. The value stays where the last apply put it, which the client
-  // says in its confirm: discarding is not the same as resetting, and only one
-  // of them undoes what the override did.
-  if (req.method === 'POST' && url.pathname === '/api/load-overrides/discard') {
-    const body = await readBody(req);
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    try {
-      loOrder.clearOverride(loOrder.overridesFile(), body.modId, body.key);
-      return send(res, 200, loOrder.listOverrides(modsDb.path));
-    } catch (e) {
-      return send(res, 400, { error: e.message });
-    }
-  }
-
-  // POST /api/load-overrides/reset-mod -> put every override of one mod back
-  // to its recorded author value, in the database and in the store. One
-  // transaction, one backup; refused when any entry lacks a recorded value
-  // with nothing half-done. Refused while Civ6 runs like all writes.
-  if (req.method === 'POST' && url.pathname === '/api/load-overrides/reset-mod') {
-    const body = await readBody(req);
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    const gResetMod = await gameStatus();
-    if (gResetMod.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
-    try {
-      const r = await loOrder.resetModOverrides(modsDb.path, body.modId);
-      return send(res, 200, { ...loOrder.listOverrides(modsDb.path), restored: r.restored, backupPath: r.backupPath });
-    } catch (e) {
-      if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
-      return send(res, 400, { error: e.message });
-    }
-  }
-
-  // POST /api/load-overrides/discard-mod -> forget every override of one mod
-  // WITHOUT touching the database. The values stay where the last apply put
-  // them, which the client says in its confirm. Refused while Civ6 runs like
-  // all writes.
-  if (req.method === 'POST' && url.pathname === '/api/load-overrides/discard-mod') {
-    const body = await readBody(req);
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    const gDiscardMod = await gameStatus();
-    if (gDiscardMod.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
-    try {
-      const r = await loOrder.discardModOverrides(modsDb.path, body.modId);
-      return send(res, 200, { ...loOrder.listOverrides(modsDb.path), discarded: r.discarded });
-    } catch (e) {
-      if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
-      return send(res, 400, { error: e.message });
-    }
-  }
-
-  // POST /api/load-overrides/sync -> re-apply everything now, for a server that
-  // has been left running across a Steam sync.
-  if (req.method === 'POST' && url.pathname === '/api/load-overrides/sync') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    const g = await gameStatus();
-    if (g.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
-    try {
-      const r = loOrder.syncOverrides(modsDb.path);
-      return send(res, 200, {
-        ...loOrder.listOverrides(modsDb.path),
-        sync: { changed: r.changed, applied: r.applied.length, drifted: r.drifted, orphans: r.orphans, ambiguous: r.ambiguous },
-      });
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
-  }
-
-  // GET /api/dashboard -> counts, folder setup, game status
-  if (req.method === 'GET' && url.pathname === '/api/dashboard') {
-    const sources = paths.getSources();
-    const installed = scanMods(sources);
-    const modsDb = paths.getModsDb();
-    const dbState = modsDb.exists ? readModState(modsDb.path) : { ok: false, error: 'Mod database not found.', mods: [] };
-    const byNorm = new Map(dbState.mods.map((m) => [m.idNorm, m]));
-
-    // Totals come from the folders on disk; "enabled" from the game's database.
-    const count = (type) => {
-      const mods = installed.filter((m) => m.type === type);
-      return {
-        total: mods.length,
-        enabled: mods.filter((m) => { const d = byNorm.get(m.idNorm); return d && d.disabled === false; }).length,
-      };
+  // Totals come from the folders on disk; "enabled" from the game's database.
+  const count = (type) => {
+    const mods = installed.filter((m) => m.type === type);
+    return {
+      total: mods.length,
+      enabled: mods.filter((m) => { const d = byNorm.get(m.idNorm); return d && d.disabled === false; }).length,
     };
-    const official = dbState.mods.filter((m) => m.source === 'dlc');
-    const { configs } = listConfigs();
-    // Same list the mod manager and the sync use, so "needs adding" can never
-    // read differently in two places. This used to be worked out a third time,
-    // here, from the folders alone - which missed the mods the game knew but
-    // had no row for.
-    const todo = dbState.ok ? findUnregistered(modsDb.path, sources, dbState) : { pending: [] };
-    const types = new Map(installed.map((m) => [m.idNorm, m.type]));
-    return send(res, 200, {
-      version: VERSION,
-      sources,
-      saves: paths.getSavesDir(),
-      logs: paths.getLogsDir(),
-      cache: paths.getCacheDir(),
-      pathsError: paths.overridesStatus().error,
-      modsDb: { ...modsDb, ok: dbState.ok, error: dbState.error || null, activeGroup: dbState.activeGroup || null },
-      game: await gameStatus(),
-      counts: {
-        workshop: count('workshop'),
-        local: count('local'),
-        dlc: { total: official.length, enabled: official.filter((m) => m.disabled === false).length },
-        configs: configs.length,
-      },
-      // On disk but not yet switchable: never scanned by the game, or known to
-      // it but with no row in the profile in use. A sync adds them all.
-      needsSync: todo.pending.map((p) => ({ id: p.id, name: p.name, type: types.get(p.idNorm) || 'local', reason: p.reason })),
-      // Recorded by the game but no longer on disk: unsubscribed, or deleted by
-      // hand. Listed, never removed on our own initiative - a mod still
-      // downloading looks exactly like one just unsubscribed.
-      gone: dbState.ok ? findRemoved(modsDb.path, sources) : { removed: [], removable: 0 },
-      // What the last sync did, so the page can say so rather than the user
-      // having to remember.
-      sync: lastSync,
-    });
-  }
+  };
+  const official = dbState.mods.filter((m) => m.source === 'dlc');
+  const { configs } = listConfigs();
+  // Same list the mod manager and the sync use, so "needs adding" can never
+  // read differently in two places. This used to be worked out a third time,
+  // here, from the folders alone - which missed the mods the game knew but
+  // had no row for.
+  const todo = dbState.ok ? findUnregistered(modsDb.path, sources, dbState) : { pending: [] };
+  const types = new Map(installed.map((m) => [m.idNorm, m.type]));
+  return send(res, 200, {
+    version: VERSION,
+    sources,
+    saves: paths.getSavesDir(),
+    logs: paths.getLogsDir(),
+    cache: paths.getCacheDir(),
+    pathsError: paths.overridesStatus().error,
+    modsDb: { ...modsDb, ok: dbState.ok, error: dbState.error || null, activeGroup: dbState.activeGroup || null },
+    game: await gameStatus(),
+    counts: {
+      workshop: count('workshop'),
+      local: count('local'),
+      dlc: { total: official.length, enabled: official.filter((m) => m.disabled === false).length },
+      configs: configs.length,
+    },
+    // On disk but not yet switchable: never scanned by the game, or known to
+    // it but with no row in the profile in use. A sync adds them all.
+    needsSync: todo.pending.map((p) => ({ id: p.id, name: p.name, type: types.get(p.idNorm) || 'local', reason: p.reason })),
+    // Recorded by the game but no longer on disk: unsubscribed, or deleted by
+    // hand. Listed, never removed on our own initiative - a mod still
+    // downloading looks exactly like one just unsubscribed.
+    gone: dbState.ok ? findRemoved(modsDb.path, sources) : { removed: [], removable: 0 },
+    // What the last sync did, so the page can say so rather than the user
+    // having to remember.
+    sync: lastSync,
+  });
+}
 
-  // GET /api/mods -> mod manager list
-  if (req.method === 'GET' && url.pathname === '/api/mods') {
-    // The game status is read first so the list can decide whether it is a
-    // complete one. A rescan in progress means the database is not currently a
-    // statement about which mods exist, and a mod missing from the list for a
-    // moment must not take its labels with it.
-    const game = await gameStatus();
-    const list = modList({ prune: !game.running });
-    return send(res, 200, { ...list, game });
-  }
+// GET /api/mods -> mod manager list
+async function handleGetMods(req, res, url) {
+  // The game status is read first so the list can decide whether it is a
+  // complete one. A rescan in progress means the database is not currently a
+  // statement about which mods exist, and a mod missing from the list for a
+  // moment must not take its labels with it.
+  const game = await gameStatus();
+  const list = modList({ prune: !game.running });
+  return send(res, 200, { ...list, game });
+}
 
-  // GET /api/mods/details?id=... -> everything the details panel shows
-  if (req.method === 'GET' && url.pathname === '/api/mods/details') {
-    const idNorm = normId(url.searchParams.get('id'));
-    const list = modList();
-    const mod = list.mods.find((m) => m.idNorm === idNorm);
-    if (!mod) return send(res, 404, { error: 'mod not found' });
-    const inConfigs = [];
-    for (const c of listConfigs().configs) {
-      try {
-        if (cfg.listMods(fs.readFileSync(c.path)).mods.some((m) => normId(m.id) === idNorm)) inConfigs.push(c.name);
-      } catch (_) { /* unreadable config: skip */ }
-    }
-    return send(res, 200, {
-      mod,
-      db: list.ok ? readModDetails(list.modsDb.path, mod.id) : null,
-      disk: mod.folder ? { folder: mod.folder, ...folderStats(mod.folder) } : null,
-      requiredBy: list.mods.filter((m) => m.requires.some((r) => r.id === idNorm)).map((m) => ({ id: m.idNorm, name: m.name, enabled: m.enabled })),
-      blockedBy: list.mods.filter((m) => m.blocks.some((r) => r.id === idNorm)).map((m) => ({ id: m.idNorm, name: m.name, enabled: m.enabled })),
-      inConfigs,
-    });
-  }
-
-  // POST /api/mods/labels { id, labels:[...] } -> set one mod's labels.
-  //
-  // The one write in the toolkit that is NOT refused while Civ6 runs, and the
-  // one with no backup. Both follow from the same fact: it writes
-  // mod-labels.json, a file the game has never heard of and cannot be holding
-  // open. Refusing it would copy a rule whose reason does not apply, and it
-  // would make labelling impossible during a game - which is exactly when
-  // someone wants to record what they just tried.
-  //
-  // The whole set is replaced, because the editor is a set of toggles and one
-  // write should either land or not. A name the server cannot read comes back
-  // as a 400 and nothing is written.
-  if (req.method === 'POST' && url.pathname === '/api/mods/labels') {
-    const body = await readBody(req);
-    const idNorm = normId(body.id);
-    const list = modList();
-    const mod = list.mods.find((m) => m.idNorm === idNorm);
-    if (!mod) return send(res, 404, { error: 'mod not found' });
-    if (!Array.isArray(body.labels)) return send(res, 400, { error: 'labels must be a list' });
-    // Checked here rather than left to throw from the store, so that a name the
-    // user typed is a 400 about their request and anything that goes wrong
-    // after this point is a 500 about ours. The store re-checks on the way in;
-    // this is about which status the answer carries, not about trusting it.
-    for (const name of body.labels) {
-      try { labelStore.cleanLabel(name); } catch (e) { return send(res, 400, { error: e.message }); }
-    }
-
-    const game = await gameStatus();
+// GET /api/mods/details?id=... -> everything the details panel shows
+async function handleGetModsDetails(req, res, url) {
+  const idNorm = normId(url.searchParams.get('id'));
+  const list = modList();
+  const mod = list.mods.find((m) => m.idNorm === idNorm);
+  if (!mod) return send(res, 404, { error: 'mod not found' });
+  const inConfigs = [];
+  for (const c of listConfigs().configs) {
     try {
-      const v = labelStore.setLabels(labelStore.labelsFile(), mod.id, body.labels, labelPruneSet(list, game.running));
-      return send(res, 200, labelResponse(v, game));
-    } catch (e) {
-      // A mod-labels.json we can no longer read is the only thing left that can
-      // land here, and setLabels says so in the message rather than overwriting
-      // whatever the file holds.
-      return send(res, 500, { error: e.message });
-    }
+      if (cfg.listMods(fs.readFileSync(c.path)).mods.some((m) => normId(m.id) === idNorm)) inConfigs.push(c.name);
+    } catch (_) { /* unreadable config: skip */ }
+  }
+  return send(res, 200, {
+    mod,
+    db: list.ok ? readModDetails(list.modsDb.path, mod.id) : null,
+    disk: mod.folder ? { folder: mod.folder, ...folderStats(mod.folder) } : null,
+    requiredBy: list.mods.filter((m) => m.requires.some((r) => r.id === idNorm)).map((m) => ({ id: m.idNorm, name: m.name, enabled: m.enabled })),
+    blockedBy: list.mods.filter((m) => m.blocks.some((r) => r.id === idNorm)).map((m) => ({ id: m.idNorm, name: m.name, enabled: m.enabled })),
+    inConfigs,
+  });
+}
+
+// POST /api/mods/labels { id, labels:[...] } -> set one mod's labels.
+//
+// The one write in the toolkit that is NOT refused while Civ6 runs, and the
+// one with no backup. Both follow from the same fact: it writes
+// mod-labels.json, a file the game has never heard of and cannot be holding
+// open. Refusing it would copy a rule whose reason does not apply, and it
+// would make labelling impossible during a game - which is exactly when
+// someone wants to record what they just tried.
+//
+// The whole set is replaced, because the editor is a set of toggles and one
+// write should either land or not. A name the server cannot read comes back
+// as a 400 and nothing is written.
+async function handlePostModsLabels(req, res, url) {
+  const body = await readBody(req);
+  const idNorm = normId(body.id);
+  const list = modList();
+  const mod = list.mods.find((m) => m.idNorm === idNorm);
+  if (!mod) return send(res, 404, { error: 'mod not found' });
+  if (!Array.isArray(body.labels)) return send(res, 400, { error: 'labels must be a list' });
+  // Checked here rather than left to throw from the store, so that a name the
+  // user typed is a 400 about their request and anything that goes wrong
+  // after this point is a 500 about ours. The store re-checks on the way in;
+  // this is about which status the answer carries, not about trusting it.
+  for (const name of body.labels) {
+    try { labelStore.cleanLabel(name); } catch (e) { return send(res, 400, { error: e.message }); }
   }
 
-  // POST /api/mods/labels/rename { from, to } -> rename a label on every mod
-  // that carries it. Renaming onto a name already in use merges the two, and the
-  // answer says so rather than letting it pass unnoticed.
-  if (req.method === 'POST' && url.pathname === '/api/mods/labels/rename') {
-    const body = await readBody(req);
-    // A name the user typed is a 400 about their request; anything after this
-    // point is a 500 about ours. Same split as the route above.
-    let to;
-    try { to = labelStore.cleanLabel(body.to); } catch (e) { return send(res, 400, { error: e.message }); }
-    if (!String(body.from || '').trim()) return send(res, 400, { error: 'which label?' });
-
-    const list = modList();
-    const game = await gameStatus();
-    try {
-      const v = labelStore.renameLabel(labelStore.labelsFile(), body.from, to, labelPruneSet(list, game.running));
-      return send(res, 200, labelResponse(v, game));
-    } catch (e) {
-      return send(res, /no mod is labelled/.test(e.message) ? 404 : 500, { error: e.message });
-    }
+  const game = await gameStatus();
+  try {
+    const v = labelStore.setLabels(labelStore.labelsFile(), mod.id, body.labels, labelPruneSet(list, game.running));
+    return send(res, 200, labelResponse(v, game));
+  } catch (e) {
+    // A mod-labels.json we can no longer read is the only thing left that can
+    // land here, and setLabels says so in the message rather than overwriting
+    // whatever the file holds.
+    return send(res, 500, { error: e.message });
   }
+}
 
-  // POST /api/mods/labels/delete { name } -> take a label off every mod that
-  // carries it. A label no mod has cannot be deleted, because there is nothing
-  // to delete and saying otherwise would be a lie about what happened.
-  if (req.method === 'POST' && url.pathname === '/api/mods/labels/delete') {
-    const body = await readBody(req);
-    if (!String(body.name || '').trim()) return send(res, 400, { error: 'which label?' });
+// POST /api/mods/labels/rename { from, to } -> rename a label on every mod
+// that carries it. Renaming onto a name already in use merges the two, and the
+// answer says so rather than letting it pass unnoticed.
+async function handlePostModsLabelsRename(req, res, url) {
+  const body = await readBody(req);
+  // A name the user typed is a 400 about their request; anything after this
+  // point is a 500 about ours. Same split as the route above.
+  let to;
+  try { to = labelStore.cleanLabel(body.to); } catch (e) { return send(res, 400, { error: e.message }); }
+  if (!String(body.from || '').trim()) return send(res, 400, { error: 'which label?' });
 
-    const list = modList();
-    const game = await gameStatus();
-    try {
-      const v = labelStore.deleteLabel(labelStore.labelsFile(), body.name, labelPruneSet(list, game.running));
-      return send(res, 200, labelResponse(v, game));
-    } catch (e) {
-      return send(res, /no mod is labelled/.test(e.message) ? 404 : 500, { error: e.message });
-    }
+  const list = modList();
+  const game = await gameStatus();
+  try {
+    const v = labelStore.renameLabel(labelStore.labelsFile(), body.from, to, labelPruneSet(list, game.running));
+    return send(res, 200, labelResponse(v, game));
+  } catch (e) {
+    return send(res, /no mod is labelled/.test(e.message) ? 404 : 500, { error: e.message });
   }
+}
 
-  // GET /api/game-setup -> the option catalog plus the asserted options.
-  // Read-only, like every other GET: works while Civ6 runs.
-  if (req.method === 'GET' && url.pathname === '/api/game-setup') {
-    const catalog = gameSetupCatalog();
-    const view = setupStore.readSetup(setupStore.gameSetupFile(), gameSetupKnown(catalog));
+// POST /api/mods/labels/delete { name } -> take a label off every mod that
+// carries it. A label no mod has cannot be deleted, because there is nothing
+// to delete and saying otherwise would be a lie about what happened.
+async function handlePostModsLabelsDelete(req, res, url) {
+  const body = await readBody(req);
+  if (!String(body.name || '').trim()) return send(res, 400, { error: 'which label?' });
+
+  const list = modList();
+  const game = await gameStatus();
+  try {
+    const v = labelStore.deleteLabel(labelStore.labelsFile(), body.name, labelPruneSet(list, game.running));
+    return send(res, 200, labelResponse(v, game));
+  } catch (e) {
+    return send(res, /no mod is labelled/.test(e.message) ? 404 : 500, { error: e.message });
+  }
+}
+
+// GET /api/game-setup -> the option catalog plus the asserted options.
+// Read-only, like every other GET: works while Civ6 runs.
+async function handleGetGameSetup(req, res, url) {
+  const catalog = gameSetupCatalog();
+  const view = setupStore.readSetup(setupStore.gameSetupFile(), gameSetupKnown(catalog));
+  return send(res, 200, gameSetupResponse(view, catalog, await gameStatus()));
+}
+
+// POST /api/game-setup { key, on } -> assert (on true) or withdraw (on
+// false) one option. The key is an exact catalog key (KIND:value); anything
+// else is a 400 about the request. A store file the toolkit can no longer
+// read is a 500 about ours: the store refuses to build on it rather than
+// overwrite whatever it holds, and the message says so.
+async function handlePostGameSetup(req, res, url) {
+  const body = await readBody(req);
+  let key;
+  try {
+    key = setupStore.cleanKey(body.key);
+  } catch (e) {
+    return send(res, 400, { error: e.message });
+  }
+  if (typeof body.on !== 'boolean') return send(res, 400, { error: 'on must be true or false' });
+  const catalog = gameSetupCatalog();
+  try {
+    const view = setupStore.setOption(setupStore.gameSetupFile(), key, body.on, gameSetupKnown(catalog));
     return send(res, 200, gameSetupResponse(view, catalog, await gameStatus()));
+  } catch (e) {
+    return send(res, 500, { error: e.message });
   }
+}
 
-  // POST /api/game-setup { key, on } -> assert (on true) or withdraw (on
-  // false) one option. The key is an exact catalog key (KIND:value); anything
-  // else is a 400 about the request. A store file the toolkit can no longer
-  // read is a 500 about ours: the store refuses to build on it rather than
-  // overwrite whatever it holds, and the message says so.
-  if (req.method === 'POST' && url.pathname === '/api/game-setup') {
-    const body = await readBody(req);
-    let key;
-    try {
-      key = setupStore.cleanKey(body.key);
-    } catch (e) {
-      return send(res, 400, { error: e.message });
-    }
-    if (typeof body.on !== 'boolean') return send(res, 400, { error: 'on must be true or false' });
-    const catalog = gameSetupCatalog();
-    try {
-      const view = setupStore.setOption(setupStore.gameSetupFile(), key, body.on, gameSetupKnown(catalog));
-      return send(res, 200, gameSetupResponse(view, catalog, await gameStatus()));
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
+// POST /api/game-setup/clear -> withdraw every assertion. The file stays,
+// asserting nothing - the same state deleting it reads as.
+async function handlePostGameSetupClear(req, res, url) {
+  const catalog = gameSetupCatalog();
+  try {
+    const view = setupStore.clearSetup(setupStore.gameSetupFile(), gameSetupKnown(catalog));
+    return send(res, 200, gameSetupResponse(view, catalog, await gameStatus()));
+  } catch (e) {
+    return send(res, 500, { error: e.message });
   }
+}
 
-  // POST /api/game-setup/clear -> withdraw every assertion. The file stays,
-  // asserting nothing - the same state deleting it reads as.
-  if (req.method === 'POST' && url.pathname === '/api/game-setup/clear') {
-    const catalog = gameSetupCatalog();
-    try {
-      const view = setupStore.clearSetup(setupStore.gameSetupFile(), gameSetupKnown(catalog));
-      return send(res, 200, gameSetupResponse(view, catalog, await gameStatus()));
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
+// POST /api/mods/apply { changes:[{ id, enabled }] } -> write enable flags
+async function handlePostModsApply(req, res, url) {
+  const { changes } = await readBody(req);
+  if (!Array.isArray(changes) || !changes.length) return send(res, 400, { error: 'no changes' });
+  const game = await gameStatus();
+  if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then apply your changes.' });
+
+  const list = modList();
+  if (!list.ok) return send(res, 400, { error: list.error });
+  const byNorm = new Map(list.mods.map((m) => [m.idNorm, m]));
+  const clean = [];
+  for (const c of changes) {
+    const m = byNorm.get(normId(c && c.id));
+    if (!m) return send(res, 400, { error: `unknown mod: ${c && c.id}` });
+    if (!m.scanned) return send(res, 400, { error: `"${m.name}" can't be changed until the game has scanned it (start Civ6 once).` });
+    if (m.enabled == null) return send(res, 400, { error: `"${m.name}" isn't in the game's active mod group, so it can't be turned on or off.` });
+    clean.push({ modId: m.id, enabled: !!c.enabled });
   }
-
-  // POST /api/mods/apply { changes:[{ id, enabled }] } -> write enable flags
-  if (req.method === 'POST' && url.pathname === '/api/mods/apply') {
-    const { changes } = await readBody(req);
-    if (!Array.isArray(changes) || !changes.length) return send(res, 400, { error: 'no changes' });
-    const game = await gameStatus();
-    if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then apply your changes.' });
-
-    const list = modList();
-    if (!list.ok) return send(res, 400, { error: list.error });
-    const byNorm = new Map(list.mods.map((m) => [m.idNorm, m]));
-    const clean = [];
-    for (const c of changes) {
-      const m = byNorm.get(normId(c && c.id));
-      if (!m) return send(res, 400, { error: `unknown mod: ${c && c.id}` });
-      if (!m.scanned) return send(res, 400, { error: `"${m.name}" can't be changed until the game has scanned it (start Civ6 once).` });
-      if (m.enabled == null) return send(res, 400, { error: `"${m.name}" isn't in the game's active mod group, so it can't be turned on or off.` });
-      clean.push({ modId: m.id, enabled: !!c.enabled });
-    }
-    try {
-      const r = applyChanges(list.modsDb.path, clean);
-      return send(res, 200, { ok: true, ...r });
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
+  try {
+    const r = applyChanges(list.modsDb.path, clean);
+    return send(res, 200, { ok: true, ...r });
+  } catch (e) {
+    return send(res, 500, { error: e.message });
   }
+}
 
-  // POST /api/sync -> add everything on disk that is not yet switchable, and
-  // switch on nothing. The dashboard's Rescan calls this; so does startup.
-  // Without it a newly subscribed mod cannot be turned on until Civ6 has
-  // launched once.
-  // No ids, no paths: the server works out for itself what is missing, from the
-  // mod folders and the database. The browser cannot name a file. Writes nothing
-  // if there is nothing to add. See syncMods() and FINDINGS.md.
-  if (req.method === 'POST' && url.pathname === '/api/sync') {
-    const run = await syncMods();
-    return send(res, 200, { ok: !run.error, ...run });
+// POST /api/sync -> add everything on disk that is not yet switchable, and
+// switch on nothing. The dashboard's Rescan calls this; so does startup.
+// Without it a newly subscribed mod cannot be turned on until Civ6 has
+// launched once.
+// No ids, no paths: the server works out for itself what is missing, from the
+// mod folders and the database. The browser cannot name a file. Writes nothing
+// if there is nothing to add. See syncMods() and FINDINGS.md.
+async function handlePostSync(req, res, url) {
+  const run = await syncMods();
+  return send(res, 200, { ok: !run.error, ...run });
+}
+
+// POST /api/mods/open-folder { ids: [id] } -> show a mod's folder in Explorer.
+//
+// A page cannot open Explorer by itself - file:// links are blocked from an
+// http:// page - so the server does it. It cannot delete anything, but it does
+// hand a path to another program, so it takes the same care as removal: ids
+// only from the request, the folder re-derived from the database, and the same
+// modFolderFault() rules. Not blocked while Civ6 runs - this reads nothing.
+async function handlePostModsOpenFolder(req, res, url) {
+  const { ids } = await readBody(req);
+  const list = Array.isArray(ids) ? ids.map(normId) : [];
+  if (!list.length) return send(res, 400, { error: 'no mods were named' });
+  if (list.length > 1) return send(res, 400, { error: 'one mod at a time' });
+
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const sources = paths.getSources();
+  const roots = sources.filter((s) => s.exists)
+    .map((s) => String(s.root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase());
+
+  const st = readModState(modsDb.path);
+  if (!st.ok) return send(res, 400, { error: st.error });
+  const rec = st.mods.find((m) => m.idNorm === list[0]);
+  if (!rec) return send(res, 400, { error: 'that mod is not in the database' });
+
+  const folder = path.dirname(String(rec.path || '').replace(/\\/g, '/'));
+  const fault = modFolderFault(folder, rec.path, roots);
+  if (fault) return send(res, 400, { error: fault });
+  try {
+    if (!fs.statSync(folder).isDirectory()) return send(res, 400, { error: 'that path is not a folder' });
+  } catch (e) {
+    return send(res, 400, { error: e.code === 'ENOENT' ? 'folder not found' : e.message });
   }
-
-  // POST /api/mods/open-folder { ids: [id] } -> show a mod's folder in Explorer.
+  // Two separate things went wrong here, and each hid the other.
   //
-  // A page cannot open Explorer by itself - file:// links are blocked from an
-  // http:// page - so the server does it. It cannot delete anything, but it does
-  // hand a path to another program, so it takes the same care as removal: ids
-  // only from the request, the folder re-derived from the database, and the same
-  // modFolderFault() rules. Not blocked while Civ6 runs - this reads nothing.
-  if (req.method === 'POST' && url.pathname === '/api/mods/open-folder') {
-    const { ids } = await readBody(req);
-    const list = Array.isArray(ids) ? ids.map(normId) : [];
-    if (!list.length) return send(res, 400, { error: 'no mods were named' });
-    if (list.length > 1) return send(res, 400, { error: 'one mod at a time' });
+  // 1. The path. explorer.exe reads each "/segment" of its argument as a
+  //    switch, so the game's forward-slash path left it with no path at all and
+  //    it opened Documents. Convert at this boundary and nowhere else.
+  //
+  // 2. The window. windowsHide: true sets STARTUPINFO.wShowWindow = SW_HIDE,
+  //    which Explorer inherits: it builds the window and the shell hides it.
+  //    The result is a flicker and nothing else, and a hidden window is still a
+  //    real entry in the shell's window list, so it looks like it opened. The
+  //    flag is not repeated here on purpose - it belongs on the tasklist and reg
+  //    calls, which are console programs that would otherwise flash a console.
+  //    explorer.exe is GUI-subsystem and never allocates one, so it bought
+  //    nothing and cost the window. Verified by launching the same path both
+  //    ways: with the flag nothing appeared, without it the folder opened.
+  //
+  // The exit code is not a success flag either - it is 1 whether the folder
+  // opened or not - so it is ignored, and the statSync above is what proves the
+  // folder is there. Only Explorer failing to launch at all is worth a line.
+  execFile('explorer.exe', [paths.toNativePath(folder)], (err) => {
+    if (err && err.code === 'ENOENT') console.error('explorer.exe could not be launched');
+  });
+  return send(res, 200, { ok: true, folder });
+}
 
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    const sources = paths.getSources();
-    const roots = sources.filter((s) => s.exists)
-      .map((s) => String(s.root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase());
+// POST /api/mods/remove { ids: [...] } -> take mods out of the game and
+// delete their folders.
+//
+// The browser sends mod ids only. Folders come from the database and are
+// re-checked against the mod sources before anything is deleted, so a stale or
+// tampered request cannot name a path to delete - least of all a base-game or
+// DLC one, which the game also records and which must never be touched.
+async function handlePostModsRemove(req, res, url) {
+  const { ids } = await readBody(req);
+  const list = Array.isArray(ids) ? ids.map(normId) : [];
+  if (!list.length) return send(res, 400, { error: 'no mods were named' });
+  if (list.length > 200) return send(res, 400, { error: 'too many mods at once' });
 
-    const st = readModState(modsDb.path);
-    if (!st.ok) return send(res, 400, { error: st.error });
-    const rec = st.mods.find((m) => m.idNorm === list[0]);
-    if (!rec) return send(res, 400, { error: 'that mod is not in the database' });
+  const game = await gameStatus();
+  if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then remove mods.' });
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
 
+  const sources = paths.getSources();
+  const roots = sources.filter((s) => s.exists)
+    .map((s) => String(s.root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase());
+  // Folders come from the database, never from the request.
+  const st = readModState(modsDb.path);
+  if (!st.ok) return send(res, 400, { error: st.error });
+  const byId = new Map(st.mods.map((m) => [m.idNorm, m]));
+  const expected = {};
+  const rejected = [];
+  for (const id of list) {
+    const rec = byId.get(id);
+    if (!rec) { rejected.push({ modId: id, reason: 'not in the database' }); continue; }
     const folder = path.dirname(String(rec.path || '').replace(/\\/g, '/'));
     const fault = modFolderFault(folder, rec.path, roots);
-    if (fault) return send(res, 400, { error: fault });
-    try {
-      if (!fs.statSync(folder).isDirectory()) return send(res, 400, { error: 'that path is not a folder' });
-    } catch (e) {
-      return send(res, 400, { error: e.code === 'ENOENT' ? 'folder not found' : e.message });
-    }
-    // Two separate things went wrong here, and each hid the other.
-    //
-    // 1. The path. explorer.exe reads each "/segment" of its argument as a
-    //    switch, so the game's forward-slash path left it with no path at all and
-    //    it opened Documents. Convert at this boundary and nowhere else.
-    //
-    // 2. The window. windowsHide: true sets STARTUPINFO.wShowWindow = SW_HIDE,
-    //    which Explorer inherits: it builds the window and the shell hides it.
-    //    The result is a flicker and nothing else, and a hidden window is still a
-    //    real entry in the shell's window list, so it looks like it opened. The
-    //    flag is not repeated here on purpose - it belongs on the tasklist and reg
-    //    calls, which are console programs that would otherwise flash a console.
-    //    explorer.exe is GUI-subsystem and never allocates one, so it bought
-    //    nothing and cost the window. Verified by launching the same path both
-    //    ways: with the flag nothing appeared, without it the folder opened.
-    //
-    // The exit code is not a success flag either - it is 1 whether the folder
-    // opened or not - so it is ignored, and the statSync above is what proves the
-    // folder is there. Only Explorer failing to launch at all is worth a line.
-    execFile('explorer.exe', [paths.toNativePath(folder)], (err) => {
-      if (err && err.code === 'ENOENT') console.error('explorer.exe could not be launched');
-    });
-    return send(res, 200, { ok: true, folder });
+    if (fault) { rejected.push({ modId: id, name: rec.name, reason: fault }); continue; }
+    expected[id] = folder;
+  }
+  if (!Object.keys(expected).length) return send(res, 400, { error: 'none of those could be removed', refused: rejected });
+
+  let r;
+  try {
+    // roots go too, so the data layer can refuse a folder that is - or holds -
+    // a mod source folder. That check is what stands between a bug here and
+    // deleting somebody's entire mod library.
+    r = removeMods(modsDb.path, Object.keys(expected), expected, sources.filter((s) => s.exists).map((s) => s.root));
+  } catch (e) {
+    return send(res, 500, { error: e.message });
   }
 
-  // POST /api/mods/remove { ids: [...] } -> take mods out of the game and
-  // delete their folders.
-  //
-  // The browser sends mod ids only. Folders come from the database and are
-  // re-checked against the mod sources before anything is deleted, so a stale or
-  // tampered request cannot name a path to delete - least of all a base-game or
-  // DLC one, which the game also records and which must never be touched.
-  if (req.method === 'POST' && url.pathname === '/api/mods/remove') {
-    const { ids } = await readBody(req);
-    const list = Array.isArray(ids) ? ids.map(normId) : [];
-    if (!list.length) return send(res, 400, { error: 'no mods were named' });
-    if (list.length > 200) return send(res, 400, { error: 'too many mods at once' });
-
-    const game = await gameStatus();
-    if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then remove mods.' });
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-
-    const sources = paths.getSources();
-    const roots = sources.filter((s) => s.exists)
-      .map((s) => String(s.root).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase());
-    // Folders come from the database, never from the request.
-    const st = readModState(modsDb.path);
-    if (!st.ok) return send(res, 400, { error: st.error });
-    const byId = new Map(st.mods.map((m) => [m.idNorm, m]));
-    const expected = {};
-    const rejected = [];
-    for (const id of list) {
-      const rec = byId.get(id);
-      if (!rec) { rejected.push({ modId: id, reason: 'not in the database' }); continue; }
-      const folder = path.dirname(String(rec.path || '').replace(/\\/g, '/'));
-      const fault = modFolderFault(folder, rec.path, roots);
-      if (fault) { rejected.push({ modId: id, name: rec.name, reason: fault }); continue; }
-      expected[id] = folder;
+  // Files last. The mod is already out of the game, so a failure here is
+  // reported rather than fatal - but it matters, because files left behind
+  // are re-registered by the game on its next scan.
+  const kept = [];
+  for (const m of r.removed) {
+    // Checked again immediately before deleting, not just earlier. Passing the
+    // folder where the .modinfo path would go is deliberate: classifyPath keys
+    // off the same root markers, and "workshop/.../12345" and the folder
+    // ".../12345" classify the same way.
+    const fault = modFolderFault(m.folder, m.folder, roots);
+    if (fault) { kept.push({ ...m, error: fault }); continue; }
+    try {
+      if (!fs.lstatSync(m.folder).isDirectory()) { kept.push({ ...m, error: 'that path is not a folder' }); continue; }
+      fs.rmSync(m.folder, { recursive: true, force: true });
+    } catch (e) {
+      kept.push({ modId: m.modId, name: m.name, folder: m.folder, error: e.code === 'ENOENT' ? 'already gone' : e.message });
     }
-    if (!Object.keys(expected).length) return send(res, 400, { error: 'none of those could be removed', refused: rejected });
+  }
+  return send(res, 200, { ok: true, removed: r.removed, kept, refused: [...rejected, ...r.refused], backupPath: r.backupPath });
+}
 
+// ---- mod groups (player profiles) ---------------------------------------
+// Every write here changes Mods.sqlite, so it is refused while the game runs
+// and each one returns the refreshed group list for the UI.
+async function handleGetModgroups(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const list = listGroups(modsDb.path);
+  if (!list.ok) return send(res, 500, { error: list.error });
+  return send(res, 200, { ...list, game: await gameStatus() });
+}
+
+// GET /api/modgroups/preview?id=... -> what using this profile would change:
+// the mods that would start loading, and the ones that would stop. Read-only,
+// so like export it works while the game is running.
+async function handleGetModgroupsPreview(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const id = groupId(url.searchParams.get('id'));
+  if (id === null) return send(res, 400, { error: 'which profile?' });
+  try {
+    return send(res, 200, previewGroup(modsDb.path, id));
+  } catch (e) {
+    return send(res, 500, { error: e.message });
+  }
+}
+
+// GET /api/modgroups/export?id=... -> the profile as a downloadable .json
+// file. Read-only, so it also works while the game is running.
+async function handleGetModgroupsExport(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const id = groupId(url.searchParams.get('id'));
+  if (id === null) return send(res, 400, { error: 'which profile?' });
+  let file;
+  try {
+    file = exportGroup(modsDb.path, id);
+  } catch (e) {
+    return send(res, 500, { error: e.message });
+  }
+  // Keep the name readable but out of the file name: quotes, slashes and
+  // Windows' forbidden characters would break the download.
+  const safe = file.name.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60) || 'profile';
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Disposition': `attachment; filename="civ6-profile-${safe}.json"`,
+  });
+  return res.end(JSON.stringify(file, null, 2));
+}
+
+async function handlePostModgroupsAction(req, res, url) {
+  const action = url.pathname.slice('/api/modgroups/'.length);
+  const body = await readBody(req);
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+
+  // A mod group can't be changed while the game has the database open.
+  const game = await gameStatus();
+  if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then try again.' });
+
+  const id = groupId(action === 'import' ? null : body.id);
+  if (id === null && action !== 'create' && action !== 'import') return send(res, 400, { error: 'which profile?' });
+  try {
     let r;
-    try {
-      // roots go too, so the data layer can refuse a folder that is - or holds -
-      // a mod source folder. That check is what stands between a bug here and
-      // deleting somebody's entire mod library.
-      r = removeMods(modsDb.path, Object.keys(expected), expected, sources.filter((s) => s.exists).map((s) => s.root));
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
-
-    // Files last. The mod is already out of the game, so a failure here is
-    // reported rather than fatal - but it matters, because files left behind
-    // are re-registered by the game on its next scan.
-    const kept = [];
-    for (const m of r.removed) {
-      // Checked again immediately before deleting, not just earlier. Passing the
-      // folder where the .modinfo path would go is deliberate: classifyPath keys
-      // off the same root markers, and "workshop/.../12345" and the folder
-      // ".../12345" classify the same way.
-      const fault = modFolderFault(m.folder, m.folder, roots);
-      if (fault) { kept.push({ ...m, error: fault }); continue; }
-      try {
-        if (!fs.lstatSync(m.folder).isDirectory()) { kept.push({ ...m, error: 'that path is not a folder' }); continue; }
-        fs.rmSync(m.folder, { recursive: true, force: true });
-      } catch (e) {
-        kept.push({ modId: m.modId, name: m.name, folder: m.folder, error: e.code === 'ENOENT' ? 'already gone' : e.message });
-      }
-    }
-    return send(res, 200, { ok: true, removed: r.removed, kept, refused: [...rejected, ...r.refused], backupPath: r.backupPath });
-  }
-
-  // ---- mod groups (player profiles) ---------------------------------------
-  // Every write here changes Mods.sqlite, so it is refused while the game runs
-  // and each one returns the refreshed group list for the UI.
-
-  if (req.method === 'GET' && url.pathname === '/api/modgroups') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+    if (action === 'create') r = createGroup(modsDb.path, body.name);
+    else if (action === 'duplicate') r = duplicateGroup(modsDb.path, id, body.name);
+    else if (action === 'rename') r = renameGroup(modsDb.path, id, body.name);
+    else if (action === 'delete') r = deleteGroup(modsDb.path, id, body.fallbackId);
+    else if (action === 'activate') r = activateGroup(modsDb.path, id);
+    else if (action === 'import') r = importGroup(modsDb.path, body.profile);
+    else return send(res, 404, { error: 'not found' });
+    // Re-read so the UI always gets the state that is really on disk.
     const list = listGroups(modsDb.path);
-    if (!list.ok) return send(res, 500, { error: list.error });
-    return send(res, 200, { ...list, game: await gameStatus() });
+    return send(res, 200, { ok: true, ...r, groups: list.groups, active: list.active, game });
+  } catch (e) {
+    return send(res, 500, { error: e.message });
+  }
+}
+
+// POST /api/ping -> does this server know about the page it just served?
+//
+// A stale server and a freshly reloaded page are an easy pair to end up with:
+// the HTML and scripts are read from disk on every request, so a reload picks
+// up new UI code while the process behind it is still running the code from
+// whenever it started. The symptom is a bare "not found" from a route that
+// plainly exists on disk, which looks like a bug in the feature rather than a
+// server that needs restarting. An old server has never heard of this route,
+// so a 404 here is the answer rather than the problem.
+async function handlePostPing(req, res, url) {
+  return send(res, 200, { ok: true, version: VERSION, started: STARTED });
+}
+
+// GET /api/game -> is Civ6 running (polled by the UI)
+async function handleGetGame(req, res, url) {
+  return send(res, 200, await gameStatus());
+}
+
+// GET /api/config?path=... -> enabled + available-to-add for one config
+async function handleGetConfig(req, res, url) {
+  const p = url.searchParams.get('path');
+  if (!isConfigPath(p) || !fs.existsSync(p)) return send(res, 400, { error: 'invalid config path' });
+  const installed = scanMods(paths.getSources());
+  let view;
+  try { view = inventory.configView(fs.readFileSync(p), installed); }
+  catch (e) { return send(res, 500, { error: `parse failed: ${e.message}` }); }
+  return send(res, 200, { path: p, name: path.basename(p), ...view });
+}
+
+// POST /api/paths -> persist overrides to civ6-paths.json
+//
+// The whole write lives in paths.writeOverrides: which file it goes to, the
+// type check on each value, the atomic replace, the cache invalidation and the
+// refusal to build on a file it cannot read. Keeping it there is what stops
+// the read and the write disagreeing about where the file is - which is how a
+// test or a relocated install ends up writing to the project root while
+// reading its overrides from somewhere else.
+async function handlePostPaths(req, res, url) {
+  const body = await readBody(req);
+  try {
+    return send(res, 200, paths.writeOverrides(body));
+  } catch (e) {
+    return send(res, 400, { error: e.message });
+  }
+}
+
+// POST /api/save -> apply edits
+async function handlePostSave(req, res, url) {
+  const body = await readBody(req);
+  const { path: p, add = [], remove = [], mode = 'overwrite', newName } = body;
+  if (!isConfigPath(p) || !fs.existsSync(p)) return send(res, 400, { error: 'invalid config path' });
+
+  const installed = scanMods(paths.getSources());
+  const byNorm = new Map(installed.map((m) => [m.idNorm, m]));
+  const adds = [];
+  for (const id of add) {
+    const m = byNorm.get(normId(id));
+    if (!m) return send(res, 400, { error: `mod not installed: ${id}` });
+    adds.push({ id: m.id, name: m.name });
   }
 
-  // GET /api/modgroups/preview?id=... -> what using this profile would change:
-  // the mods that would start loading, and the ones that would stop. Read-only,
-  // so like export it works while the game is running.
-  if (req.method === 'GET' && url.pathname === '/api/modgroups/preview') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    const id = groupId(url.searchParams.get('id'));
-    if (id === null) return send(res, 400, { error: 'which profile?' });
-    try {
-      return send(res, 200, previewGroup(modsDb.path, id));
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
+  let outPath = p;
+  if (mode === 'new') {
+    let base = String(newName || '').trim();
+    base = path.basename(base); // no directory traversal
+    if (!base) return send(res, 400, { error: 'newName required for "new" mode' });
+    if (!/\.Civ6Cfg$/i.test(base)) base += '.Civ6Cfg';
+    outPath = path.join(path.dirname(p), base);
+    if (fs.existsSync(outPath)) return send(res, 409, { error: `file already exists: ${base}` });
   }
 
-  // GET /api/modgroups/export?id=... -> the profile as a downloadable .json
-  // file. Read-only, so it also works while the game is running.
-  if (req.method === 'GET' && url.pathname === '/api/modgroups/export') {
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
-    const id = groupId(url.searchParams.get('id'));
-    if (id === null) return send(res, 400, { error: 'which profile?' });
-    let file;
-    try {
-      file = exportGroup(modsDb.path, id);
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
-    // Keep the name readable but out of the file name: quotes, slashes and
-    // Windows' forbidden characters would break the download.
-    const safe = file.name.replace(/[\\/:*?"<>|]+/g, '-').replace(/\s+/g, ' ').trim().slice(0, 60) || 'profile';
-    res.writeHead(200, {
-      'Content-Type': 'application/json; charset=utf-8',
-      'Content-Disposition': `attachment; filename="civ6-profile-${safe}.json"`,
+  try {
+    const summary = editor.saveConfig(p, {
+      adds,
+      removes: remove,
+      outPath,
+      backup: mode === 'overwrite',
     });
-    return res.end(JSON.stringify(file, null, 2));
+    return send(res, 200, { ok: true, summary });
+  } catch (e) {
+    return send(res, 500, { error: e.message, problems: e.problems || null });
   }
+}
 
-  if (req.method === 'POST' && url.pathname.startsWith('/api/modgroups/')) {
-    const action = url.pathname.slice('/api/modgroups/'.length);
-    const body = await readBody(req);
-    const modsDb = paths.getModsDb();
-    if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+// POST /api/delete -> back up then delete a config file
+async function handlePostDelete(req, res, url) {
+  const body = await readBody(req);
+  const p = body.path;
+  if (!isConfigPath(p) || !fs.existsSync(p)) return send(res, 400, { error: 'invalid config path' });
+  try {
+    const backupPath = editor.backupFile(p); // recoverable delete
+    fs.unlinkSync(p);
+    return send(res, 200, { ok: true, backupPath });
+  } catch (e) {
+    return send(res, 500, { error: e.message });
+  }
+}
 
-    // A mod group can't be changed while the game has the database open.
-    const game = await gameStatus();
-    if (game.running) return send(res, 409, { error: 'Civilization VI is running. Close the game first, then try again.' });
+// POST /api/shutdown -> stop the server (used by the launcher's menu)
+async function handlePostShutdown(req, res, url) {
+  send(res, 200, { ok: true });
+  console.log('Civ6 Mod Toolkit stopped.');
+  setTimeout(() => process.exit(0), 100); // let the response go out first
+  return;
+}
 
-    const id = groupId(action === 'import' ? null : body.id);
-    if (id === null && action !== 'create' && action !== 'import') return send(res, 400, { error: 'which profile?' });
-    try {
-      let r;
-      if (action === 'create') r = createGroup(modsDb.path, body.name);
-      else if (action === 'duplicate') r = duplicateGroup(modsDb.path, id, body.name);
-      else if (action === 'rename') r = renameGroup(modsDb.path, id, body.name);
-      else if (action === 'delete') r = deleteGroup(modsDb.path, id, body.fallbackId);
-      else if (action === 'activate') r = activateGroup(modsDb.path, id);
-      else if (action === 'import') r = importGroup(modsDb.path, body.profile);
-      else return send(res, 404, { error: 'not found' });
-      // Re-read so the UI always gets the state that is really on disk.
-      const list = listGroups(modsDb.path);
-      return send(res, 200, { ok: true, ...r, groups: list.groups, active: list.active, game });
-    } catch (e) {
-      return send(res, 500, { error: e.message });
+// First-match dispatch table in the order the if-chain evaluated.
+const ROUTES = [
+  { method: 'GET', match: '/api/state', handler: handleGetState },
+  { method: 'GET', match: '/api/load-order', handler: handleGetLoadOrder },
+  { method: 'GET', match: '/api/action-files', handler: handleGetActionFiles },
+  { method: 'GET', match: '/api/conflicts/shadowing', handler: handleGetConflictsShadowing },
+  { method: 'GET', match: '/api/conflicts/replay', handler: handleGetConflictsReplay },
+  { method: 'GET', match: '/api/conflicts/packaging', handler: handleGetConflictsPackaging },
+  { method: 'GET', match: '/api/load-overrides', handler: handleGetLoadOverrides },
+  { method: 'POST', match: '/api/load-overrides', handler: handlePostLoadOverrides },
+  { method: 'POST', match: '/api/load-overrides/bulk', handler: handlePostLoadOverridesBulk },
+  { method: 'POST', match: '/api/load-overrides/reset', handler: handlePostLoadOverridesReset },
+  { method: 'POST', match: '/api/load-overrides/discard', handler: handlePostLoadOverridesDiscard },
+  { method: 'POST', match: '/api/load-overrides/reset-mod', handler: handlePostLoadOverridesResetMod },
+  { method: 'POST', match: '/api/load-overrides/discard-mod', handler: handlePostLoadOverridesDiscardMod },
+  { method: 'POST', match: '/api/load-overrides/sync', handler: handlePostLoadOverridesSync },
+  { method: 'GET', match: '/api/dashboard', handler: handleGetDashboard },
+  { method: 'GET', match: '/api/mods', handler: handleGetMods },
+  { method: 'GET', match: '/api/mods/details', handler: handleGetModsDetails },
+  { method: 'POST', match: '/api/mods/labels', handler: handlePostModsLabels },
+  { method: 'POST', match: '/api/mods/labels/rename', handler: handlePostModsLabelsRename },
+  { method: 'POST', match: '/api/mods/labels/delete', handler: handlePostModsLabelsDelete },
+  { method: 'GET', match: '/api/game-setup', handler: handleGetGameSetup },
+  { method: 'POST', match: '/api/game-setup', handler: handlePostGameSetup },
+  { method: 'POST', match: '/api/game-setup/clear', handler: handlePostGameSetupClear },
+  { method: 'POST', match: '/api/mods/apply', handler: handlePostModsApply },
+  { method: 'POST', match: '/api/sync', handler: handlePostSync },
+  { method: 'POST', match: '/api/mods/open-folder', handler: handlePostModsOpenFolder },
+  { method: 'POST', match: '/api/mods/remove', handler: handlePostModsRemove },
+  { method: 'GET', match: '/api/modgroups', handler: handleGetModgroups },
+  { method: 'GET', match: '/api/modgroups/preview', handler: handleGetModgroupsPreview },
+  { method: 'GET', match: '/api/modgroups/export', handler: handleGetModgroupsExport },
+  { method: 'POST', match: '/api/modgroups/', kind: 'prefix', handler: handlePostModgroupsAction },
+  { method: 'POST', match: '/api/ping', handler: handlePostPing },
+  { method: 'GET', match: '/api/game', handler: handleGetGame },
+  { method: 'GET', match: '/api/config', handler: handleGetConfig },
+  { method: 'POST', match: '/api/paths', handler: handlePostPaths },
+  { method: 'POST', match: '/api/save', handler: handlePostSave },
+  { method: 'POST', match: '/api/delete', handler: handlePostDelete },
+  { method: 'POST', match: '/api/shutdown', handler: handlePostShutdown },
+];
+
+async function handleApi(req, res, url) {
+  for (const r of ROUTES) {
+    if (req.method !== r.method) continue;
+    if (r.kind === 'prefix') {
+      if (!url.pathname.startsWith(r.match)) continue;
+    } else if (url.pathname !== r.match) {
+      continue;
     }
+    return await r.handler(req, res, url);
   }
-
-  // POST /api/ping -> does this server know about the page it just served?
-  //
-  // A stale server and a freshly reloaded page are an easy pair to end up with:
-  // the HTML and scripts are read from disk on every request, so a reload picks
-  // up new UI code while the process behind it is still running the code from
-  // whenever it started. The symptom is a bare "not found" from a route that
-  // plainly exists on disk, which looks like a bug in the feature rather than a
-  // server that needs restarting. An old server has never heard of this route,
-  // so a 404 here is the answer rather than the problem.
-  if (req.method === 'POST' && url.pathname === '/api/ping') {
-    return send(res, 200, { ok: true, version: VERSION, started: STARTED });
-  }
-
-  // GET /api/game -> is Civ6 running (polled by the UI)
-  if (req.method === 'GET' && url.pathname === '/api/game') {
-    return send(res, 200, await gameStatus());
-  }
-
-  // GET /api/config?path=... -> enabled + available-to-add for one config
-  if (req.method === 'GET' && url.pathname === '/api/config') {
-    const p = url.searchParams.get('path');
-    if (!isConfigPath(p) || !fs.existsSync(p)) return send(res, 400, { error: 'invalid config path' });
-    const installed = scanMods(paths.getSources());
-    let view;
-    try { view = inventory.configView(fs.readFileSync(p), installed); }
-    catch (e) { return send(res, 500, { error: `parse failed: ${e.message}` }); }
-    return send(res, 200, { path: p, name: path.basename(p), ...view });
-  }
-
-  // POST /api/paths -> persist overrides to civ6-paths.json
-  //
-  // The whole write lives in paths.writeOverrides: which file it goes to, the
-  // type check on each value, the atomic replace, the cache invalidation and the
-  // refusal to build on a file it cannot read. Keeping it there is what stops
-  // the read and the write disagreeing about where the file is - which is how a
-  // test or a relocated install ends up writing to the project root while
-  // reading its overrides from somewhere else.
-  if (req.method === 'POST' && url.pathname === '/api/paths') {
-    const body = await readBody(req);
-    try {
-      return send(res, 200, paths.writeOverrides(body));
-    } catch (e) {
-      return send(res, 400, { error: e.message });
-    }
-  }
-
-  // POST /api/save -> apply edits
-  if (req.method === 'POST' && url.pathname === '/api/save') {
-    const body = await readBody(req);
-    const { path: p, add = [], remove = [], mode = 'overwrite', newName } = body;
-    if (!isConfigPath(p) || !fs.existsSync(p)) return send(res, 400, { error: 'invalid config path' });
-
-    const installed = scanMods(paths.getSources());
-    const byNorm = new Map(installed.map((m) => [m.idNorm, m]));
-    const adds = [];
-    for (const id of add) {
-      const m = byNorm.get(normId(id));
-      if (!m) return send(res, 400, { error: `mod not installed: ${id}` });
-      adds.push({ id: m.id, name: m.name });
-    }
-
-    let outPath = p;
-    if (mode === 'new') {
-      let base = String(newName || '').trim();
-      base = path.basename(base); // no directory traversal
-      if (!base) return send(res, 400, { error: 'newName required for "new" mode' });
-      if (!/\.Civ6Cfg$/i.test(base)) base += '.Civ6Cfg';
-      outPath = path.join(path.dirname(p), base);
-      if (fs.existsSync(outPath)) return send(res, 409, { error: `file already exists: ${base}` });
-    }
-
-    try {
-      const summary = editor.saveConfig(p, {
-        adds,
-        removes: remove,
-        outPath,
-        backup: mode === 'overwrite',
-      });
-      return send(res, 200, { ok: true, summary });
-    } catch (e) {
-      return send(res, 500, { error: e.message, problems: e.problems || null });
-    }
-  }
-
-  // POST /api/delete -> back up then delete a config file
-  if (req.method === 'POST' && url.pathname === '/api/delete') {
-    const body = await readBody(req);
-    const p = body.path;
-    if (!isConfigPath(p) || !fs.existsSync(p)) return send(res, 400, { error: 'invalid config path' });
-    try {
-      const backupPath = editor.backupFile(p); // recoverable delete
-      fs.unlinkSync(p);
-      return send(res, 200, { ok: true, backupPath });
-    } catch (e) {
-      return send(res, 500, { error: e.message });
-    }
-  }
-
-  // POST /api/shutdown -> stop the server (used by the launcher's menu)
-  if (req.method === 'POST' && url.pathname === '/api/shutdown') {
-    send(res, 200, { ok: true });
-    console.log('Civ6 Mod Toolkit stopped.');
-    setTimeout(() => process.exit(0), 100); // let the response go out first
-    return;
-  }
-
   return send(res, 404, { error: 'not found' });
 }
 

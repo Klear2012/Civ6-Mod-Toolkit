@@ -729,7 +729,10 @@ describe('Test 12: packaging findings and zero-rows display wiring', () => {
     });
     it('the packaging route is a read-only GET reusing the backend', () => {
       const srv12 = fs.readFileSync(path.join(PUB, '..', 'src', 'server.js'), 'utf8');
-      assert.ok(/req\.method === 'GET' && url\.pathname === '\/api\/conflicts\/packaging'/.test(srv12)
+      const routesAt = srv12.indexOf('const ROUTES = [');
+      const routesText = routesAt === -1 ? '' : srv12.slice(routesAt, srv12.indexOf('\n];', routesAt) + 3);
+      assert.ok(/\{ method: 'GET', match: '\/api\/conflicts\/packaging'/.test(routesText)
+        && !/\{ method: 'POST', match: '\/api\/conflicts\/packaging'/.test(routesText)
         && /packaging\.collectPackagingWarnings/.test(srv12)
         && /loOrder\.openDb/.test(srv12));
     });

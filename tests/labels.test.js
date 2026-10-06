@@ -413,12 +413,22 @@ describe('Test 9: labels survive a rescan', () => {
 describe('Test 10: wiring — the decisions the server makes about labels', () => {
   const srv = fs.readFileSync(path.join(__dirname, '..', 'src', 'server.js'), 'utf8');
   const page = fs.readFileSync(path.join(__dirname, '..', 'public', 'mods.js'), 'utf8');
-  const block = (name) => {
-    const at = srv.indexOf(`'${name}'`);
-    return at === -1 ? '' : srv.slice(at, srv.indexOf('\n  }', at));
+  const routesAt = srv.indexOf('const ROUTES = [');
+  const routesText = routesAt === -1 ? '' : srv.slice(routesAt, srv.indexOf('\n];', routesAt) + 3);
+  const handlerSrc = (name) => {
+    const at = srv.indexOf(`async function ${name}(`);
+    if (at === -1) return '';
+    const end = srv.indexOf('\n}', at);
+    return end === -1 ? '' : srv.slice(at, end + 2);
   };
-  const labelsRoute = block('/api/mods/labels');
-  const modsRoute = block('/api/mods');
+  const routeHandler = (method, p) => {
+    const m = new RegExp(`\\{ method: '${method}', match: '${p}'[^}]*?handler: (\\w+)`).exec(routesText);
+    return m ? handlerSrc(m[1]) : '';
+  };
+  const labelsRoute = routeHandler('POST', '/api/mods/labels');
+  const modsRoute = routeHandler('GET', '/api/mods');
+  const renameRoute = routeHandler('POST', '/api/mods/labels/rename');
+  const deleteRoute = routeHandler('POST', '/api/mods/labels/delete');
   const matches = /function matchesLabels\(m\) \{([\s\S]*?)\n\}/.exec(page);
   it('there is a labels route', () => {
     assert.ok(!!labelsRoute);
@@ -458,16 +468,16 @@ describe('Test 10: wiring — the decisions the server makes about labels', () =
     assert.ok(/if \(!live\.has\(k\)\) modsPage\.labels\.delete\(k\)/.test(page));
   });
   it('a label can be renamed across every mod that has it', () => {
-    assert.ok(/url\.pathname === '\/api\/mods\/labels\/rename'/.test(srv) && /labelStore\.renameLabel/.test(srv));
+    assert.ok(!!renameRoute && /labelStore\.renameLabel/.test(renameRoute));
   });
   it('and deleted across every mod that has it', () => {
-    assert.ok(/url\.pathname === '\/api\/mods\/labels\/delete'/.test(srv) && /labelStore\.deleteLabel/.test(srv));
+    assert.ok(!!deleteRoute && /labelStore\.deleteLabel/.test(deleteRoute));
   });
   it('  and the rename reports how many mods moved, and whether it merged', () => {
     assert.ok(/moved: v\.moved, merged: v\.merged/.test(srv));
   });
   it('  and neither is refused while Civ6 runs, like the other label writes', () => {
-    assert.ok(!/409/.test(block('/api/mods/labels/rename')) && !/409/.test(block('/api/mods/labels/delete')));
+    assert.ok(!/409/.test(renameRoute) && !/409/.test(deleteRoute));
   });
   it('  and it re-reads the file rather than trusting the page', () => {
     assert.ok(/labelStore\.renameLabel\(labelStore\.labelsFile\(\), body\.from, to,/.test(srv));

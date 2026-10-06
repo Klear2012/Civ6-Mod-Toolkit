@@ -994,12 +994,15 @@ async function runRecordFlow() {
 
   await asuite('Test 15: the view is read-only', async () => {
     const srv = fs.readFileSync(path.join(SRC, 'server.js'), 'utf8');
+    const routesAt = srv.indexOf('const ROUTES = [');
+    const routesText = routesAt === -1 ? '' : srv.slice(routesAt, srv.indexOf('\n];', routesAt) + 3);
+    const hasRoute = (method, p) => new RegExp(`\\{ method: '${method}', match: '${p}'`).test(routesText);
     const view = fs.readFileSync(path.join(PUBLIC, 'loadorder.js'), 'utf8');
     const html = fs.readFileSync(path.join(PUBLIC, 'index.html'), 'utf8');
 
-    check('the view route is a GET', /req.method === 'GET' && url.pathname === '\/api\/load-order'/.test(srv));
-    check('  and no POST writes to it', !/req.method === 'POST' && url.pathname === '\/api\/load-order'/.test(srv));
-    const loadWrites = (srv.match(/url.pathname === '\/api\/load-overrides[^']*'/g) || []).length;
+    check('the view route is a GET', hasRoute('GET', '/api/load-order'));
+    check('  and no POST writes to it', !hasRoute('POST', '/api/load-order'));
+    const loadWrites = (routesText.match(/match: '\/api\/load-overrides[^']*'/g) || []).length;
     check('every write route is under /api/load-overrides, and there are at least five of them',
       loadWrites >= 5, String(loadWrites));
     check('the view page has no button that posts anything', !/postJson|\bfetch\(|<form/.test(view));
@@ -1421,12 +1424,24 @@ async function runRecordFlow() {
         r = await postJson(s.port, '/api/load-overrides/sync', {});
         check('sync still answers 200, unchanged', r.status === 200, String(r.status));
         const srvSrc = fs.readFileSync(path.join(SRC, 'server.js'), 'utf8');
-        const bulkBranch = srvSrc.split("load-overrides/bulk')")[1].split('/api/load-overrides/reset')[0];
+        const routesAt = srvSrc.indexOf('const ROUTES = [');
+        const routesText = routesAt === -1 ? '' : srvSrc.slice(routesAt, srvSrc.indexOf('\n];', routesAt) + 3);
+        const handlerSrc = (name) => {
+          const at = srvSrc.indexOf(`async function ${name}(`);
+          if (at === -1) return '';
+          const end = srvSrc.indexOf('\n}', at);
+          return end === -1 ? '' : srvSrc.slice(at, end + 2);
+        };
+        const routeHandler = (method, p) => {
+          const m = new RegExp(`\\{ method: '${method}', match: '${p}'[^}]*?handler: (\\w+)`).exec(routesText);
+          return m ? handlerSrc(m[1]) : '';
+        };
+        const bulkBranch = routeHandler('POST', '/api/load-overrides/bulk');
         check('the bulk branch awaits the game guard and maps it to 409',
           /await gameStatus\(\)/.test(bulkBranch) && /409/.test(bulkBranch) && /close Civilization VI first/.test(bulkBranch));
         check('  and delegates the write to applyBulk', /loOrder\.applyBulk/.test(bulkBranch));
         check('  and reset/discard routes are still present',
-          srvSrc.includes('/api/load-overrides/reset') && srvSrc.includes('/api/load-overrides/discard'));
+          /match: '\/api\/load-overrides\/reset'/.test(routesText) && /match: '\/api\/load-overrides\/discard'/.test(routesText));
       } finally { await s.stop(); }
     }
   });
@@ -1690,11 +1705,23 @@ async function runRecordFlow() {
     for (const p of ['/api/load-overrides/reset-mod', '/api/load-overrides/discard-mod']) {
       check(`  the ${p} route exists`, srvSrc19.includes(p));
     }
-    const resetBranch19 = srvSrc19.split("/api/load-overrides/reset-mod')")[1].split('/api/load-overrides/discard-mod')[0];
+    const routesAt19 = srvSrc19.indexOf('const ROUTES = [');
+    const routesText19 = routesAt19 === -1 ? '' : srvSrc19.slice(routesAt19, srvSrc19.indexOf('\n];', routesAt19) + 3);
+    const handlerSrc19 = (name) => {
+      const at = srvSrc19.indexOf(`async function ${name}(`);
+      if (at === -1) return '';
+      const end = srvSrc19.indexOf('\n}', at);
+      return end === -1 ? '' : srvSrc19.slice(at, end + 2);
+    };
+    const routeHandler19 = (method, p) => {
+      const m = new RegExp(`\\{ method: '${method}', match: '${p}'[^}]*?handler: (\\w+)`).exec(routesText19);
+      return m ? handlerSrc19(m[1]) : '';
+    };
+    const resetBranch19 = routeHandler19('POST', '/api/load-overrides/reset-mod');
     check('  reset-mod awaits the game guard and maps it to 409',
       /await gameStatus\(\)/.test(resetBranch19) && /409/.test(resetBranch19) && /close Civilization VI first/.test(resetBranch19));
     check('  and delegates to resetModOverrides', /resetModOverrides/.test(resetBranch19));
-    const discardBranch19 = srvSrc19.split("/api/load-overrides/discard-mod')")[1].split('/api/load-overrides/sync')[0];
+    const discardBranch19 = routeHandler19('POST', '/api/load-overrides/discard-mod');
     check('  discard-mod awaits the game guard and maps it to 409',
       /await gameStatus\(\)/.test(discardBranch19) && /409/.test(discardBranch19));
     check('  and delegates to discardModOverrides', /discardModOverrides/.test(discardBranch19));
