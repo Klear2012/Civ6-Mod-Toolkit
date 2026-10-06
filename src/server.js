@@ -28,7 +28,7 @@ const setupStore = require('./gamesetup');
 const loOrder = require('./loadorder');
 const shadowing = require('./shadowing');
 const packaging = require('./packaging');
-const conflictReplay = require('./phase9-conflict-replay');
+const conflictReplay = require('./conflict-replay');
 
 const { version: VERSION } = require('../package.json');
 const STARTED = new Date().toISOString();
