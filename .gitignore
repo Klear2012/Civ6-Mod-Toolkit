@@ -26,6 +26,5 @@ AGENTS.md
 load-order-overrides.json
 game-setup.json
 
-# local-only planning index and decision log (point into gitignored openspec/changes/)
+# local-only planning index (points into gitignored openspec/changes/)
 docs/TRACEABILITY.md
-docs/decisions/

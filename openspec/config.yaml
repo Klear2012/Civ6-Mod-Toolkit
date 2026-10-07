@@ -1,0 +1,28 @@
+schema: traceable-flow
+
+context: |
+  Tech stack: Node.js 24, CommonJS, no TypeScript/build step. Entry: src/server.js, phases: src/phase*.js.
+  Domain: Civ6 .Civ6Cfg mod configs, load order, HID-compat rules. Encoding: UTF-16 via iconv-lite.
+  Commands: start=`node src/server.js`, verify=`npm run check:release` (node --test mirrors over tests/). No test framework.
+  Constraint from AGENTS.md: `edit` fails over ~50 lines/~2000 chars combined - use `write` full file or `shell` script instead.
+
+rules:
+  proposal:
+    - Include affected config areas (.Civ6Cfg sections, load order) and rollback plan
+    - Fill Grounding first: specs read, ADRs in force from adr/, history read; Capabilities must follow from it
+  design:
+    - Note roundtrip safety (parse -> edit -> save without data loss)
+    - Account for currently in-force ADRs in adr/; follow them or name which one this change supersedes
+  tasks:
+    - Keep tasks S/M size (max ~5 files), each with Verify via node --test
+    - Land tests and docs in the same group as the work that needs them, never a final docs group
+  research:
+    - Scope to the change; new capability with no prior art gets a few lines, dependency on existing specs gets a real file
+    - Cite related specs by exact capability path, read modified ones in full with scenarios
+  decisions:
+    - Deprecated as an artifact id (replaced by `adr` manifest 2026-10-07); rule kept only for reading old archived changes
+  adr:
+    - Manifest `adr.md` must state the verdict even when none; durable files go directly to `adr/` with next sequence + `Supersedes:` field, never edited in place
+  findings:
+    - One block per bugfix round with Bug, Root cause, Fix with file:line, Test, Spec impact yes/no
+    - Spec impact yes routes to spec update, no routes to code fix
