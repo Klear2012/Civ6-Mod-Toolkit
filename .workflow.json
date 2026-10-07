@@ -1,0 +1,13 @@
+{
+  "base_commit": "582c9b4",
+  "archetype": "solo-tool",
+  "pack_version": "2026-10-07",
+  "deviations": [
+    "node --test mirrors over tests/ as verify (ADR-007/008), not plain phase scripts",
+    "Tier orchestration: subagent dispatch with tasks.md ownership + worker reporting contract",
+    "ADR enforcement hybrid (other session, validated): orchestrator names <=3 ADRs per dispatch, hot table + grep fallback over Scope/Applies-to, tripwire re-grade to Tier 2",
+    "ADR sequence in use at registration: ADR-013; ADR-007 gap observed 2026-10-07, filled by other session",
+    "docs/WORKFLOW.md present untracked, provenance unclear — not adopted as source"
+  ],
+  "installed_at": "2026-10-08"
+}

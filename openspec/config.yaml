@@ -10,6 +10,7 @@ rules:
   proposal:
     - Include affected config areas (.Civ6Cfg sections, load order) and rollback plan
     - Fill Grounding first: specs read, ADRs in force from adr/, history read; Capabilities must follow from it
+    - Decision-tree check for new capabilities: tech/infra/security/cross-spec choice → check adr/ first → reference, modify, or create (propose-time; dispatch-time naming covered by AGENTS.md orchestration rules)
   design:
     - Note roundtrip safety (parse -> edit -> save without data loss)
     - Account for currently in-force ADRs in adr/; follow them or name which one this change supersedes
@@ -23,6 +24,7 @@ rules:
     - Deprecated as an artifact id (replaced by `adr` manifest 2026-10-07); rule kept only for reading old archived changes
   adr:
     - Manifest `adr.md` must state the verdict even when none; durable files go directly to `adr/` with next sequence + `Supersedes:` field, never edited in place
+    - Must use architectural-decision-records skill (templates + writing-guide), following this repo's pinned conventions without asking
   findings:
     - One block per bugfix round with Bug, Root cause, Fix with file:line, Test, Spec impact yes/no
     - Spec impact yes routes to spec update, no routes to code fix
