@@ -122,6 +122,7 @@ function renderOverrides() {
     ? lovLedgerGroups().map((g) => lovLedgerModHeader(g) + g.rows.map(rowHtml).join('')).join('')
     : '<p class="note">No overrides. The load order view is read-only on purpose — an override is set from here.</p>';
   lovLedgerEnsureFiles();
+  lovTransferGameState();
 }
 
 async function load() {
@@ -237,6 +238,81 @@ $('lovSync').addEventListener('click', async () => {
   } catch (err) {
     toast(err.message, 'err');
   }
+});
+
+// ---- import / export (change loadorder-overrides-import-export, task 3.1) --
+//
+// Export downloads the whole global set; import REPLACES it with the file's
+// own, keeping the current set as a server-side backup first. Both buttons
+// sit next to Re-apply-all and stay disabled while Civ6 runs. New top-level
+// names carry the lov prefix: classic <script> tags share one global scope
+// (see the block-move note below and tests/browser-scripts.test.js).
+function lovExportOverrides() {
+  const a = document.createElement('a');
+  a.href = '/api/load-overrides/export';
+  a.download = '';
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+}
+
+// Import always replaces: the file's own entries that this install cannot
+// resolve are reported instead of silently added.
+async function lovImportOverrides(file) {
+  let data;
+  try {
+    data = JSON.parse(await file.text());
+  } catch (_) {
+    toast(esc(`${file.name} is not valid JSON.`), 'err');
+    return;
+  }
+  // eslint-disable-next-line no-alert
+  if (!confirm('Replace ALL your overrides with the ones in this file?\n\nYour current set is kept as a backup first. Entries that match nothing here are listed afterwards, not added.')) return;
+  let d;
+  try {
+    d = await post('/api/load-overrides/import', data);
+  } catch (err) {
+    toast(esc(err.message), 'err');
+    return;
+  }
+  const skipped = Array.isArray(d.skipped) ? d.skipped : [];
+  const imported = Number(d.imported) || 0;
+  if (!skipped.length) {
+    toast(`imported ${imported} override${imported === 1 ? '' : 's'}`, 'ok',
+      d.backupPath ? 'the previous set is kept as a backup' : '');
+    return;
+  }
+  // Prefer a name the player recognises over the bare id, and the ledger's
+  // own orphan language for why each entry was left out.
+  const known = new Map((lov.data && lov.data.overrides ? lov.data.overrides : [])
+    .map((o) => [String(o.modId).toLowerCase(), o.modName]));
+  const names = skipped.map((s) => known.get(String(s.modId).toLowerCase()) || s.modId);
+  const shown = names.slice(0, 5).map(renderCivText).join(', ');
+  toast(`imported ${imported} override${imported === 1 ? '' : 's'} — ` +
+    `${skipped.length} entr${skipped.length === 1 ? 'y was' : 'ies were'} in the file ` +
+    `matched nothing here and ${skipped.length === 1 ? 'was' : 'were'} left out.`,
+  'err', shown + (names.length > 5 ? `, +${names.length - 5} more` : ''));
+}
+
+// Both transfer controls stay disabled while the game runs, like the profile
+// bar: the import writes the store file, and the export button follows the
+// write controls so a running game never meets a half-moved set.
+function lovTransferGameState() {
+  const running = game.running;
+  if ($('lovExport')) $('lovExport').disabled = running;
+  if ($('lovImport')) $('lovImport').disabled = running;
+}
+
+$('lovExport').addEventListener('click', lovExportOverrides);
+$('lovImport').addEventListener('click', () => $('lovFile').click());
+$('lovFile').addEventListener('change', (e) => {
+  const file = e.target.files && e.target.files[0];
+  e.target.value = ''; // so the same file can be picked twice
+  if (file) lovImportOverrides(file).catch((err) => toast(esc(err.message), 'err'));
+});
+document.addEventListener('gamestatus', () => {
+  if (document.body.dataset.page !== 'load-overrides') return;
+  lovTransferGameState();
 });
 
 pages['load-overrides'] = { show: lovEditShow };

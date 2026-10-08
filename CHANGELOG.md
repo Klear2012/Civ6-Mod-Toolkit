@@ -23,6 +23,8 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 - Server and load-order internals split with no behavior change: selfcheck to `src/server-selfcheck.js`, criteria gating to `src/gates.js`, fit geometry to `src/loadorder-fit.js`, store layer to `src/loadorder-store.js`, and the `handleApi` if-chain to a first-match `ROUTES` table (conflict builders deliberately stay in `src/server.js` — split 4 dropped per ADR-012). Export-equality and route-inventory diffs identical; `tests/` mirrors + `check:release` stay authoritative.
 
+- Load-order overrides can be shared between installs: the overrides page has Export (downloads your set as a file) and Import (replaces your set, keeps the previous one as a backup first, and lists entries that match nothing here instead of adding them) next to Re-apply-all. Import is refused while Civilization VI runs; export works while it runs.
+
 ### Fixed
 
 ## v1.9.1 — 3 October 2026

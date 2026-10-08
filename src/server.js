@@ -26,6 +26,7 @@ const { gameStatus } = require('./game');
 const labelStore = require('./labels');
 const setupStore = require('./gamesetup');
 const loOrder = require('./loadorder');
+const loTransfer = require('./loadorder-transfer');
 const shadowing = require('./shadowing');
 const packaging = require('./packaging');
 const conflictReplay = require('./conflict-replay');
@@ -1629,6 +1630,45 @@ async function handleGetModgroupsPreview(req, res, url) {
   }
 }
 
+// GET /api/load-overrides/export -> the override set as a downloadable .json
+// file. Read-only, so it works while the game is running, like the view.
+// The shape is the store content as read, verbatim (see loadorder-transfer).
+async function handleGetLoadOverridesExport(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  let file;
+  try {
+    file = loTransfer.exportOverrides(loOrder.overridesFile());
+  } catch (e) {
+    return send(res, 500, { error: e.message });
+  }
+  res.writeHead(200, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Disposition': 'attachment; filename="civ6-loadorder-overrides.json"',
+  });
+  return res.end(JSON.stringify(file, null, 2));
+}
+
+// POST /api/load-overrides/import -> replace every override with the file's
+// own, keeping the current set as a backup first. The body is the parsed
+// export file (the client runs JSON.parse, like the profile import); entries
+// that match nothing here are skipped and reported, never added. Refused
+// while Civ6 runs, like all writes.
+async function handlePostLoadOverridesImport(req, res, url) {
+  const body = await readBody(req);
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const g = await gameStatus();
+  if (g.running) return send(res, 409, { error: 'close Civilization VI first - it has the mod database open' });
+  try {
+    const r = await loTransfer.importOverrides(modsDb.path, body);
+    return send(res, 200, r);
+  } catch (e) {
+    if (/close Civilization VI first/.test(e.message)) return send(res, 409, { error: e.message });
+    return send(res, 400, { error: e.message });
+  }
+}
+
 // GET /api/modgroups/export?id=... -> the profile as a downloadable .json
 // file. Read-only, so it also works while the game is running.
 async function handleGetModgroupsExport(req, res, url) {
@@ -1803,6 +1843,8 @@ const ROUTES = [
   { method: 'POST', match: '/api/load-overrides/reset-mod', handler: handlePostLoadOverridesResetMod },
   { method: 'POST', match: '/api/load-overrides/discard-mod', handler: handlePostLoadOverridesDiscardMod },
   { method: 'POST', match: '/api/load-overrides/sync', handler: handlePostLoadOverridesSync },
+  { method: 'GET', match: '/api/load-overrides/export', handler: handleGetLoadOverridesExport },
+  { method: 'POST', match: '/api/load-overrides/import', handler: handlePostLoadOverridesImport },
   { method: 'GET', match: '/api/dashboard', handler: handleGetDashboard },
   { method: 'GET', match: '/api/mods', handler: handleGetMods },
   { method: 'GET', match: '/api/mods/details', handler: handleGetModsDetails },

@@ -30,6 +30,7 @@ const net = require('net');
 const vm = require('vm');
 const { spawn, spawnSync } = require('child_process');
 const lo = require('../src/loadorder');
+const transfer = require('../src/loadorder-transfer');
 const { fileTimeOf } = require('../src/modsdb');
 const { normId } = require('../src/modinfo');
 
@@ -1725,6 +1726,282 @@ async function runRecordFlow() {
     check('  discard-mod awaits the game guard and maps it to 409',
       /await gameStatus\(\)/.test(discardBranch19) && /409/.test(discardBranch19));
     check('  and delegates to discardModOverrides', /discardModOverrides/.test(discardBranch19));
+  });
+
+  // ---- Test 20 (loadorder-overrides-import-export 1.1 + 1.2: transfer module) ----
+
+  await asuite('Test 20: overrides export and import-with-backup', async () => {
+    try { fs.unlinkSync(OV_PATH); } catch (_) { /* absent */ }
+    const ovBaks = () => fs.readdirSync(TMP).filter((f) => f.startsWith('load-order-overrides.json.bak-')).sort();
+    const kOne = keyOf('PatchOne');
+    const kStr = keyOf('Strings');
+    lo.writeOverrides(OV_PATH, {
+      [normId(M1)]: { [kOne]: { value: 4242, declared: 9999 }, [kStr]: { value: 8000 } },
+    });
+    const onDisk = fs.readFileSync(OV_PATH, 'utf8');
+
+    const payload = transfer.exportOverrides(OV_PATH);
+    check('export answers the store content as read',
+      payload.version === 1 && payload.overrides[normId(M1)][kOne].value === 4242,
+      JSON.stringify(Object.keys(payload)));
+    check('  keeping the recorded author value', payload.overrides[normId(M1)][kOne].declared === 9999);
+    check('  bare numbers stay bare, so the file is byte-identical',
+      JSON.stringify(payload, null, 2) === onDisk);
+
+    lo.writeOverrides(OV_PATH, {});
+    const emptyBytes = fs.readFileSync(OV_PATH, 'utf8');
+    const preDb = dbValue(crOf('PatchOne'));
+    const r = await transfer.importOverrides(DB_PATH, JSON.parse(onDisk), { file: OV_PATH, statusFn: OPEN });
+    check('import replaces the store', r.imported === 2 && r.skipped.length === 0,
+      `imported=${r.imported} skipped=${JSON.stringify(r.skipped)}`);
+    check('  byte-for-byte on the same mod set', fs.readFileSync(OV_PATH, 'utf8') === onDisk);
+    check('  keeping a backup of the previous file',
+      typeof r.backupPath === 'string' && fs.existsSync(r.backupPath), String(r.backupPath));
+    check('  the backup holding the previous bytes exactly',
+      fs.readFileSync(r.backupPath, 'utf8') === emptyBytes);
+    check('  and answering the re-read state for the UI',
+      r.ok === true && r.count === 2, `ok=${r.ok} count=${r.count}`);
+    check('  without touching the game database', dbValue(crOf('PatchOne')) === preDb);
+
+    // Lenient validation: one file holding every failure mode at once.
+    const kTwo = keyOf('PatchTwo');
+    const kTwin = keyOf('NewAction'); // M2 holds twins under it: ambiguous
+    const GONE = 'dddddddd-4444-4444-8444-444444444444';
+    const beforeLenient = fs.readFileSync(OV_PATH, 'utf8');
+    const lenient = {
+      version: 1,
+      overrides: {
+        [M1]: {
+          [kOne]: 4243,
+          [kStr]: { value: 8001, declared: 9999 },
+          [kTwo]: 1.5,
+          'UpdateDatabase\nnope\nno.sql': 1,
+        },
+        [M2]: { [kTwin]: 7777 },
+        [GONE]: { [kOne]: 5 },
+        'not-a-guid': { [kOne]: 6 },
+      },
+    };
+    const rl = await transfer.importOverrides(DB_PATH, lenient, { file: OV_PATH, statusFn: OPEN });
+    check('lenient import keeps what resolves', rl.imported === 2, `imported=${rl.imported}`);
+    const reasons = rl.skipped.map((s) => s.reason);
+    check('  skipping the unresolvable key with its reason',
+      reasons.includes('no action in that mod matches this key any more'), JSON.stringify(reasons));
+    check('  the ambiguous twins with their count',
+      reasons.some((x) => /2 actions in that mod match this key/.test(x)), JSON.stringify(reasons));
+    check('  the missing mod without guessing',
+      reasons.includes('that mod is not in the database'), JSON.stringify(reasons));
+    check('  a malformed mod id without guessing',
+      reasons.some((x) => /is not a mod id/.test(x)), JSON.stringify(reasons));
+    check('  and a fractional value without guessing',
+      reasons.some((x) => /whole number/.test(x)), JSON.stringify(reasons));
+    check('  five skipped, each naming its reason', rl.skipped.length === 5, JSON.stringify(rl.skipped));
+    check('  and the store holds only the two kept entries', lo.readOverrides(OV_PATH).count === 2);
+    check('  with the kept values', stored(M1, kOne).value === 4243 && stored(M1, kStr).value === 8001);
+    check('  and the backup holding the pre-import bytes',
+      typeof rl.backupPath === 'string' && fs.readFileSync(rl.backupPath, 'utf8') === beforeLenient);
+    check('  and the database still untouched', dbValue(crOf('PatchOne')) === preDb);
+
+    const keptBytes = fs.readFileSync(OV_PATH, 'utf8');
+    const baksMid = ovBaks();
+    let zeroMsg = '';
+    try {
+      await transfer.importOverrides(DB_PATH, { version: 1, overrides: { [GONE]: { [kOne]: 1 } } }, { file: OV_PATH, statusFn: OPEN });
+    } catch (e) { zeroMsg = e.message; }
+    check('a file with nothing usable is refused', /nothing in that file could be used/.test(zeroMsg), zeroMsg);
+    check('  writing nothing', fs.readFileSync(OV_PATH, 'utf8') === keptBytes);
+    check('  and taking no backup', JSON.stringify(ovBaks()) === JSON.stringify(baksMid));
+
+    writeFile('{ nope');
+    let corruptMsg = '';
+    try { await transfer.importOverrides(DB_PATH, JSON.parse(onDisk), { file: OV_PATH, statusFn: OPEN }); }
+    catch (e) { corruptMsg = e.message; }
+    check('a corrupt live store fails closed',
+      /is not valid JSON.*nothing was written.*Fix or delete load-order-overrides\.json/.test(corruptMsg), corruptMsg);
+    check('  leaving the file alone', fs.readFileSync(OV_PATH, 'utf8') === '{ nope');
+    let exportMsg = '';
+    try { transfer.exportOverrides(OV_PATH); } catch (e) { exportMsg = e.message; }
+    check('  and export refuses it too', /nothing was written/.test(exportMsg), exportMsg);
+    check('  and still takes no backup', JSON.stringify(ovBaks()) === JSON.stringify(baksMid));
+    lo.writeOverrides(OV_PATH, {});
+
+    const big = { version: 1, overrides: { [M1]: {} } };
+    for (let i = 0; i <= lo.MAX_BULK_ENTRIES; i++) big.overrides[M1][`UpdateDatabase\nKey${i}\nF.sql`] = i;
+    let guardCalled = false;
+    const watching = async () => { guardCalled = true; return { running: true, known: true, processes: ['CivilizationVI.exe'] }; };
+    let capMsg = '';
+    try { await transfer.importOverrides(DB_PATH, big, { file: OV_PATH, statusFn: watching }); }
+    catch (e) { capMsg = e.message; }
+    check('an oversized file is refused', /limit 1000.*nothing was written/.test(capMsg), capMsg);
+    check('  before the game guard is even asked', guardCalled === false);
+
+    const fileBeforeGuard = fs.readFileSync(OV_PATH, 'utf8');
+    const baksGuard = ovBaks();
+    let guardMsg = '';
+    try { await transfer.importOverrides(DB_PATH, JSON.parse(onDisk), { file: OV_PATH, statusFn: RUNNING }); }
+    catch (e) { guardMsg = e.message; }
+    check('import refuses while Civilization VI is running', /close Civilization VI first/.test(guardMsg), guardMsg);
+    check('  writing nothing', fs.readFileSync(OV_PATH, 'utf8') === fileBeforeGuard);
+    check('  and taking no backup', JSON.stringify(ovBaks()) === JSON.stringify(baksGuard));
+
+    const shapeBytes = fs.readFileSync(OV_PATH, 'utf8');
+    const shapeBaks = ovBaks();
+    for (const [what, bad] of [
+      ['a version this build did not write', { version: 99, overrides: {} }],
+      ['a non-object file', [1, 2]],
+      ['a file with no overrides list', { version: 1, overrides: [] }],
+    ]) {
+      let m = '';
+      try { await transfer.importOverrides(DB_PATH, bad, { file: OV_PATH, statusFn: OPEN }); }
+      catch (e) { m = e.message; }
+      check(`${what} is refused as a whole`,
+        /not a load-order overrides file|is version 99|has no overrides list/.test(m) && /nothing was written/.test(m), m);
+    }
+    check('  writing nothing for any of them', fs.readFileSync(OV_PATH, 'utf8') === shapeBytes);
+    check('  and taking no backup', JSON.stringify(ovBaks()) === JSON.stringify(shapeBaks));
+    lo.writeOverrides(OV_PATH, {});
+  });
+
+  // ---- Test 21 (loadorder-overrides-import-export 2.1: server routes) ----
+
+  await asuite('Test 21: the transfer routes over HTTP', async () => {
+    const postJson = (port, p, body) => new Promise((resolve, reject) => {
+      const payload = JSON.stringify(body == null ? {} : body);
+      const req = http.request({ host: '127.0.0.1', port, method: 'POST', path: p, agent: false,
+        headers: { 'content-type': 'application/json', 'content-length': Buffer.byteLength(payload) } },
+      (res) => {
+        let t = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { t += c; });
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: t ? JSON.parse(t) : null }));
+      });
+      req.on('error', reject);
+      req.write(payload);
+      req.end();
+    });
+    const getRaw = (port, p) => new Promise((resolve, reject) => {
+      const req = http.request({ host: '127.0.0.1', port, method: 'GET', path: p, agent: false },
+      (res) => {
+        let t = '';
+        res.setEncoding('utf8');
+        res.on('data', (c) => { t += c; });
+        res.on('end', () => resolve({ status: res.statusCode, headers: res.headers, body: t }));
+      });
+      req.on('error', reject);
+      req.end();
+    });
+    const freePort = () => new Promise((resolve, reject) => {
+      const s = net.createServer();
+      s.on('error', reject);
+      s.listen(0, '127.0.0.1', () => { const a = s.address(); s.close(() => resolve(a.port)); });
+    });
+    const waitUp = async (port, child) => {
+      const t0 = Date.now();
+      for (;;) {
+        if (child.exitCode != null) throw new Error(`scratch server exited early (${child.exitCode})`);
+        try {
+          const r = await postJson(port, '/api/ping', {});
+          if (r.status === 200 && r.body && r.body.ok) return;
+        } catch (_) { /* not yet */ }
+        if (Date.now() - t0 > 20000) throw new Error('scratch server never came up');
+        await new Promise((r) => setTimeout(r, 50));
+      }
+    };
+    const boxDb = path.join(TMP, 'tx-copy.sqlite');
+    fs.copyFileSync(DB_PATH, boxDb);
+    const boxOv = path.join(TMP, 'tx-overrides.json');
+    for (const d of ['tx-mods', 'tx-ws', 'tx-saves'].map((x) => path.join(TMP, x))) {
+      fs.mkdirSync(d, { recursive: true });
+    }
+    const port = await freePort();
+    const child = spawn(process.execPath, [path.join(SRC, 'server.js')], {
+      env: { ...process.env, CIV6_PATHS_FILE: path.join(TMP, 'no-such-paths.json'),
+        CIV6_LOCAL_MODS: path.join(TMP, 'tx-mods'), CIV6_WORKSHOP: path.join(TMP, 'tx-ws'),
+        CIV6_SAVES: path.join(TMP, 'tx-saves'), CIV6_MODS_DB: boxDb,
+        CIV6_LABELS_FILE: path.join(TMP, 'tx-labels.json'), CIV6_LOADORDER_FILE: boxOv,
+        PORT: String(port), NO_OPEN: '1' },
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    try {
+      await waitUp(port, child);
+      const dd = new DatabaseSync(boxDb, { readOnly: true });
+      const kOneTx = lo.actionKey(dd, dd.prepare("SELECT ComponentRowId AS c FROM Components WHERE ComponentId = 'PatchOne'").get().c);
+      dd.close();
+      lo.writeOverrides(boxOv, { [normId(M1)]: { [kOneTx]: { value: 4242 } } });
+      const seeded = fs.readFileSync(boxOv, 'utf8');
+      const gameNow = await getRaw(port, '/api/game').then((r) => JSON.parse(r.body), () => ({ running: false }));
+
+      const g = await getRaw(port, '/api/load-overrides/export');
+      check('export answers 200 with the file', g.status === 200, `status=${g.status} game running=${!!gameNow.running}`);
+      check('  as a download', /attachment/.test(String(g.headers['content-disposition'] || '')) && /\.json/.test(String(g.headers['content-disposition'] || '')),
+        String(g.headers['content-disposition']));
+      check('  byte-identical to the store file', g.body === seeded);
+      check('  parsing to the override set', JSON.parse(g.body).overrides[normId(M1)][kOneTx] === 4242);
+
+      const fresh = { version: 1, overrides: { [M1]: { [kOneTx]: 5555 } } };
+      if (gameNow.running) {
+        // Civ6 is open in this run, so the write path refuses live: this is
+        // the import-while-running route case, with nothing written.
+        const fileBeforeRun = fs.readFileSync(boxOv, 'utf8');
+        const imRun = await postJson(port, '/api/load-overrides/import', fresh);
+        check('import-while-running is refused over HTTP',
+          imRun.status === 409 && /close Civilization VI first/.test(imRun.body && imRun.body.error),
+          `${imRun.status} ${imRun.body && imRun.body.error}`);
+        check('  with nothing written', fs.readFileSync(boxOv, 'utf8') === fileBeforeRun);
+      } else {
+        let im = await postJson(port, '/api/load-overrides/import', fresh);
+        check('import answers 200', im.status === 200, `${im.status} ${im.body && im.body.error}`);
+        check('  reporting what it did', im.body.imported === 1 && Array.isArray(im.body.skipped),
+          JSON.stringify({ imported: im.body.imported, skipped: im.body.skipped }));
+        check('  with a backup of the previous file',
+          typeof im.body.backupPath === 'string' && fs.existsSync(im.body.backupPath), String(im.body.backupPath));
+        check('  the backup holding the seeded bytes', fs.readFileSync(im.body.backupPath, 'utf8') === seeded);
+        check('  and the store replaced',
+          JSON.parse(fs.readFileSync(boxOv, 'utf8')).overrides[normId(M1)][kOneTx].value === 5555);
+        check('  answering the re-read state too', im.body.ok === true && im.body.count === 1,
+          `ok=${im.body.ok} count=${im.body.count}`);
+
+        const fileAfterGood = fs.readFileSync(boxOv, 'utf8');
+        im = await postJson(port, '/api/load-overrides/import', { version: 99, overrides: {} });
+        check('a version this build did not write is a 400', im.status === 400, String(im.status));
+        check('  writing nothing', fs.readFileSync(boxOv, 'utf8') === fileAfterGood);
+        im = await postJson(port, '/api/load-overrides/import', [1, 2]);
+        check('  a non-object file too', im.status === 400, String(im.status));
+      }
+
+      const srvSrc = fs.readFileSync(path.join(SRC, 'server.js'), 'utf8');
+      const routesAt = srvSrc.indexOf('const ROUTES = [');
+      const routesText = routesAt === -1 ? '' : srvSrc.slice(routesAt, srvSrc.indexOf('\n];', routesAt) + 3);
+      const handlerSrc = (name) => {
+        const at = srvSrc.indexOf(`async function ${name}(`);
+        if (at === -1) return '';
+        const end = srvSrc.indexOf('\n}', at);
+        return end === -1 ? '' : srvSrc.slice(at, end + 2);
+      };
+      const routeHandler = (method, p) => {
+        const m = new RegExp(`\\{ method: '${method}', match: '${p}'[^}]*?handler: (\\w+)`).exec(routesText);
+        return m ? handlerSrc(m[1]) : '';
+      };
+      check('both transfer routes exist',
+        /match: '\/api\/load-overrides\/export'/.test(routesText) && /match: '\/api\/load-overrides\/import'/.test(routesText));
+      const exportBranch = routeHandler('GET', '/api/load-overrides/export');
+      check('  the export branch never refuses: no guard, no 409',
+        !/gameStatus/.test(exportBranch) && !/409/.test(exportBranch));
+      check('  and delegates shaping to the transfer module', /exportOverrides/.test(exportBranch));
+      const importBranch = routeHandler('POST', '/api/load-overrides/import');
+      check('  the import branch awaits the game guard and maps it to 409',
+        /await gameStatus\(\)/.test(importBranch) && /409/.test(importBranch) && /close Civilization VI first/.test(importBranch));
+      check('  and delegates the write to the transfer module', /importOverrides/.test(importBranch));
+
+      const fileBeforeUnit = fs.readFileSync(boxOv, 'utf8');
+      let runMsg = '';
+      try { await transfer.importOverrides(boxDb, fresh, { file: boxOv, statusFn: RUNNING }); }
+      catch (e) { runMsg = e.message; }
+      check('import refuses while Civilization VI is running', /close Civilization VI first/.test(runMsg), runMsg);
+      check('  writing nothing', fs.readFileSync(boxOv, 'utf8') === fileBeforeUnit);
+    } finally {
+      if (child.exitCode == null) { child.kill(); await new Promise((r) => child.once('exit', r)); }
+    }
   });
 
   // ---- Test 17 ----

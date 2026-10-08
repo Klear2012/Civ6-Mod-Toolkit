@@ -32,3 +32,14 @@ overrides. Who calls it: `src/server.js` (pages + API), `src/loadorder-fit.js`
 Call `profileLoadOrder(dbPath)` — it returns the global order filtered to the
 active profile. Never build a per-profile order; see
 `adr/ADR-003-global-order-profile-filter.md`.
+
+## How-to: share an override set (import/export)
+
+The overrides page offers Export (downloads the set as
+`civ6-loadorder-overrides.json`) and Import next to Re-apply-all. Import
+replaces the whole set, keeps the previous file as a same-directory backup
+first, and lists entries that match nothing here instead of adding them; it
+is refused while Civ6 runs, while export works while it runs. The logic lives
+in `src/loadorder-transfer.js` (`exportOverrides`, `importOverrides`);
+`src/server.js` keeps only the two thin handlers plus two `ROUTES` rows.
+Contract: `tests/loadorder.test.js` Tests 20–21.

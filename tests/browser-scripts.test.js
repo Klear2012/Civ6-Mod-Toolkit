@@ -899,3 +899,36 @@ describe('Test 14 (pairing guidance): the pairing section renders headless with 
     });
   }
 });
+
+describe('Test 15: load-overrides import/export controls sit beside Re-apply-all', () => {
+  const section = html.split('id="page-load-overrides"')[1].split('<section')[0];
+  const lov = fs.readFileSync(path.join(PUB, 'looverrides.js'), 'utf8');
+  it('export and import buttons render beside Re-apply-all', () => {
+    const sync = section.indexOf('id="lovSync"');
+    const exp = section.indexOf('id="lovExport"');
+    const imp = section.indexOf('id="lovImport"');
+    assert.ok(sync !== -1 && exp !== -1 && imp !== -1, 'lovSync/lovExport/lovImport present');
+    assert.ok(sync < exp && exp < imp, 'export and import follow Re-apply-all');
+  });
+  it('  the export title promises a shareable file', () => {
+    assert.ok(/id="lovExport"[^>]*title="Download your overrides as a file/.test(section));
+  });
+  it('  the import control warns about replace-all with backup', () => {
+    assert.ok(/id="lovImport"[^>]*title="Replace ALL your overrides/.test(section));
+    assert.ok(/kept as a backup/.test(section) && /listed afterwards/.test(section));
+  });
+  it('  with a hidden file input for the picker', () => {
+    assert.ok(/id="lovFile"[^>]*type="file"[^>]*hidden/.test(section));
+  });
+  it('the import asks first, then posts the parsed file', () => {
+    assert.ok(/function lovImportOverrides/.test(lov) && /JSON\.parse\(await file\.text\(\)\)/.test(lov)
+      && /confirm\('Replace ALL your overrides/.test(lov) && /post\('\/api\/load-overrides\/import'/.test(lov));
+  });
+  it('  skipped entries reuse the ledger orphan language', () => {
+    assert.ok(/left out/.test(lov) && /map\(renderCivText\)/.test(lov));
+  });
+  it('  both controls stay disabled while Civ6 runs', () => {
+    assert.ok(/\$\('lovExport'\)\.disabled = running/.test(lov) && /\$\('lovImport'\)\.disabled = running/.test(lov)
+      && /addEventListener\('gamestatus'/.test(lov));
+  });
+});
