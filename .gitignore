@@ -10,6 +10,9 @@ mod-labels.json
 
 # AI agent environment - planning artifacts and session state, never shipped
 openspec/changes/
+# spec contracts retired (ADR-014): code + tests + docs are the contract; specs/config stay local-only
+openspec/specs/
+openspec/config.yaml
 .opencode/
 .agents/
 .openchamber/
