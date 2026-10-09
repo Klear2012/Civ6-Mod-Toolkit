@@ -27,45 +27,22 @@ const fit = require('./loadorder-fit');
 // module.exports block stay textually identical.
 const { VERSION, SENTINEL, overridesFile, cleanValue, isModId, cleanKey, cleanModId, readOverrides, writeOverrides, readForWrite, setOverride, clearOverride, recordApplied } = require('./loadorder-store');
 
-// The bulk cap the design left open ("bulk limit (e.g. 200 actions) to be
-// set at implementation"). 1000: a block move is one mod's positioned
-// actions, and the largest single-mod counts seen in the library are in the
-// low hundreds (Harmony in Diversity: 222 actions; 48 mods share 286 actions
-// across 65 identical-key groups) against 3176 actions in 426 mods - so 1000
-// never binds a real block move but stops a runaway or hand-built packet
-// becoming an unbounded single transaction. Checked up front in applyBulk,
-// before the game guard and before any write, so an oversized batch costs
-// nothing.
+// A block move is one mod's positioned actions - real ones number in the low
+// hundreds - so 1000 never binds a real move but stops a runaway or hand-built
+// packet becoming an unbounded single transaction. Checked up front in
+// applyBulk, before the guard and before any write, so a reject costs nothing.
 const MAX_BULK_ENTRIES = 1000;
 
 // ---------------------------------------------------------------------------
 // Action identity
 // ---------------------------------------------------------------------------
 
-// The key is (ComponentType, id, sorted file list), newline separated.
-//
-// The components were chosen by measuring collisions within a mod across all
-// 3176 actions in the library:
-//
-//   id alone                        760 (23.91%)  - Civ6's editor leaves NewAction
-//   (id, type)                       99 ( 3.12%)
-//   (file list, type)               286 ( 9.00%)  - 8.2% of actions have no files
-//   (file list, type, id)            11 ( 0.35%)  <- chosen
-//   the same, plus an ordinal          0           <- rejected, see below
-//
-// The declared LoadOrder is deliberately NOT part of the key: it is the one
-// thing that changes on exactly the updates an override has to survive, so
-// including it would orphan every override the moment its author bumped it.
-//
-// An ordinal was rejected rather than added. It is unique within a mod by
-// construction, so it drives the count to zero - and that is why it is wrong.
-// 48 mods hold 286 actions in 65 groups sharing an identical type and file list;
-// in 38 of those the file list is empty, so the ordinal would be the only
-// discriminator. Those are the large multi-action mods, and an author inserting
-// one action renumbers everything after it. A wrong ordinal does not error: it
-// silently moves a neighbour's action, and the user finds out three sessions
-// later. A dropped override is noticed immediately. For a tool writing to a
-// live game database the loud failure is worth more than the quiet one.
+// The key is (ComponentType, id, sorted file list), newline separated. It
+// survives rescans, renames, and author LoadOrder bumps - LoadOrder itself is
+// deliberately NOT part of the key, since it changes on exactly the updates an
+// override must survive. No ordinal tiebreak: a wrong ordinal silently moves a
+// neighbour's action, while a dropped override is noticed at once. Parts are
+// one-line-normalized below. Measured rationale: see ADR-005.
 
 // Newlines would make the key ambiguous, and a path cannot contain one, but an
 // XML attribute value could. Collapse whitespace so every part is one line.
@@ -82,8 +59,7 @@ function keyFor(type, id, files) {
 }
 
 // Read one action's identity out of the database. The game wrote these rows, and
-// they were measured to agree with the .modinfo on disk for 384 of 384 mods, so
-// there is no need to parse any file here.
+// they agree with the .modinfo on disk, so there is no need to parse any file here.
 function actionKey(db, componentRowId) {
   const c = db.prepare('SELECT ComponentType AS type, ComponentId AS id FROM Components WHERE ComponentRowId = ?')
     .get(componentRowId);
@@ -105,8 +81,8 @@ const AMBIGUOUS = 'ambiguous';
 // Find the action one stored key names, inside one mod.
 //
 // Exactly one match, or a report. Never a best guess, and never an ordinal
-// fallback: the 0.35% that do not resolve uniquely are actions their own author
-// never told apart, so the user cannot say which one they meant either.
+// fallback (see ADR-005): actions sharing a key are ones their own author never
+// told apart, so the user cannot say which one they meant either.
 function resolveAction(db, modIdNorm, key) {
   const mod = db.prepare('SELECT ModRowId FROM Mods WHERE lower(ModId) = lower(?)').get(modIdNorm);
   if (!mod) return { state: MISSING, candidates: [] };
@@ -209,7 +185,7 @@ function openDb(dbPath, { readOnly = true } = {}) {
 
 // The mod's .modinfo on disk, and whether we could find it.
 //
-// 42 of 427 rows are base-game or DLC assets recorded with relative ../../../
+// Some rows are base-game or DLC assets recorded with relative ../../../
 // paths, so they are not on disk under any local or workshop root and their
 // mtime cannot be read. Nothing can keep their stamp, so an override on one of
 // them is re-derived on the next rescan. They are reported as not protected
@@ -663,8 +639,8 @@ function staleMods(dbPath, opts = {}) {
 // from the page which renders it.
 
 // The smallest gap worth showing as a row. A free run of two is real but says
-// nothing you could act on, and a 183-mod profile has hundreds of them, so below
-// this the list simply steps from one value to the next.
+// nothing you could act on, so below this the list simply steps from one value
+// to the next.
 const MIN_FREE_RUN = 5;
 
 function groupsOf(db) {
@@ -727,9 +703,8 @@ function enabledMods(db, groupId) {
 
 // Everything in one profile, in four queries.
 //
-// The identity key is deliberately NOT built here for every action: that would
-// be 3176 key builds per request, each reading a file list. Only the actions an
-// override names need one, and there are a handful of those.
+// The identity key is deliberately NOT built here for every action: each build
+// reads a file list, and only the handful of actions an override names need one.
 function readProfile(db, groupId) {
   const { on, rowToNorm } = enabledMods(db, groupId);
 
@@ -764,11 +739,11 @@ function readProfile(db, groupId) {
   // condition query yields three rows for one condition.
   //
   // No verdict was wrong, because every criterion type the view can decide
-  // happens to carry exactly one property, measured. But 22 criteria in the
-  // active profile inflated that way, all ConfigurationValueMatches, and each
-  // of those rows listed the same unreadable reason three times - and the row's
-  // own "and N more it cannot see" count was counting one condition as three.
-  // The duplication was already putting wrong information on screen.
+  // happens to carry exactly one property. But multi-property conditions inflated
+  // that way, each of those rows listing the same unreadable reason once per
+  // property - and the row's own "and N more it cannot see" count was counting
+  // one condition as three. The duplication was already putting wrong information
+  // on screen.
   const condRows = db.prepare(
     `SELECT cc.ComponentRowId AS cr, k.Any AS any, cr.CriterionRowId AS id,
             cr.CriterionType AS type, cr.Inverse AS inverse
@@ -900,7 +875,7 @@ function profileLoadOrder(dbPath, opts = {}) {
       ? enabledMods(db, compareGroupId).on
       : null;
 
-    // 42 of 427 rows are base-game or DLC assets whose .modinfo is not on disk.
+    // Some rows are base-game or DLC assets whose .modinfo is not on disk.
     // Nothing can keep their stamp, so an override on one is re-derived on the
     // next rescan, and the view says so instead of implying protection.
     const unprotectable = new Set();
@@ -944,10 +919,9 @@ function profileLoadOrder(dbPath, opts = {}) {
 
     const { bands, undeclared } = buildList(rows);
 
-    // The undeclared block, grouped by mod. 1579 actions in the library declare
-    // nothing at all, and that number is what says a mod is relying on ordering
-    // nobody controls. The verdict counts ride along, because "declares no
-    // position and will not run anyway" is a different thing from either alone.
+    // The undeclared block, grouped by mod: an action declaring nothing relies on
+    // ordering nobody controls. The verdict counts ride along, because "declares
+    // no position and will not run anyway" is a different thing from either alone.
     const byMod = new Map();
     for (const r of undeclared) {
       if (!byMod.has(r.modId)) byMod.set(r.modId, { modId: r.modId, name: r.modName, count: 0, willNotRun: 0, unknown: 0 });

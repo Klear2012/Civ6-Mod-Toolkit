@@ -948,7 +948,7 @@ function writeModContent(db, modRowId, info) {
 }
 
 // The built-in group. Every mod the game knows has a row here - verified on a
-// real database (2026-09-27): all 423 mods, no exceptions. When the game finds a
+// real database, no exceptions. When the game finds a
 // mod it has not scanned before it registers it here, and rebuilds that mod's
 // group membership from scratch, which is why a row written into another group
 // does not survive the next launch. Registration therefore always targets this

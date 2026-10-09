@@ -15,30 +15,18 @@ const { normId } = require('./modinfo');
 // ever writes the correctly spelled row.
 const MISSPELLINGS = ['LaodOrder', 'LoadingOrder'];
 
-// The six criterion types in a real library, measured:
+// The criterion types found in real mods: ModInUse (a mod GUID switched on in
+// the ACTIVE profile), RuleSetInUse, ConfigurationValueMatches, LeaderPlayable,
+// GameCoreInUse, ModIsEnabled.
 //
-//   ModInUse                   604   a mod with this GUID is switched on in the
-//                                        ACTIVE profile. 225 of them are inverted.
-//   RuleSetInUse               318   a game ruleset
-//   ConfigurationValueMatches  215   a config value
-//   LeaderPlayable             150   which leaders are playable
-//   GameCoreInUse               68   which game core
-//   ModIsEnabled                 1   a mod is switched on in the profile
+// ModInUse was measured in game rather than inferred: a probe gated on a mod
+// installed but switched OFF in the active profile (and ON elsewhere) did NOT
+// run, so it is scoped to the active profile and behaves the same as
+// ModIsEnabled.
 //
-// ModInUse was measured in game rather than inferred, and the answer settled
-// more than the question asked. A probe action gated on ModInUse of a mod that
-// was installed, switched OFF in the active profile and switched ON in eleven
-// others did NOT run. So it is not "subscribed and present" - the eleven
-// profiles rule that out - and it is not "on in any profile" either, because
-// the criterion was still false. It is scoped to the active profile, and it
-// behaves the same as ModIsEnabled.
-//
-// The first plan assumed the opposite and was wrong. It proposed warning that
-// switching profile would stop 214 of Harmony in Diversity's 222 actions
-// running, on the strength of "ModInUse is the commonest, 604 uses" - true
-// across the library and misleading about the one mod it was cited for. HiD's
-// dominant gate is RuleSetInUse, at 213 rows against 97, and a game ruleset
-// does not change when you switch profile.
+// Library-wide frequency says nothing about one mod's gating - an early plan
+// warned about profile switches on that basis and was wrong, because a mod's
+// dominant gate can be a ruleset, which does not change with the profile.
 const DECIDABLE = new Set(['ModInUse', 'ModIsEnabled']);
 
 // The author's position: the correctly spelled row, else a misspelling, else
@@ -67,22 +55,11 @@ const MAYBE = null;
 // row; the specific reason shows it is merely unanswerable here, which is a very
 // different thing to someone deciding whether to worry.
 //
-// These are measurements, not guesses, and one of them corrected me.
-//
-// I first wrote that nothing on disk holds these values, having searched for
-// GAMEMODE_ as a VALUE. That search was wrong: DebugConfiguration.sqlite has a
-// `Parameters` table (75 rows) and DebugGameplay.sqlite has `GlobalParameters`
-// (476 rows), and neither is keyed by the column I was matching. Checked properly,
-// across every ConfigurationId-bearing table:
-//
-//   Parameters        75 rows  1 of the 41 ids appears: RULESET
-//   QueryParameters   23 rows  9 rows, all the same id: RULESET
-//   ParameterDependencies, ParameterCriteria, the Domain/Value* columns: 0
-//
-// So one of the forty-one ids the library names is known to the game at all, and
-// that one row has DefaultValue NULL - the game recording that it has no default,
-// which is the clearest statement available that the value is chosen at game start.
-// The other forty appear in no game database on this machine.
+// These are measurements, not guesses, and one of them corrected me: an early
+// search for GAMEMODE_ as a VALUE wrongly concluded nothing on disk holds these
+// values. Checked properly across every ConfigurationId-bearing table in the
+// debug databases, only RULESET appears - with no default value, the game's way
+// of recording that the value is chosen at game start.
 //
 // No verdict is available from any of this, and none is claimed. What it buys is a
 // reason a user can check, which is the difference between a row that looks broken
@@ -245,16 +222,12 @@ function verdictOf(entry, ctx) {
     }
   }
 
-  // Criteria.Any is the author's own declaration and means what it says. Measured
-  // over every multi-condition set whose .modinfo is on disk: stored Any=1 exactly
-  // when the modinfo declares any= - 2 sets with a declaration, 278 without one, no
-  // exceptions. (104 further sets belong to base-game and DLC mods with no
-  // .modinfo on disk, and the column holds the value the game recorded either way.)
-  //
-  // An earlier note here called the flag unreadable, on the strength of "5 mods
-  // declare any=1 but 82 sets have it". That count was of declaration sites rather
-  // than sets and had ignored the 104, so the flag was never the mystery it looked
-  // like - the measurement was.
+  // Criteria.Any is the author's own declaration and means what it says: stored
+  // Any=1 exactly when the modinfo declares any=, checked over every
+  // multi-condition set whose .modinfo is on disk, no exceptions. (Sets belonging
+  // to base-game and DLC mods with no .modinfo on disk carry whatever the game
+  // recorded.) An earlier note called the flag unreadable on a count of
+  // declaration sites rather than sets - the measurement was wrong, not the flag.
   //
   // Three-valued, because a condition this view cannot read is not false: an OR
   // needs one met condition however the rest read, and an AND is defeated by one

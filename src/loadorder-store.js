@@ -41,10 +41,8 @@ function cleanValue(v) {
   return n;
 }
 
-// A Civ6 mod id is a GUID. Every one of the 426 distinct ModIds in a real
-// library is GUID-shaped once normId has stripped the braces some mods carry -
-// measured, not assumed, because a check that could reject a real mod would be
-// worse than the junk it filters.
+// A Civ6 mod id is a GUID. Storage keys are checked strictly, because a check
+// that could reject a real mod would be worse than the junk it filters.
 //
 // normId itself does not validate: it lowercases and strips braces, so a
 // hand-edited key of "not-a-guid" survives it. That is right for a comparison
