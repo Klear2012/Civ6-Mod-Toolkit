@@ -50,20 +50,11 @@ function declaredValueOf(declared, componentRowId) {
 // mind, and two of them exist because the first version got them wrong.
 const MAYBE = null;
 
-// Why this view cannot read a condition, in the words that help someone looking at
-// the row. "Depends on something this view cannot see" reads like a fault in the
-// row; the specific reason shows it is merely unanswerable here, which is a very
-// different thing to someone deciding whether to worry.
-//
-// These are measurements, not guesses, and one of them corrected me: an early
-// search for GAMEMODE_ as a VALUE wrongly concluded nothing on disk holds these
-// values. Checked properly across every ConfigurationId-bearing table in the
-// debug databases, only RULESET appears - with no default value, the game's way
-// of recording that the value is chosen at game start.
-//
-// No verdict is available from any of this, and none is claimed. What it buys is a
-// reason a user can check, which is the difference between a row that looks broken
-// and a row that is merely unanswerable here.
+// Why one condition is unreadable here, in words for the row (see ADR-004:
+// a specific reason reads as unanswerable, not as a fault in the row).
+// Measurements, not guesses: only RULESET holds these values on disk, with
+// no default, since the game records a choice made at game start. No verdict
+// is claimed; the row gets a reason a user can check.
 function unreadableWhy(c) {
   const v = c.value;
   switch (c.type) {

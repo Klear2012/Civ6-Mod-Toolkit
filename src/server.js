@@ -1033,16 +1033,11 @@ async function handleGetActionFiles(req, res, url) {
   }
 }
 
-// ===== Conflict diagnosis: read-only reports (no .Civ6Cfg writes, ======
-// no live game-DB writes) =================================================
-//
-// Both reports reuse the phase backends and reimplement nothing:
-// shadowing enumerates contested UI paths from Mods.sqlite (read-only
-// open), and replay runs ordered statements into a TEMP COPY of
-// DebugGameplay.sqlite (the live game DB is only read, via the copy).
-// Both routes are GETs served only when the Conflicts page's buttons are
-// clicked - never on page load and never at server start. There is
-// deliberately no POST anywhere under /api/conflicts.
+// Conflict diagnosis: read-only reports (no .Civ6Cfg or live game-DB writes;
+// see ADR-006). Both routes reuse the phase backends and reimplement nothing:
+// shadowing reads Mods.sqlite, replay runs into a TEMP COPY of the game DB
+// (see ADR-001). GETs only, served on button click, never on load; no POST
+// under /api/conflicts.
 // GET /api/conflicts/shadowing -> contested UI paths for the active
 // profile, with winners decided only by max declared LoadOrder.
 async function handleGetConflictsShadowing(req, res, url) {

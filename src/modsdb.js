@@ -1027,23 +1027,11 @@ function registerMods(dbPath, files, enabled = true, groupId = null) {
   return { backupPath, ...result };
 }
 
-// Which mods a sync would add, and why. This is the ONLY place that decides
-// what "not added yet" means: the mod manager's list, the dashboard and the
-// startup sync all read it. An earlier version of this feature had the rule
-// written out twice - once for "the game has never scanned it" and once for
-// "no row in the profile in use" - and they drifted, so a mod in the second
-// state was untoggleable with no way to fix it from the app.
-//
-// Two reasons, both fixed by the same call to registerMods():
-//   never-scanned    - on disk, not in the database at all
-//   no-profile-row   - the game knows it, but it has no row in the profile in
-//                      use, so it cannot be switched on or off
-//
-// A mod that is off in the active profile is not pending: it is already
-// switchable, and whether the user wants it on is theirs to decide.
-//
-// `state` may be a readModState() result the caller already has, to avoid
-// reading the database twice per request.
+// The ONLY place that decides what "not added yet" means (see ADR-013: one
+// owner per shared truth); list, dashboard and startup sync all read it.
+// Pending is never-scanned or no-profile-row, both fixed by registerMods();
+// a mod off in the active profile is switchable, not pending. `state` may be
+// a readModState() result the caller already has, to skip a second read.
 function findUnregistered(dbPath, sources, state) {
   requireDb();
   const installed = scanMods(sources);

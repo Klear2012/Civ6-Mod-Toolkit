@@ -1381,18 +1381,10 @@ function gateUnreadableWhy(cond) {
 }
 
 // Assumed-setup keys for one gate condition, kept in sync with setupKeysFor
-// in gates.js by contract (local: this library stays free of the view/store
-// stack, like the normGateId note above). RuleSetInUse / GameCoreInUse /
-// LeaderPlayable read
-// KIND:<Value>; ConfigurationValueMatches reads the Group/ConfigurationId/
-// Value triple (props first, cond-level fields as fallback) plus the
-// GAMEMODE:<id> shorthand for an enable triple. Anything else, or a row
-// missing the property its key needs, yields no key: never guessed.
-//
-// Comma lists read as OR, mirroring the view and the catalog: one condition
-// naming "Expansion1,Expansion2" yields one key per single (LeaderPlayable
-// singles reduce to their leader tail), and gateAssumedMatch below satisfies
-// the condition when ANY listed single is asserted.
+// in gates.js by contract (this library stays free of the view/store stack).
+// KIND:<Value>, the Configuration triple, and the GAMEMODE:<id> shorthand
+// yield keys; anything else yields no key: never guessed (see ADR-004).
+// Comma lists read as OR, mirroring the view and the catalog.
 function gateCommaSingles(value) {
   return String(value == null ? '' : value).split(',').map((s) => s.trim()).filter((s) => s);
 }

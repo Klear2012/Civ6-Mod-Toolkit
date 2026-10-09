@@ -1,20 +1,9 @@
 'use strict';
 
-// The load order view: one profile's load order, as one flat list.
-//
-// This page READS. There is no control on it that changes a value, and the
-// button that says "Manage overrides" navigates to a different screen. That is
-// not a style choice - the handoff for this feature was explicit that the two
-// problems it covers were conflated for a long time and must not be again:
-//
-//   problem 1, authoring:  which values are taken, which are free, where does
-//                          mine go?                     <- this page
-//   problem 2, reordering: this mod is in the wrong band, move it
-//                                                          <- load-overrides
-//
-// The list is the answer rather than a dashboard about it. "Where does mine
-// sit" is answered by its neighbours, so the useful thing is the ordered list
-// itself, with the gaps in it.
+// Read-only view of one profile's load order as one flat list: authoring
+// (which values are taken, where does mine go) lives here, reordering lives
+// on load-overrides. This page changes nothing; "Manage overrides" navigates
+// away. The ordered list itself, gaps included, is the answer.
 
 const lo = {
   data: null,
