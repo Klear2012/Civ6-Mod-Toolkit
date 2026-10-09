@@ -324,3 +324,111 @@ between the two is a real possibility rather than a hypothetical one.
 - Extend beyond mods to other config settings (needs more of the format mapped).
 - Backup names only have second resolution, so two writes in the same second
   share a file name and the second overwrites the first.
+
+## Load order model — one integer per ACTION, not per mod
+
+- `ComponentProperties` holds exactly one `LoadOrder` value per action globally,
+  not per mod or per profile. A profile is therefore a subset of one global
+  order: enabling/disabling mods selects which actions participate, it does not
+  re-number them.
+- Higher runs later. This was measured by probe, not assumed: two test actions
+  with distinct orders were observed to execute in ascending order in a live
+  game.
+- A mod's actions have a width/spread: a single mod can span a range of orders
+  (its lowest to highest action), and that range may not fit a target gap
+  between two other orders. Moving one action without moving its siblings can
+  split the mod.
+- Ties are undefined: actions sharing the same order run in an order the game
+  picks arbitrarily. No probe established a stable tiebreak.
+- Most actions declare nothing. In one real library of 3176 actions, 1579
+  carried no `LoadOrder` at all. An absent order is not zero — it is absent,
+  and the game decides where those actions fall.
+
+## Override durability — the game re-derives LoadOrder from file
+
+- The game re-derives `LoadOrder` from the `.modinfo` file when the file's mtime
+  looks newer than recorded, wiping database values. An override written into
+  `ComponentProperties` alone does not survive such a rescan.
+- The defense is a nanosecond-exact `ScannedFiles.LastWriteTime` stamp. The
+  value is Windows FILETIME 100ns ticks since 1601-01-01; millisecond rounding
+  differs from the real value by hundreds of ticks and reads as a change, which
+  is what triggers the re-derive. Node's `statSync(file, { bigint: true
+  }).mtimeNs` gives the exact value, and `fs.realpathSync.native` gives the
+  canonical on-disk casing the game compares against.
+- Read the column as TEXT. It is far larger than a JavaScript number can hold
+  exactly, and reading it as a number throws RangeError rather than rounding.
+- Detect drift by comparing the stored `VALUE` against the database, not by
+  stamp: re-read the `LoadOrder` row after any launch and compare values. A
+  matching stamp with a differing value means the game re-derived; a differing
+  stamp means the file moved underneath.
+
+## Conditions — what ModInUse means, and what stays undecidable
+
+- `ModInUse` was measured in a live game to mean switched on in the ACTIVE
+  profile. Probe: a gated action on a mod that was installed but off in the
+  active profile — while on in eleven other profiles — did not run. Presence
+  on disk and membership in any inactive profile are both insufficient.
+- `ConfigurationValueMatches` / `RuleSetInUse` are closed as undecidable. There
+  is no `GameConfig` on disk to read; the values are main-menu RAM state, so no
+  file inspection can resolve what they would match in a running game.
+
+## Probe methodology traps — how green checks lied
+
+- Marker values must avoid vanilla readings. A Warrior `Combat 20` probe looks
+  like doing nothing when it fails — the unit reads exactly as an unmodded
+  Warrior. Probes since use off-vanilla markers (111/222) so a run vs not-run
+  is unambiguous in the database and in-game.
+- Restart a running server before trusting the view. A stale server process
+  served pre-fix behavior after the code was fixed, and the check passed
+  against the old code's output until the process was restarted.
+- Fixtures assert what they thought to check. Three patterns each passed green
+  while wrong: a column-alias fixture that selected the wrong column under the
+  right name, a rescan fixture that missed tables the game actually rewrites,
+  and a wrong-question fixture that proved a nearby behavior instead of the
+  claimed one. Each was found by hand-checking the rows, not by adding more
+  assertions of the same shape.
+
+## Conflict diagnosis — ordered replay, provenance, logs
+
+- Ordered SQL replay with per-file savepoints into temp copies: each mod's
+  game-database statements replay in load order against a scratch database,
+  one savepoint per file, so the failing file and statement are identified
+  rather than just the failing mod.
+- `(table,pk,column)->(mod,file)` provenance via audit triggers: temp-copy
+  triggers record every write with its source mod and file, so a wrong value
+  in the assembled database traces back to exactly one writer.
+- Shadowing enumeration where `ReplaceUIScript` has zero `ComponentFiles`
+  links: the replace target lives only in `ComponentProperties.LuaReplace`,
+  so a join through `ComponentFiles` silently drops every replace. The
+  enumeration reads `ComponentProperties` directly.
+- `Database.log` multi-line context lines carry workshop IDs: the lines around
+  an error name the subscribing mod even when the error line itself does not.
+- `Modding.log` Loading timeline shares the ms clock for bracketing: its
+  start/finish lines use the same millisecond clock as the error lines, so a
+  failure brackets to the mods loading around it.
+
+## Display names — tags, fallbacks, and who renders what
+
+- `ModProperties.Name` holds a localization tag (`LOC_*`), not display text.
+  It resolves through `LocalizedText` plus a prettyName fallback (filename or
+  raw tag) when no row matches — which is the common DLC case, where the text
+  lives in game files rather than any mod's `LocalizedText` rows.
+- The client renders markup via `renderCivText` and strips for dialogs/options:
+  bracket markup never reaches a dialog or an option label. Tooltips add
+  information rather than restating the label.
+- The server never takes paths from the client: every file path used in a
+  database write is resolved server-side from known roots, never from a request
+  body.
+
+## Verification gate — extension past phase4-6
+
+- As of v1.6.0 the gate section above was accurate: `npm run check:release`
+  ran `phase4`, `phase5` and `phase6`, and `.github/workflows/release.yml` ran
+  that script and nothing else decided a release. Since extended by later
+  areas: the gate is no longer phase4-6 only.
+- The authoritative list is `package.json` `check:release` — the suite table
+  above extends by adding one row per new suite in the same edit that adds the
+  suite, and `release.yml` still runs that script and nothing else. Read the
+  script, not this file, for the current chain.
+- The standing rule is unchanged: a new area adds a suite and joins the gate
+  in the same edit, so `release.yml` cannot drift out of step.
