@@ -2,10 +2,8 @@
 // subset plus a legibility comment-only subset over src/ and public/. Product-code
 // lines are out of scope for this gate: no legibility code-shape rules are enabled.
 //
-// Calibration 2026-10-09 (2705 report-only hits): the two warn rules below carry
-// the legacy backlog and stay advisory until the owner works through the counted
-// follow-up list. The error rules had zero hits on that pass, so they hold for new
-// code from day one.
+// Calibration 2026-10-09 (2705 report-only hits) + owner-approved off: stacked/banner
+// rules below are repo idiom, not backlog. The error rules hold for new code.
 module.exports = (async () => {
   const noCommentSlop = (await import('eslint-plugin-no-comment-slop')).default;
   const legibility = (await import('eslint-plugin-legibility')).default;
@@ -24,14 +22,10 @@ module.exports = (async () => {
         'no-comment-slop/no-jargon': 'error',
         'legibility/require-jsdoc-multiline-comments': 'error',
         'legibility/no-automated-comment-attribution': 'error',
-        // Advisory backlog (2565 hits): consecutive `//` lines are this repo's
-        // normal multi-line idiom, so error-level would demand a whole-tree
-        // rewrite. Warns on new stacks without failing the gate.
-        'legibility/no-stacked-comments': 'warn',
-        // Advisory backlog (103 hits): `// ---- name ----` section banners are
-        // module structure (see ADR-013: split along existing section banners).
-        // Removing them tree-wide is an owner design decision, not gate fallout.
-        'no-comment-slop/no-banner-comment': 'warn',
+        // stacked multi-line `//` is this repo's normal idiom (e.g. XML-entity explanation in public/app.js).
+        'legibility/no-stacked-comments': 'off',
+        // `// ---- name ----` banners are module structure that ADR-013 says to split along.
+        'no-comment-slop/no-banner-comment': 'off',
         // Enforced: trimmed to contract + `see ADR-NNN` pointers, so every new
         // overlong block fails the gate.
         'no-comment-slop/max-comment-lines': ['error', { max: 10 }],
