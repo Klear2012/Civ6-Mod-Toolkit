@@ -6,9 +6,8 @@
 // Home module for the transfer pair: export shaping plus import
 // validate-and-replace-with-backup. Placement: the store module owns
 // VERSION/keys/file primitives and requires only leaves, so importing the
-// DB-bound resolveAction there would break that invariant; the apply engine
-// (src/loadorder.js) is already ~1089 lines, so a ~300-line import pipeline
-// there would trip the delta budget. This module sits between them: it calls
+// DB-bound resolveAction there would break that invariant. This module sits
+// between them: it calls
 // into both, and neither requires it back, so the require graph stays
 // acyclic (see tests/arch.test.js).
 //

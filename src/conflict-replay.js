@@ -1334,7 +1334,9 @@ function lockedCopyTrial(liveDbPath, modSet) {
 const GATE_DECIDABLE = new Set(['ModInUse', 'ModIsEnabled']);
 
 // Comparison key for mod ids in gates: lowercase, brace-stripped, trimmed.
-// Local (no modinfo import) so this phase script stays dependency-free.
+// Local (no modinfo import) so this library stays free of the view/store
+// stack: zero project imports, so the server and the phase wrapper can both
+// require it without a require cycle (see tests/arch.test.js).
 function normGateId(id) {
   return String(id == null ? '' : id).replace(/[{}]/g, '').trim().toLowerCase();
 }
@@ -1361,7 +1363,7 @@ function gateContextOf(ctx) {
 }
 
 // Why a condition cannot be read here, in checkable words (same shape as
-// unreadableWhy in loadorder.js; shortened, with no display-name lookup).
+// unreadableWhy in gates.js; shortened, with no display-name lookup).
 function gateUnreadableWhy(cond) {
   const v = cond.value;
   switch (cond.type) {
@@ -1378,9 +1380,10 @@ function gateUnreadableWhy(cond) {
   }
 }
 
-// Assumed-setup keys for one gate condition, mirroring setupKeysFor in
-// loadorder.js (local: this phase script stays dependency-free, like the
-// normGateId note above). RuleSetInUse / GameCoreInUse / LeaderPlayable read
+// Assumed-setup keys for one gate condition, kept in sync with setupKeysFor
+// in gates.js by contract (local: this library stays free of the view/store
+// stack, like the normGateId note above). RuleSetInUse / GameCoreInUse /
+// LeaderPlayable read
 // KIND:<Value>; ConfigurationValueMatches reads the Group/ConfigurationId/
 // Value triple (props first, cond-level fields as fallback) plus the
 // GAMEMODE:<id> shorthand for an enable triple. Anything else, or a row
@@ -1450,8 +1453,9 @@ function gateAssumedMatch(cond, asserted) {
 }
 
 // One condition, three ways: satisfied, not satisfied, or not readable here.
-// Mirrors evalCondition in loadorder.js, including the inverted-absence rule
-// (NOT ModInUse(absent-mod) is satisfied) and never guessing.
+// Matches evalCondition in gates.js by contract, including the
+// inverted-absence rule (NOT ModInUse(absent-mod) is satisfied) and never
+// guessing.
 function evalGateCondition(cond, ctx) {
   const c = cond || {};
   if (!GATE_DECIDABLE.has(c.type)) {
@@ -1519,9 +1523,9 @@ function evaluateGate(gate, ctx) {
     if (unmet.length > 0) willRun = false;
     else if (read > 0 && unknown.length === 0) willRun = true;
   }
-  // Assumed verdicts mirror verdictOf in loadorder.js: true only where removing
-  // the assertions would leave a different willRun. Undecided rows are never
-  // flagged: fewer unknowns is not running.
+  // Assumed verdicts match verdictOf in gates.js by contract: true only where
+  // removing the assertions would leave a different willRun. Undecided rows
+  // are never flagged: fewer unknowns is not running.
   let assumed = false;
   if (willRun === true) {
     assumed = any ? (metAssumed > 0 && metMeasured === 0) : metAssumed > 0;

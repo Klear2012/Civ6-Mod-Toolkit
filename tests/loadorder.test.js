@@ -1957,7 +1957,7 @@ async function runRecordFlow() {
           typeof im.body.backupPath === 'string' && fs.existsSync(im.body.backupPath), String(im.body.backupPath));
         check('  the backup holding the seeded bytes', fs.readFileSync(im.body.backupPath, 'utf8') === seeded);
         check('  and the store replaced',
-          JSON.parse(fs.readFileSync(boxOv, 'utf8')).overrides[normId(M1)][kOneTx].value === 5555);
+          JSON.parse(fs.readFileSync(boxOv, 'utf8')).overrides[normId(M1)][kOneTx] === 5555);
         check('  answering the re-read state too', im.body.ok === true && im.body.count === 1,
           `ok=${im.body.ok} count=${im.body.count}`);
 
