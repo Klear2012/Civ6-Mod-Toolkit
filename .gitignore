@@ -31,3 +31,6 @@ game-setup.json
 
 # local-only planning index (points into gitignored openspec/changes/)
 docs/TRACEABILITY.md
+
+# scratch logs/probes - sanctioned Temp/ location per repo convention, never committed
+Temp/
