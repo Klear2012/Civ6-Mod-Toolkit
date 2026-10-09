@@ -147,7 +147,6 @@ function askValue(o) {
   const current = String(o.value);
   const declared = o.declared === null ? '' : String(o.declared);
   const msg = `${stripCivText(o.modName)}\n\ncurrently ${o.value}${declared !== '' ? `, author declares ${declared}` : ''}\n\nNew LoadOrder (whole number):`;
-  // eslint-disable-next-line no-alert
   const answer = window.prompt(msg, current);
   if (answer === null) return null;
   const trimmed = answer.trim();
@@ -266,7 +265,6 @@ async function lovImportOverrides(file) {
     toast(esc(`${file.name} is not valid JSON.`), 'err');
     return;
   }
-  // eslint-disable-next-line no-alert
   if (!confirm('Replace ALL your overrides with the ones in this file?\n\nYour current set is kept as a backup first. Entries that match nothing here are listed afterwards, not added.')) return;
   let d;
   try {
@@ -881,7 +879,6 @@ function lovEditApplyPacket() {
 async function lovEditApply() {
   const p = lov.proposal;
   if (!p || !p.mapping.length) return;
-  // eslint-disable-next-line no-alert
   if (p.mapping.some((r) => r.proposed >= 10000000) && !confirm('One or more values mean "load last, override everything" in Civ6. Carry on?')) return;
   $('lovApply').disabled = true;
   try {
