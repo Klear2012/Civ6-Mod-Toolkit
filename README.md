@@ -284,6 +284,19 @@ What it is **not**:
   candidate - it reports that and stops, because a wrong guess would silently
   move something else.
 
+#### Sharing an override set (export/import)
+
+**Export** sits next to **Re-apply all** and downloads your overrides as a
+file — share it with another install or keep it as a copy. It only reads, so
+it works while Civ6 runs.
+
+**Import…** on the same row replaces ALL your overrides with the ones in a
+file. A confirmation repeats that consequence before the file picker opens.
+Your current set is kept as a backup first, and entries that match nothing
+here are listed afterwards, not added. Import is refused while Civ6 runs.
+Import only writes your override set — re-apply it from the overrides page
+afterwards, the same as after any other change.
+
 ### Config editor
 
 1. Pick a **Configuration file** from the dropdown.
