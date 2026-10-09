@@ -1,18 +1,9 @@
 'use strict';
 
-// Overrides for individual mod actions' LoadOrder, in one JSON file beside
-// civ6-paths.json. Global, not per profile: LoadOrder is a property of the
-// installation, and two profiles holding the same mod should load that mod's
-// actions at the same position.
-//
-// Keys are modinfo.normId() output - the mod's own GUID from its .modinfo,
-// lowercased and unbraced - and NOT ModRowId, which the game renumbers on every
-// rescan. The action key inside a mod is (ComponentType, id, file list); see
-// actionKey() for why those three and nothing else.
-//
-// Reading never throws and never writes. A file we wrote ourselves that we can
-// no longer parse must degrade to "no overrides with a message", never take the
-// mod list down with it.
+// Per-action LoadOrder overrides in one JSON file, global not per profile:
+// order is installation property (see ADR-003). Mods key by modinfo.normId
+// GUID, actions by (ComponentType, id, file list) (see ADR-005); never ModRowId.
+// Reads never throw: an unparsable file degrades to overrides-with-message.
 
 const fs = require('fs');
 const { DatabaseSync } = require('node:sqlite');
@@ -400,22 +391,11 @@ async function applyOverrides(dbPath, entries, opts = {}) {
   return { ...result, backupPath };
 }
 
-// Bulk apply for a block move (load-order-edit 2.1). One transaction, one
-// backup, whatever the size of the set: entries are grouped by mod and go
-// through the same planMod/writeAll/summarise path as applyOverrides, so a
-// value and its mod's stamp land together or not at all.
-//
-// Entries take one of two shapes, mixed freely:
-//   { modId, key, value }              - a stored action key, as applyOverrides takes
-//   { modId, componentRowId, value }   - the editor packet: the key is derived
-//     server-side via actionKey and resolved via resolveAction, so a stale row
-//     reports orphaned and twins report ambiguous, never written.
-// Values pass cleanValue (whole numbers; >= SENTINEL warns, never refuses).
-// The store folds in after commit with the same declared-wins recordApplied
-// rule. Refused while Civ6 runs, via the awaited gameStatus check.
-// Out: { changed, applied, drifted, orphans, ambiguous, unprotectable,
-// sentinels, backupPath } - the summarise shape, so the bulk route (2.2) can
-// answer with it unchanged.
+// Bulk apply for a block move: one transaction, one backup, grouped by mod
+// through the applyOverrides path so value+stamp land together (see ADR-006).
+// Entries mix { modId, key, value } and { modId, componentRowId, value } (key
+// derived via actionKey, stale=orphaned, twins=ambiguous, never written).
+// Values pass cleanValue; store folds after commit; refused while Civ6 runs.
 async function applyBulk(dbPath, entries, opts = {}) {
   const file = opts.file || overridesFile();
   const status = opts.statusFn || gameStatus;

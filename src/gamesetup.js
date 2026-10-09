@@ -1,19 +1,11 @@
 'use strict';
 
-// Assumed game setup ("I always play with X on"), in one JSON file beside
-// mod-labels.json. Asserting an option marks matching
-// ConfigurationValueMatches / RuleSetInUse / GameCoreInUse / LeaderPlayable
-// conditions satisfied for verdict purposes; it never writes the game
-// database, and deleting the file returns every verdict to measured-only.
-//
-// The store is global, not per profile: game setup is chosen per game start,
-// not per mod group. No function here takes a profile.
-//
-// Failure contract mirrors src/labels.js: reading never throws and never
-// writes. A missing or empty file is empty state, not a failure. A file that
-// is not the shape we write is unusable as a whole, while one bad entry among
-// good ones costs only that entry. Writes refuse to build on an unreadable
-// file rather than replace whatever it holds.
+// Assumed game setup in one JSON file beside mod-labels.json (see ADR-003).
+// Asserting an option marks matching setup conditions satisfied for verdicts;
+// it never writes the game database, and deleting the file returns verdicts to
+// measured-only. Global, not per profile: setup is chosen per game start.
+// Reads never throw: missing/empty is empty state, misshapen file is unusable
+// as a whole, one bad entry costs only itself; writes refuse unreadable files.
 
 const fs = require('fs');
 const path = require('path');
@@ -278,23 +270,11 @@ function isAsserted(viewOrMap, key) {
   return map[k] === true;
 }
 
-// --- Option catalog: what the library actually gates on ----------------------
-//
-// Mined from the library at request time, never hardcoded, so the panel can
-// neither drift from the library nor invent an option no action checks. Only a
-// criterion row that gates a real action (a ComponentCriteria link to a row in
-// Components) becomes an option; a set nothing points at gates nothing and
-// stays off the panel. Referenced either way counts: an inverted condition
-// still reads differently once its value is asserted.
-//
-// One criterion row maps to one option key per comma-separated single:
-// RuleSetInUse to RULESET:<Value>, GameCoreInUse to CORE:<Value>,
-// LeaderPlayable to LEADER:<leader id> (the tail of a per-slot value like
-// Players:StandardPlayers::LEADER_X), and ConfigurationValueMatches to
-// GAMEMODE:<ConfigurationId> when the id names a game mode, else to the
-// CONFIG triple. A row with N values yields N options under OR semantics.
-// Anything else is not game setup. A row missing the property its key needs
-// is skipped, not guessed.
+// Option catalog mined from the library at request time, never hardcoded, so
+// the panel cannot drift or invent options (see ADR-004). Only a criterion row
+// gating a real action becomes an option; referenced either way counts.
+// One row maps to one key per comma single (RULESET/CORE/LEADER/GAMEMODE/CONFIG
+// triple); rows missing their key property skip, never guessed.
 
 // Criterion types that describe game setup rather than the mod list.
 const SETUP_TYPES = new Set(['RuleSetInUse', 'ConfigurationValueMatches', 'GameCoreInUse', 'LeaderPlayable']);

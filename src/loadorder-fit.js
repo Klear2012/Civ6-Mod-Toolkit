@@ -21,31 +21,12 @@ function initFit(deps) {
   stampIsStale = deps.stampIsStale;
 }
 
-// Block-move proposal (load-order-edit 1.1, 1.2). Read-only: nothing below
-// writes the database, the store, or a backup. describeBlock/proposeBlock
-// read one mod plus caller-supplied profile bands; the builders are pure
-// functions of those inputs. ComponentFiles is never read here: shared
-// filenames are not conflicts and never warn. Identity is ComponentRowId;
-// key mapping goes through resolveAction per key, never for all actions.
-// Shapes: a block is describeBlock's return ({ actions:[{componentRowId,
-// effective, offset, misspelled, drifted}], min/max/width/count/tie,
-// undeclared, protectable }); a mapping row is {componentRowId, from, to}.
-// Targets (proposeBlock/resolveBase): {base} literal start, {after} first
-// value above it, {before} snug fit ending below it, {gap:{from,to}} an
-// explicit free run (to null = headroom, unbounded). Fit returns
-// {fits:true, base, need, gap, mapping, warnings}; no-fit returns
-// {fits:false, need, gap, options:['even','overflow','manual']} and writes
-// nothing. Builders return {strategy, mapping, warnings} plus their own
-// extras (gap / direction+base / invalid+hints). Warnings (collectWarnings)
-// are {kind, message} with kind tie/sentinel/range/misspelling/drifted/
-// unprotectable; they never block, only no-fit does.
-// One mod's positioned actions as a movable block. Reads only this mod's
-// rows, never the library. Undeclared actions are counted and EXCLUDED from
-// actions so no builder moves one by accident. opts.driftedByRow marks rows
-// as { [componentRowId]: true | { before, wanted } } for the drift warning.
-// Returns { modId, modRowId, missing, protectable, stale, actions, min, max,
-// width, count, tie, undeclared, undeclaredCount }. Undeclared actions are
-// counted only, never positioned, so no builder can move one by accident.
+// Block-move proposal, read-only: builders are pure over one mod plus profile
+// bands and write nothing (see ADR-006); identity is ComponentRowId resolved
+// per key (see ADR-005). Targets are {base}/{after}/{before}/{gap}; fit maps,
+// no-fit offers options. Warnings never block, only no-fit does.
+// describeBlock returns one mod's movable block; undeclared actions count only
+// and never move, so no builder moves one by accident.
 function describeBlock(db, modIdNorm, opts = {}) {
   const modId = normId(modIdNorm);
   const mod = db.prepare('SELECT ModRowId FROM Mods WHERE lower(ModId) = lower(?)').get(modId);

@@ -1,18 +1,9 @@
 'use strict';
 
-// Conflict diagnosis selfcheck (split 1 of refactor-server-loadorder-split).
-//
-// Owns conflictSelfcheckSeed + runConflictSelfcheck, moved here out of
-// src/server.js with zero behavior change (refactoring hat only).
-// Dependency shape is inject-all: the production server handle (server,
-// HOST, OWN_HOSTS) and every server-local builder arrive via the deps
-// parameter of the single --selfcheck entry call in server.js; leaf modules
-// (./gamesetup, ./paths) are required directly. This module never requires
-// ./server back - that would be a load-time cycle.
-//
-// node src/server.js --selfcheck exercises both conflict routes over HTTP
-// plus the static read-only guards against fake DBs in the OS temp dir -
-// never the live game database.
+// Conflict-diagnosis selfcheck over HTTP plus read-only guards (see ADR-010).
+// Owns seed+run, moved from server.js behavior-free; deps inject the server
+// handle and builders, leaves required directly, never requiring server back.
+// Fake DBs in OS temp only, never the live game database (see ADR-006).
 
 const setupStore = require('./gamesetup');
 function conflictSelfcheckSeed(dir) {

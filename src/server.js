@@ -176,19 +176,9 @@ function modList(opts = {}) {
 // it describes one run, and the next run overwrites it.
 let lastSync = null;
 
-// Bring the game's database up to date with the mod folders: register anything
-// the game has never scanned, and give anything it knows but that has no row in
-// the profile in use a row in every profile.
-//
-// NOTHING is ever switched on. A newly added mod comes up visible and tickable
-// but off, which is the state every mod is already in inside a profile the
-// toolkit created. That is the whole reason this is safe to run without asking:
-// it can put a mod in front of you, but it cannot change what the game loads.
-//
-// Runs at startup and whenever the dashboard's Rescan is used, so subscribing
-// to mods after the toolkit is already open is handled the same way. Every
-// write is refused while Civ6 runs, and the reason is returned rather than
-// attempted and failed.
+// Syncs the database with mod folders: registers unscanned mods, rows new mods
+// into every profile. Never switches anything on, so safe without asking (see
+// ADR-006). Runs at startup and on Rescan; refused while Civ6 runs with reason.
 async function syncMods() {
   const run = { at: new Date().toISOString(), added: [], failed: [], skipped: null, error: null, pending: 0, backupPath: null };
   lastSync = run;
@@ -294,22 +284,10 @@ function labelPruneSet(list, running) {
   return list.ok && !running ? new Set(list.mods.map((m) => m.idNorm)) : null;
 }
 
-// -------- Assumed game setup ("I always play with X on") ----------------------
-//
-// GET /api/game-setup -> the option catalog mined from the library (rulesets,
-// game modes and config values actions actually gate on, each with its
-// gated-action count) plus the asserted options from game-setup.json.
-//
-// POST /api/game-setup { key, on } -> assert (on true) or withdraw (on false)
-// one option. POST /api/game-setup/clear -> withdraw every assertion.
-//
-// Like labels, and unlike every mod-database write, these are NEVER refused
-// while Civ6 runs: game-setup.json is a file the game has never heard of, and
-// the store only changes verdicts, never the game database. Refusing would
-// copy a rule whose reason does not apply.
-//
-// Every answer carries the refreshed state, so the panel updates in place
-// instead of refetching - the same shape the label writes use.
+// Assumed game setup routes: catalog GET plus assert/withdraw POSTs (see ADR-003).
+// Never refused while Civ6 runs: game-setup.json is unknown to the game, only
+// verdicts change, so the guard's reason does not apply. Every answer carries
+// refreshed state so the panel updates in place like label writes.
 
 // The catalog the panel offers: distinct setup options actually gating
 // library actions, mined at request time so the list can neither drift from
@@ -386,19 +364,10 @@ function conflictShadowing(modsDbPath) {
   }
 }
 
-// Static packaging findings over Mods.sqlite: files no action references,
-// actions loading one .sql file into the wrong database, mods sharing one
-// id, and database files the game skips. Scope is the ACTIVE profile's
-// enabled mods, in load order — the backend (packaging.js) scopes itself to
-// the active group internally, the same scoping as the shadowing report, so
-// a switched-off mod's findings never reach the page: switched off, it
-// cannot affect the game. The profile and the enabled count ride along so
-// the panel states its scope instead of implying the whole library.
-//
-// Read-only like every other GET: packaging opens Mods.sqlite read-only and
-// only lists mod folders, never writes, so it works while Civ6 runs. The
-// backend (packaging.js) is reused, not reimplemented; display names ride
-// along on every finding so the page renders names, never raw ids.
+// Static packaging findings for the active profile's enabled mods in load order
+// (see ADR-006). Backend scopes itself internally, so switched-off mods never
+// reach the page. Read-only GET working while Civ6 runs; display names ride on
+// every finding so the page renders names, never raw ids.
 function conflictPackaging(modsDbPath) {
   const db = loOrder.openDb(modsDbPath);
   try {
@@ -1506,25 +1475,10 @@ async function handlePostModsOpenFolder(req, res, url) {
   } catch (e) {
     return send(res, 400, { error: e.code === 'ENOENT' ? 'folder not found' : e.message });
   }
-  // Two separate things went wrong here, and each hid the other.
-  //
-  // 1. The path. explorer.exe reads each "/segment" of its argument as a
-  //    switch, so the game's forward-slash path left it with no path at all and
-  //    it opened Documents. Convert at this boundary and nowhere else.
-  //
-  // 2. The window. windowsHide: true sets STARTUPINFO.wShowWindow = SW_HIDE,
-  //    which Explorer inherits: it builds the window and the shell hides it.
-  //    The result is a flicker and nothing else, and a hidden window is still a
-  //    real entry in the shell's window list, so it looks like it opened. The
-  //    flag is not repeated here on purpose - it belongs on the tasklist and reg
-  //    calls, which are console programs that would otherwise flash a console.
-  //    explorer.exe is GUI-subsystem and never allocates one, so it bought
-  //    nothing and cost the window. Verified by launching the same path both
-  //    ways: with the flag nothing appeared, without it the folder opened.
-  //
-  // The exit code is not a success flag either - it is 1 whether the folder
-  // opened or not - so it is ignored, and the statSync above is what proves the
-  // folder is there. Only Explorer failing to launch at all is worth a line.
+  // Two coupled faults hid each other: explorer.exe reads "/segment" as switches
+  // (convert at this boundary only) and windowsHide hides its GUI window. The flag
+  // stays on console helpers; exit code is ignored and the statSync above proves
+  // the folder. Only a launch failure is worth a line.
   execFile('explorer.exe', [paths.toNativePath(folder)], (err) => {
     if (err && err.code === 'ENOENT') console.error('explorer.exe could not be launched');
   });

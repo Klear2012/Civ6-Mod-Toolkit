@@ -1418,8 +1418,15 @@ async function runRecordFlow() {
           .get(crOf('Strings'));
         vd.close();
         check('  the value landed in the scratch copy', got && String(got.v) === '5555', JSON.stringify(got));
-        check('  and the intent reached the scratch overrides file',
-          JSON.parse(fs.readFileSync(boxOv, 'utf8')).overrides[normId(M1)][kHttp].value === 5555);
+        let ovOk = false;
+        let ovMsg = 'read ok';
+        try {
+          ovOk = JSON.parse(fs.readFileSync(boxOv, 'utf8')).overrides[normId(M1)][kHttp].value === 5555;
+        } catch (e) {
+          ovOk = false;
+          ovMsg = `scratch overrides file unreadable (${boxOv}): ${e.message}; if Civilization VI is running, close it first`;
+        }
+        check('  and the intent reached the scratch overrides file', ovOk, ovMsg);
         r = await postJson(s.port, '/api/load-overrides', { modId: M1, key: kHttp, value: 5556 });
         check('single apply still answers 200, unchanged', r.status === 200 && r.body.applied.length === 1, String(r.status));
         r = await postJson(s.port, '/api/load-overrides/sync', {});

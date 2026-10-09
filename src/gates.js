@@ -73,23 +73,11 @@ function unreadableWhy(c) {
   }
 }
 
-// Assumed game setup: which store keys satisfy one undecidable condition.
-//
-// The store (src/gamesetup.js) holds KIND:BODY keys - RULESET:<id>, CORE:<id>,
-// LEADER:<id>, GAMEMODE:<id>, CONFIG:<Group>/<ConfigurationId>=<Value> - and
-// asserting one marks matching RuleSetInUse / GameCoreInUse / LeaderPlayable /
-// ConfigurationValueMatches conditions satisfied. Nothing else is readable
-// here, and ModInUse / ModIsEnabled measurement is untouched by design.
-//
-// A non-matching assertion proves nothing: one ruleset asserted does not prove
-// another ruleset is off for verdict purposes, so only an exact match satisfies
-// and everything else stays undecided. The inverted form of a match (NOT X
-// where X is asserted) is the one assumed false.
-//
-// Comma lists read as OR: one condition naming "Expansion1,Expansion2" yields
-// one key per single (LeaderPlayable singles reduce to their leader tail, the
-// same reduction the catalog mines), and isAssumedMatch below satisfies the
-// condition when ANY listed single is asserted.
+// Assumed-setup keys satisfying one undecidable condition (see ADR-004).
+// Store holds KIND:BODY keys; asserting one marks matching setup conditions
+// satisfied, nothing else is readable here. Only exact matches satisfy; the
+// inverted form of a match is the one assumed false.
+// Comma lists read as OR, with LeaderPlayable singles reduced to leader tails.
 function setupKeysFor(c) {
   if (!c) return [];
   if (c.type === 'RuleSetInUse' || c.type === 'GameCoreInUse' || c.type === 'LeaderPlayable') {
@@ -213,18 +201,10 @@ function verdictOf(entry, ctx) {
     }
   }
 
-  // Criteria.Any is the author's own declaration and means what it says: stored
-  // Any=1 exactly when the modinfo declares any=, checked over every
-  // multi-condition set whose .modinfo is on disk, no exceptions. (Sets belonging
-  // to base-game and DLC mods with no .modinfo on disk carry whatever the game
-  // recorded.) An earlier note called the flag unreadable on a count of
-  // declaration sites rather than sets - the measurement was wrong, not the flag.
-  //
-  // Three-valued, because a condition this view cannot read is not false: an OR
-  // needs one met condition however the rest read, and an AND is defeated by one
-  // unmet condition however the rest read. Every path that leaves willRun undecided
-  // has at least one entry in `unknown`, so a row never says "cannot tell" without
-  // saying what it could not tell.
+  // Criteria.Any means what it says (stored Any=1 iff declared); three-valued
+  // because unreadable is not false: OR needs one met, AND dies on one unmet.
+  // Every undecided path names its unknowns, so "cannot tell" always says what
+  // it could not tell (see ADR-004).
   let willRun = MAYBE;
   if (entry.any) {
     if (met > 0) willRun = true;

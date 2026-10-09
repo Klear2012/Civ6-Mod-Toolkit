@@ -1,32 +1,10 @@
 'use strict';
 
-// A throwaway instance of the real server, for the suites that need one.
-//
-// The point is that it is the *real* server, not a reimplementation of it: the
-// routes, the error handling, the shape of every response. A suite that tested a
-// copy of the routing would prove the copy works.
-//
-// Isolation is by environment, and paths.js already honours it: CIV6_PATHS_FILE,
-// CIV6_LOCAL_MODS, CIV6_WORKSHOP, CIV6_SAVES, CIV6_MODS_DB, CIV6_LABELS_FILE. So
-// no product code changes to make a test safe.
-//
-// Two things make this harder than it looks, and both are handled here rather
-// than left to each suite to remember:
-//
-//   1. `CIV6_PATHS_FILE` is consulted *before* the individual overrides, and a
-//      real civ6-paths.json would win. So the harness points it at a file that
-//      does not exist - loadOverrides() returns {} for one it cannot read, and
-//      the environment variables then apply. That is the only way to be sure the
-//      developer's real Steam paths are not consulted.
-//
-//   2. A port collision is silent and self-concealing. `PORT=0` does not give an
-//      ephemeral port (the server does `parseInt(PORT) || 8673`, so 0 becomes
-//      8673), and its EADDRINUSE handler prints "already running" and exits 0.
-//      A harness that lost the race would therefore think it had a server, and
-//      would then be asserting against somebody else's - quite possibly the
-//      developer's real one. So the harness picks a free port itself, refuses the
-//      one a developer is likely to be using, and checks /api/ping's `started`
-//      timestamp against its own clock before handing anything back.
+// Throwaway instance of the real server for suites (see ADR-006).
+// Real routes/handling/shapes, isolated by env paths.js honours, so no product
+// change makes tests safe. Missing CIV6_PATHS_FILE keeps real Steam paths out;
+// self-picked free port plus /api/ping `started` check refuses foreign servers.
+// Guards never touch the live game database.
 
 const fs = require('fs');
 const os = require('os');

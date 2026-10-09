@@ -1,21 +1,12 @@
 'use strict';
 
-// Config-aware reader/editor for Civilization VI .Civ6Cfg files.
-//
-// Civ6 .Civ6Cfg files use the same typed-marker binary format as the header of
-// a .Civ6Save, but WITHOUT the trailing compressed game-state blob, and without
-// the GAME_SPEED anchor / single END_UNCOMPRESSED delimiter that pydt's
-// save-oriented top-level parse() relies on. So we cannot use pydt's parse()/
-// addMod()/deleteMod() directly on configs.
-//
-// The low-level byte readers below are adapted from pydt/civ6-save-parser (MIT,
-// Mike Rosack) -- the per-field encoding is identical; only the top-level
-// navigation differs. We locate the MOD_BLOCK_* arrays by scanning for their
-// markers, then read/splice them as 0x0B arrays.
-//
-// Editing model: pure buffer splicing. We only ever rewrite the bytes of a mod
-// block; every other byte of the file is preserved verbatim, so round-trip
-// identity is guaranteed by construction for anything we don't touch.
+// Config-aware reader/editor for .Civ6Cfg files.
+// Same typed-marker format as a .Civ6Save header but without its blob/anchors,
+// so save-oriented parse()/addMod()/deleteMod() do not apply here.
+// Byte readers follow pydt/civ6-save-parser per-field encoding; only top-level
+// navigation differs (scan for MOD_BLOCK_* markers, read/splice as 0x0B arrays).
+// Editing model is pure buffer splicing inside mod blocks, so untouched bytes
+// stay verbatim and round-trip identity holds by construction (see ADR-002).
 
 const iconv = require('iconv-lite');
 const diacritics = require('diacritics');

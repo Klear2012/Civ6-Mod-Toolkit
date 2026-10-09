@@ -1,21 +1,10 @@
 'use strict';
 
-// Import/export of the global load-order override set (change
-// loadorder-overrides-import-export).
-//
-// Home module for the transfer pair: export shaping plus import
-// validate-and-replace-with-backup. Placement: the store module owns
-// VERSION/keys/file primitives and requires only leaves, so importing the
-// DB-bound resolveAction there would break that invariant. This module sits
-// between them: it calls
-// into both, and neither requires it back, so the require graph stays
-// acyclic (see tests/arch.test.js).
-//
-// Import semantics (owner-decided): REPLACES the whole store with a backup
-// of the previous file (no merge), and validation LENIENT-SKIPS —
-// MISSING/AMBIGUOUS/malformed entries are skipped and reported with a
-// reason each, never written, never guessed (ADR-004). The game guard and
-// the entry cap apply to every import path here.
+// Import/export of the global override set (see ADR-013 for placement).
+// Store owns VERSION/keys/primitives and requires only leaves, so DB-bound
+// resolveAction lives here; neither side requires back, graph stays acyclic.
+// Import REPLACES with backup and LENIENT-SKIPS unknowns with reasons, never
+// guessed (see ADR-004); game guard and entry cap apply to every path here.
 
 const fs = require('fs');
 const { normId } = require('./modinfo');

@@ -1,18 +1,8 @@
 'use strict';
 
-// Access to the game's Mods.sqlite, which records which mods are enabled.
-// Schema (user_version 24) as observed:
-//   ModGroups(ModGroupRowId, Name, CanDelete, Selected, SortIndex)
-//       one row per mod group; Selected=1 marks the active group
-//   ModGroupItems(ModGroupRowId, ModRowId, Disabled)
-//       Disabled=1 -> mod is off in that group
-//   Mods(ModRowId, ScannedFileRowId, ModId, Version) + ScannedFiles(Path)
-//   ModRelationships(ModRowId, OtherModId, Relationship, OtherModTitle)
-//       Relationship: Dependency | Block | Reference | ReverseReference
-// ModRowId can change when the game rescans, so everything here keys by ModId.
-//
-// Uses Node's built-in node:sqlite (Node 22.5+). On older Node the reader
-// reports an error instead of crashing, and the rest of the app keeps working.
+// Game Mods.sqlite access (see ADR-006); ModRowId renumbers, so keys are ModId.
+// Observed user_version 24: ModGroups/ModGroupItems/Mods+ScannedFiles/
+// ModRelationships; node:sqlite built-in, older Node reports, app continues.
 
 const fs = require('fs');
 const path = require('path');
@@ -611,27 +601,10 @@ function importGroup(dbPath, data) {
   return { backupPath, ...result };
 }
 
-// ---------------------------------------------------------------------------
-// Registering a mod the game has not scanned yet
-//
-// The game normally owns this: on launch it walks the mod folders and writes
-// ScannedFiles / Mods / ModProperties / ModGroupItems rows. Until it has, a mod
-// on disk has no row and cannot be switched on. This writes the same rows, so
-// a newly subscribed mod can be used without starting the game.
-//
-// Observed on a real database (2026-09-27):
-//   - ScannedFiles.Path is absolute, uses forward slashes even on Windows, and
-//     points at the .modinfo file itself rather than its folder.
-//   - ScannedFiles.LastWriteTime is a Windows FILETIME (100ns ticks since 1601)
-//     equal to the .modinfo's mtime. It does not fit in a JS number, so it is
-//     always read back as TEXT.
-//   - Mods.Version is the version= attribute of the <Mod> tag.
-//   - The descriptive ModProperties (Name, Description, Teaser, Authors,
-//     CompatibleVersions) are copied out of the .modinfo; without a Name the
-//     mod is listed by its raw GUID.
-// What the game does NOT do here is record ModFiles/Components/Settings - those
-// say which files the mod contributes. See FINDINGS.md for what that means.
-// ---------------------------------------------------------------------------
+// Registering an unscanned mod by writing the game's own rows, so a new mod is
+// usable without launching the game (see ADR-006). Paths stay absolute
+// forward-slash .modinfo paths; FILETIME mtimes read as TEXT; Version copies
+// the <Mod> tag and ModProperties copy out; file/action tables stay unwritten.
 
 const MAX_REGISTER_MODS = 2000;
 const MAX_REMOVE_MODS = 200;
@@ -685,26 +658,10 @@ function canonicalPath(file) {
   }
 }
 
-// ---- .modinfo parsing ------------------------------------------------------
-//
-// Everything the game records about a mod comes out of the .modinfo, so a mod
-// can be registered without the game scanning it. Verified against 380 real
-// mods (2026-09-27):
-//   ModFiles          <- <Files>/<File>, in order. Not a folder listing: 69 mods
-//                        have files on disk that the game does not record.
-//   Components        <- one per action element in <InGameActions>, in order,
-//                        and Settings likewise from <FrontEndActions>. Actions
-//                        may carry criteria="..." and some carry no id at all.
-//   ComponentProperties <- the action's own <Properties> children (LoadOrder,
-//                        LuaContext, LuaReplace, ...)
-//   ComponentFiles    <- the action's <File> children only, Priority 0. An
-//                        action with no <File> (e.g. ReplaceUIScript) gets none,
-//                        even though it names a Lua file to replace.
-//   Criteria          <- <ActionCriteria>/<Criteria id>, one Criterion row per
-//                        condition element, its text stored as a 'Value'
-//     property.
-// These are deliberately simple regexes over consistent, machine-written XML,
-// the same approach modinfo.js already takes.
+// .modinfo parsing without a game scan, via simple regexes over consistent XML
+// like modinfo.js (see ADR-006). ModFiles<-<Files>, Components/Settings<-action
+// elements, properties<-action children, files<-<File> only, Criteria<-rows.
+// An action with no <File> gets no link, even naming a Lua file to replace.
 
 // Every <name>...</name> block, in document order.
 function xmlSections(text, name) {
@@ -1131,26 +1088,10 @@ function findRemoved(dbPath, sources) {
   return { ok: true, error: null, removed, removable: removed.filter((r) => r.removable).length };
 }
 
-// Take mods out of the game completely: every row that refers to them, in every
-// profile. `expected` maps normalized mod id -> the folder the caller intends to
-// delete, and is checked here so this layer refuses anything it does not
-// recognise. The database is backed up first and the result read back.
-//
-// Files are NOT touched here: the caller deletes them after this succeeds and
-// reports if that fails. Database-first is deliberate - rows without files are
-// inert, whereas files without rows are clutter the game re-adds on its next
-// scan, and it is the files that actually make a mod gone.
-// Take mods out of the game completely: every row that refers to them, in every
-// profile. `expected` maps normalized mod id -> the folder the caller intends to
-// delete, and is checked here so this layer refuses anything it does not
-// recognise. `roots` are the mod source folders; a folder that is one of them,
-// or an ancestor of one, is refused outright - deleting that would take the whole
-// mod library with it. The database is backed up first and the result read back.
-//
-// Files are NOT touched here: the caller deletes them after this succeeds and
-// reports if that fails. Database-first is deliberate - rows without files are
-// inert, whereas files without rows are clutter the game re-adds on its next
-// scan, and it is the files that actually make a mod gone.
+// Taking mods out completely: every referring row, every profile, backed up and
+// read back (see ADR-006). `expected` refuses unknown ids; `roots` refuses source
+// folders or ancestors. Database-first, files after: rows-without-files are inert
+// and files stay untouched here by design.
 function removeMods(dbPath, ids, expected, roots) {
   requireDb();
   if (!Array.isArray(ids) || !ids.length) return { removed: [], refused: [], backupPath: null };

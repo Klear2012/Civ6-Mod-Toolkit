@@ -241,18 +241,10 @@ function splitterFlags(sqlText) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// Task 1.2, stage: double-quoted-string rewrite. Civ6 mod SQL often uses
-// "..." for string literals where strict SQLite expects '...'. Rewrite a
-// "..." segment to '...' only in value positions: after a value-clause
-// keyword (VALUES/SET/WHERE/...), after = at any level, or after ( / ,
-// inside a VALUE parenthesis (VALUES(...), IN(...), function calls).
-// Parentheses following a table name (CREATE TABLE T(...), INSERT INTO
-// T(...), CREATE INDEX ... ON T(...)) open OTHER parens whose ,-separated
-// "..." entries are quoted identifiers and stay verbatim. "" escapes become
-// " then re-escape to '' on rewrite. Reports rewritten vs kept-identifier
-// counts. Heuristic, declared per file.
-// ---------------------------------------------------------------------------
+// Task 1.2: double-quoted-string rewrite, value positions only (see ADR-001).
+// "..." becomes '...' after value-clause keywords, =, or inside VALUE parens;
+// DDL identifier-list parens stay verbatim and "" re-escapes to ''.
+// Reports rewritten vs kept-identifier counts; heuristic, declared per file.
 
 const DQ_CLAUSE_PRECEDERS = new Set([
   'VALUES', 'SET', 'WHERE', 'AND', 'OR', 'LIKE', 'GLOB',
@@ -590,17 +582,11 @@ function preprocessFile(file, { splitter = 'trigger-aware' } = {}) {
   return { label, sqlText, statements, stages };
 }
 
-// ---------------------------------------------------------------------------
-// Ordered statement collection: mods in load order, files in listed order,
-// statements in file order. Each file is { label, text } or
-// { label, filePath } (filePath form exercises the UTF-16 decode path).
-// With { preprocess: true } each file runs the task-1.2 pipeline and the
-// entry carries per-stage flags; default false keeps the exact 1.1 path.
-// A file's optional gate ({ label, text, gate }, with `criteria` accepted
-// as an alias) mirrors one ActionCriteria set for task 1.3 and rides along
-// on the file entry; files without one are ungated. Gates are evaluated at
-// replay time, never here, so collection counts are gate-blind.
-// ---------------------------------------------------------------------------
+// Ordered statement collection in load/mod/file order (see ADR-001).
+// Each file is { label, text } or { label, filePath }; preprocess runs the
+// task-1.2 pipeline per file, default false keeps the 1.1 path.
+// Optional per-file gate mirrors one ActionCriteria set and rides along;
+// gates evaluate at replay time, so collection counts stay gate-blind.
 
 function collectStatements(modSet, { preprocess = false, splitter = 'trigger-aware' } = {}) {
   const ordered = [];
@@ -646,64 +632,13 @@ function collectStatements(modSet, { preprocess = false, splitter = 'trigger-awa
   return { ordered, files, total: ordered.length };
 }
 
-// ---------------------------------------------------------------------------
-// Ordered replay with per-file SAVEPOINT abort emulation: the first failing
-// statement rolls back only its own file (ROLLBACK TO + RELEASE) and replay
-// continues with the next file, so earlier files persist.
-//
-// Task-1.2 additions: explicit FK mode recorded on the report (PRAGMA
-// foreign_keys OFF default, ON comparison mode), and the Make_Hash JS stub
-// installed when any collected statement needs it (disable via
-// { installStubs: false } to show the without-stub abort).
-//
-// Task-1.3 addition: optional { gates } context ({ enabled, installed } mod
-// id lists, as gateContextOf reads). A file whose gate evaluates to
-// willRun=false is skipped-gated — never executed, counted in skippedGated
-// and named in gatedOut with its reason. willRun=null (undecidable gate)
-// replays normally but is flagged gateUnknown on the per-file record and in
-// gatedUnknown. No gates context means no gating at all (the 1.1 path).
-//
-// Game-setup task 2.2 addition: the gates context may carry `asserted` (the
-// assumed-setup store keys). An asserted value satisfying an otherwise
-// undecidable gate decides it, flagged assumed: rec.gate carries assumed,
-// assumed-satisfied files are named in gatedAssumed, and skipped-gated files
-// carry assumed in gatedOut. Undecided files are never flagged.
-//
-// Task-2.1 addition: optional { provenance: true } installs simonw-style
-// history triggers before replay and records (table, pk, column) ->
-// (file, statement index) for every committed write. Report carries
-// provenance: { writes, collisions } or null when disabled (default off).
-// ---------------------------------------------------------------------------
-// replay-text-tables change (tasks 1.1, 1.2): environmental localization
-// misses plus minimal-schema text replay. Statements targeting localization
-// tables (LocalizedText, EnglishText, BaseGameText and *Text kin, unless the
-// table was created earlier in this replay) run on a purpose-built empty
-// text-schema database in its own temp dir — created lazily, only when a
-// text-targeting statement executes, and destroyed with the replay, so the
-// live game DB is never touched. Gameplay replay is otherwise unchanged:
-//   - a `no such table` miss naming a localization table is environmental,
-//     never a finding: the file rolls back like an abort but records status
-//     skipped-text, and the report states the skip once
-//     (report.textTables: which tables, how many files) instead of
-//     per-file rows, so the differential stops drowning in replay-only
-//     text noise;
-//   - genuine text errors surface normally: bad statements and duplicate
-//     keys abort their file; a duplicate key whose earlier writers are all
-//     the same mod carries sameMod like collision rows (through the
-//     differential, which spreads it; the per-file row stays an abort);
-//   - a text-side `no such column` (schema drift: the mod names a column
-//     outside Language/Tag/Text/Gender/Plurality) falls back to current
-//     behavior: the file replays whole on the gameplay copy and the
-//     fallback is recorded — never failing the replay itself;
-//   - mixed files replay statement-by-statement on whichever copy owns the
-//     target (separable-statements rule); a single statement reading both
-//     sides runs on the gameplay copy with a fallback flag, since the
-//     minimal schema cannot evaluate cross-side reads;
-//   - DDL (CREATE/DROP/ALTER) always runs on the gameplay copy, so a mod
-//     shipping its own text table keeps working exactly as before.
-// Opt out per replay via { textTables: false } (gameplay copy only, with
-// the 1.1 skip-note still applied).
-// ---------------------------------------------------------------------------
+// Ordered replay with per-file SAVEPOINT abort: first failure rolls back only
+// its file, earlier files persist (see ADR-001).
+// Optional context: { gates } skips willRun=false as skipped-gated and flags
+// willRun=null as gateUnknown (unknowns see ADR-004); { provenance:true }
+// records write provenance; text-table statements replay on a lazily built
+// minimal-schema copy. FK mode and Make_Hash stub ride on the report;
+// { textTables:false } opts out to gameplay-copy-only. Temp copies only.
 
 // Localization tables the gameplay copy never carries: the three named in
 // the field (LocalizedText, EnglishText, BaseGameText) and kin —
@@ -1308,28 +1243,11 @@ function lockedCopyTrial(liveDbPath, modSet) {
   return { collected, baseline, locked, copyError, liveBefore, liveAfter: sha256(liveDbPath) };
 }
 
-// ---------------------------------------------------------------------------
-// Task 1.3: criteria gating evaluation (ActionCriteria) with
-// skipped-with-reason reporting. Gated-out actions are skipped (never
-// replayed) and reported with their reason; gated-in actions replay
-// normally; gates this harness cannot read replay normally but are flagged
-// gate-unknown, never silently treated as decided.
-//
-// Gate model: one gate mirrors one ActionCriteria set:
-//   { any: false, conditions: [{ type, value, inverse }] }
-// attached per file as file.gate (file.criteria accepted as an alias) and
-// carried through collectStatements onto the file entry. An absent gate, or
-// a gate with no conditions, is ungated and replays. The evaluation context
-// mirrors the profile read in loadorder.js:
-//   { enabled: [modIds on in the profile], installed: [modIds present] }
-// Only ModInUse / ModIsEnabled are decidable here (measured in
-// loadorder.js: ModInUse is scoped to the active profile, like
-// ModIsEnabled). Every other criterion type is unknown, with a per-type
-// reason in the same shape as unreadableWhy. Any=true is OR, Any=false
-// (default) is AND, combined three-valued exactly like verdictOf: one unmet
-// defeats AND, one met carries OR, and anything left undecided stays null
-// with its unknown list attached.
-// ---------------------------------------------------------------------------
+// Task 1.3: ActionCriteria gating with skipped-with-reason reporting (see ADR-004).
+// One gate mirrors one set ({ any, conditions }); absent/empty gates replay.
+// Context mirrors the profile read ({ enabled, installed }); only ModInUse and
+// ModIsEnabled are decidable, the rest stay unknown with per-type reasons.
+// Any=true is OR, Any=false is AND, three-valued like verdictOf.
 
 const GATE_DECIDABLE = new Set(['ModInUse', 'ModIsEnabled']);
 
@@ -1529,18 +1447,11 @@ function evaluateGate(gate, ctx) {
   return { willRun: null, reason: null, unknown, assumed: false };
 }
 
-// ---------------------------------------------------------------------------
-// Task 2.1: history-trigger provenance (simonw-style). One AFTER INSERT
-// trigger per table logs every column; one AFTER UPDATE OF trigger per
-// column logs exactly that column. UPDATE OF fires on assignment even when
-// the value is unchanged, so two files writing identical values still
-// produce two provenance rows (post-hoc diffing would miss that). The
-// current writer lives in _cr_writer (one row, id=1); replay sets it before
-// each statement and triggers copy it into _cr_provenance. Both tables are
-// _cr_-prefixed so trigger installation skips them; provenance rows written
-// inside a per-file SAVEPOINT roll back with the file, matching abort
-// semantics. Temp copies only, like everything else here.
-// ---------------------------------------------------------------------------
+// Task 2.1: history-trigger provenance (see ADR-001).
+// One AFTER INSERT trigger per table plus one AFTER UPDATE OF trigger per
+// column; UPDATE OF fires on assignment even when unchanged, so identical
+// writes still log twice. Writer in _cr_writer, rows in _cr_provenance;
+// _cr_ tables skip installation and roll back with their file. Temp only.
 
 function qIdent(name) {
   return `"${String(name).replace(/"/g, '""')}"`;
@@ -1737,21 +1648,11 @@ function formatZeroRows(z) {
   return `${z.verb} ${z.modId}/${z.fileLabel}#${z.stmtIndex} (global ${z.globalIndex}) matched no rows${flag}`;
 }
 
-// ---------------------------------------------------------------------------
-// Task 2.2: Database.log differential validation. parseDatabaseLog reads
-// Database.log-format text into error entries { line, text, message,
-// fileHint, stmtHint }: only lines containing ERROR count, leading
-// [timestamp] / [tag] prefixes strip to a message, a *.sql/*.xml token is
-// the file hint, and a statement/stmt N token is the statement hint.
-//
-// Log-pairing 1.1 (additive): each ERROR also joins its same-timestamp
-// non-ERROR context lines -- the executing statement ("While executing -
-// '...'"), the row values ("... with values (...)"), and the source file
-// ("from file <path>", usually a workshop path carrying its Steam ID) --
-// into { statement, values, sourcePath, workshopId }. An ERROR with no
-// same-timestamp context lines keeps today's single-line shape (all four
-// null), so existing differential behavior is unchanged.
-// ---------------------------------------------------------------------------
+// Task 2.2: Database.log differential validation (see ADR-001).
+// parseDatabaseLog reads ERROR lines into { line, text, message, fileHint,
+// stmtHint }; 1.1 pairing joins same-timestamp context (statement, values,
+// sourcePath, workshopId), and context-less errors keep the single-line shape,
+// so existing differential behavior is unchanged.
 
 // Leading [timestamp] tag of a Database.log line; the join key for 1.1.
 function dbTimestampOf(raw) {
@@ -1827,23 +1728,11 @@ function parseDatabaseLog(logText) {
   return entries;
 }
 
-// ---------------------------------------------------------------------------
-// Log-pairing 1.2: workshop/local/base source mapping. Pure functions over
-// the attributed entries from parseDatabaseLog: no filesystem access, the
-// caller supplies the folder map (built server-side from scanMods plus
-// resolved folders). Every entry yields an attribution stating its outcome;
-// unmapped paths are reported, never silently dropped.
-//
-// Folder map shape:
-//   { workshop: { [workshopId]: { modId, name? } | 'modId-string' },
-//     local: [{ folder, modId, name? }] or
-//            { [folderOrPrefix]: { modId, name? } | 'modId-string' } }
-// A local folder is either a bare mod-folder name (matched as a /Mods/<name>/
-// path segment) or an absolute mod-folder prefix (matched case-insensitively
-// after slash normalization). Base-game/DLC paths need no map entry: a
-// normalized path carrying a /base/ or /dlc/ segment attributes to the base
-// game. Explicit maps win over the base-game heuristic, in that order.
-// ---------------------------------------------------------------------------
+// Log-pairing 1.2: workshop/local/base source mapping, pure over attributed
+// entries (see ADR-001). Caller supplies the folder map; every entry yields an
+// attribution and unmapped paths report, never drop.
+// Local folders match as /Mods/<name>/ segments or absolute prefixes; base/DLC
+// paths attribute via /base/ or /dlc/; explicit maps win, in that order.
 
 function normalizeLogPath(p) {
   return String(p == null ? '' : p).replace(/\\/g, '/').toLowerCase();

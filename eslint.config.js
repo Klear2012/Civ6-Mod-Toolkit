@@ -2,7 +2,7 @@
 // subset plus a legibility comment-only subset over src/ and public/. Product-code
 // lines are out of scope for this gate: no legibility code-shape rules are enabled.
 //
-// Calibration 2026-10-09 (2705 report-only hits): the three warn rules below carry
+// Calibration 2026-10-09 (2705 report-only hits): the two warn rules below carry
 // the legacy backlog and stay advisory until the owner works through the counted
 // follow-up list. The error rules had zero hits on that pass, so they hold for new
 // code from day one.
@@ -32,9 +32,9 @@ module.exports = (async () => {
         // module structure (see ADR-013: split along existing section banners).
         // Removing them tree-wide is an owner design decision, not gate fallout.
         'no-comment-slop/no-banner-comment': 'warn',
-        // Advisory backlog (37 blocks over 10 lines): trim opportunistically to
-        // contract + `see ADR-NNN` pointers, five spots per change at most.
-        'no-comment-slop/max-comment-lines': ['warn', { max: 10 }],
+        // Enforced: trimmed to contract + `see ADR-NNN` pointers, so every new
+        // overlong block fails the gate.
+        'no-comment-slop/max-comment-lines': ['error', { max: 10 }],
         // Known false positives on this repo's per-row db.prepare loops in
         // resolveAction/actionFiles/profile reads: documented, not debated.
         'legibility/no-quadratic-patterns': 'off',

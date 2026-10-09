@@ -2,31 +2,11 @@
 
 const { MOD_NAME_SQL, prettyName } = require('./modsdb');
 
-// UI file-shadowing enumeration (conflict-diagnosis task 3.1).
-//
-// Enumerates every UI path claimed by more than one enabled mod, sourcing
-// file claims from Components/ComponentFiles/ModFiles UNION script-replacement
-// claims from ComponentProperties.LuaReplace.
-//
-// The union is the whole point: a ReplaceUIScript action carries NO
-// ComponentFiles links (see phase4 Test 14 - "the action with no <File> gets
-// no link"), so its LuaReplace target is invisible to any file-list-only scan.
-// A contest that exists only via LuaReplace reads as uncontested without it.
-//
-// Read-only: every query below is a SELECT. Callers open the database with
-// node:sqlite { readOnly: true } and pass the handle in; this module never
-// opens or writes anything itself.
-//
-// Scope: task 3.1 is enumeration with per-path claimant lists; task 3.2 adds
-// the winner rule (strictly-greatest declared LoadOrder, else undefined with
-// reason) in decideContestedPath / resolveWinners below; task 3.3 adds the
-// timed envelope (scope counts + contested/decidable/undefined-by-reason +
-// wall-clock) in buildEnvelope / formatEnvelope. The winner rule itself reads
-// no secondary signal: the only table it consults beyond the claimant lists
-// is ComponentProperties LoadOrder. Pairing + wrong-context warnings
-// (detectSplitBrain / detectWrongContext, riding in the envelope via
-// collectWarnings) are a separate, explicitly sound-but-incomplete layer:
-// every warning names a provable problem, but a clean report proves nothing.
+// UI file-shadowing enumeration: every UI path claimed by multiple enabled mods,
+// from file claims UNION LuaReplace claims (see ADR-004). ReplaceUIScript carries
+// no file links, so LuaReplace-only contests read uncontested without the union.
+// Read-only SELECTs on caller handles; winner/envelope/warnings layers below stay
+// sound-but-incomplete: warnings name provable problems, clean proves nothing.
 
 // Slash-unify and trim so a ModFiles row of `UI\Panel.lua` and a LuaReplace
 // value of `UI/Panel.lua` join on one key. Case is preserved: the database

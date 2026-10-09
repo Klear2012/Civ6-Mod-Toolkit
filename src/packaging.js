@@ -1,52 +1,12 @@
 'use strict';
 
-// Static packaging checks over Mods.sqlite.
-//
-// Four checks, each naming the mod (display name), the file or action, and a
-// plain-words reason:
-//
-//   (a) detectUnregisteredFiles — files no action references: ModFiles rows
-//       with no ComponentFiles/SettingFiles link (the .modinfo lists them but
-//       no action loads them), plus files sitting in the mod folder that the
-//       .modinfo does not list at all (so no action can load them).
-//   (b) detectSchemaMismatch — a database file loaded by an action whose
-//       database lacks its tables. The file's tables are parsed out (SQL
-//       INTO/FROM/JOIN/UPDATE plus XML table wrappers and <Sql> blocks) and
-//       compared against the gameplay vs front-end table sets mined read-only
-//       from the debug sqlite masters. A file only warns when one of its
-//       tables provably lives in the OTHER database and not in its own:
-//       tables in both stay silent (shared text tables are legit on either
-//       side), tables in neither stay silent (a mod-made table proves
-//       nothing), and when a debug master is absent its whole side stays
-//       silent — never guessed.
-//   (c) detectDuplicateModIds — one ModId claimed by more than one mod folder.
-//   (d) detectXmlIssues — GameData XML no action can load as written:
-//       malformed XML plus structural faults, each naming the offending tag.
-//
-// Read-only: every Mods.sqlite query below is a SELECT, and the debug masters
-// are opened with node:sqlite { readOnly: true } and only listed for their
-// table names. Callers pass the Mods.sqlite handle in; the disk layer only
-// lists files under caller-/database-resolved mod folders and reads linked
-// database files, never writes.
-//
-// Conventions mirror the mod manager and the shadowing layer:
-//   - mod folder = dirname of the recorded ScannedFiles path, resolved
-//     read-only exactly the way findRemoved/removeMods in modsdb.js do it;
-//   - mod identity = modinfo.normId (lowercase, brace-stripped, trimmed), the
-//     manager's own key for matching disk mods against database rows;
-//   - display names = shadowing.modIndex (the same reader every screen shows);
-//   - base-game/DLC rows never warn alone: a warning fires only when a real
-//     (local/workshop) mod is involved, the same silence rule as
-//     detectWrongContext in shadowing.js.
-// Profile scoping: every check covers the ACTIVE profile's enabled mods
-// (enabledModRowIds/activeGroupId, the same scoping as the shadowing
-// enumeration). A mod switched off cannot affect the game, so its findings
-// are skipped by design; without an active profile nothing is filtered.
-// Findings present in load order: each mod ranks by its smallest LoadOrder,
-// ties break by mod id, undeclared mods sort last. The LoadOrder values are
-// read from the database rows the game will use — overrides are written
-// into those rows by the load-order screen, so they are effective
-// post-override values with no store read here.
+// Static packaging checks over Mods.sqlite, read-only (see ADR-006).
+// Four checks naming mod/file/action plus plain-words reason: unregistered files,
+// wrong-database files (OTHER-side tables only, never guessed), duplicate ModIds,
+// unloadable GameData XML. Active-profile enabled mods only; findings in load
+// order by smallest LoadOrder, ties by mod id, undeclared last.
+// Mod identity is modinfo.normId, names are shadowing.modIndex, folders resolve
+// like modsdb; base/DLC rows never warn alone.
 
 const fs = require('fs');
 const path = require('path');
@@ -210,21 +170,10 @@ function rankOf(map, key) {
   return v === undefined ? Infinity : v;
 }
 
-// (a) Files no action references. Two sources, one finding shape:
-// listed-but-unused (a ModFiles row with no action link) and on-disk-but-
-// unlisted (a folder file the .modinfo never lists, so no link can exist).
-//
-// A same-mod LuaReplace target counts as referenced: a ReplaceUIScript
-// action carries no ComponentFiles links (see phase4 Test 14), so without
-// this the mod's own copy beside a LuaReplace-only override would warn
-// wrongly. Settings (front-end) links count as use, like Components ones.
-//
-// Only local/workshop mods are read: without the ScannedFiles linkage, or
-// for base/DLC rows with no folder on disk, there is nothing accountable to
-// report. An unlistable folder skips the disk layer silently for that mod:
-// a folder that cannot be read proves nothing. Only the active profile's
-// enabled mods are read: a switched-off mod cannot affect the game, so its
-// orphans stay silent by design. Findings present in load order.
+// (a) Files no action references: listed-but-unused plus on-disk-but-unlisted
+// (see ADR-004). Same-mod LuaReplace targets and front-end links count as use.
+// Local/workshop enabled mods only; unreadable folders prove nothing and stay
+// silent; findings present in load order.
 function detectUnregisteredFiles(db, { folders, listFiles } = {}) {
   const tDb0 = Date.now();
   const dirs = folders || modFolders(db);
@@ -400,22 +349,10 @@ function detectDuplicateModIds(db) {
   });
 }
 
-// (d) GameData XML the game cannot load as written. Only .xml files loaded by
-// database-typed actions (UpdateDatabase/UpdateText, the DATA_ACTION_TYPES
-// doctrine) are read: a .xml under a script action is the screen/layout pair
-// mechanism, not database content, so reading it as GameData would warn
-// wrongly. Each finding names the mod (display name), the file, the offending
-// tag, the line, and a plain-words reason saying what to do next.
-//
-// Conservative cuts, mirroring the module's doctrine: an unreadable or empty
-// file proves nothing and stays silent; malformed XML stops the file at the
-// first fault (structure past that point cannot be trusted); table names are
-// never judged (without the game schema no table name is provably wrong).
-// DLC/base rows stay silent under the module's silence rule. No XML
-// dependency: mod files are decoded with the BOM-aware reader below (UTF-16
-// via iconv-lite, same heuristic as the conflict-replay layer) and scanned
-// with focused regexes, the repo's existing convention for small consistent
-// XML (see modinfo.js).
+// (d) GameData XML the game cannot load as written (see ADR-004): only
+// database-typed actions' .xml, so script-action screens never warn. Findings
+// name mod/file/tag/line plus next action. Unreadable stays silent, malformed
+// stops at first fault, tables never judged; base/DLC silent; BOM-aware decode.
 
 // BOM-aware decode for mod database files: Civ6 mod files are commonly
 // UTF-16. Same shapes as the conflict-replay decodeModSql: BOM detection plus
@@ -985,22 +922,11 @@ function detectXmlIssues(db, { folders, readFile } = {}) {
   return out;
 }
 
-// (b) A database file loaded by an action whose database lacks its tables.
-//
-// Components (in-game) actions run against the gameplay database, Settings
-// (front-end) actions against the front-end one. Each .sql/.xml file those
-// actions load is parsed for the tables it touches — SQL INTO/FROM/JOIN/
-// UPDATE plus the XML table wrappers and <Sql> blocks — and each table is
-// compared against the gameplay vs front-end table sets mined read-only from
-// the debug sqlite masters. A file warns only when one of its tables
-// provably lives in the OTHER database and not in its own: tables present in
-// both stay silent (shared text tables are legitimately loaded on either
-// side), tables in neither stay silent (a mod-made table proves nothing), and
-// when a debug master is absent its whole side stays silent — never guessed.
-// DLC/base rows stay silent under the module's silence rule, and only the
-// active profile's enabled mods are read. Findings name the mod (display
-// name), the file, the table, and the database the table lives in, in load
-// order.
+// (b) Database files loaded into the database lacking their tables (see ADR-004).
+// Components run gameplay, Settings front-end; tables parsed from SQL/XML and
+// compared to debug-master sets. Warns only on provable OTHER-side tables;
+// shared or mod-made tables stay silent, absent masters silence their side.
+// Enabled mods only, findings in load order.
 
 // Where the game keeps one debug master, the same lookup family the conflict
 // replay uses for DebugGameplay.sqlite: the env override first, then the
