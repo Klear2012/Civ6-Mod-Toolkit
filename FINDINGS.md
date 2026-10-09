@@ -267,36 +267,45 @@ Export files hold `{toolkit, version, name, exportedAt, mods:[{modId, enabled}]}
 creates a new group (name suffixed ` (2)`, ` (3)`… when taken) and reports mods
 this installation doesn't know rather than failing.
 
-`npm run phase4` proves the operations against a throwaway database and, when
-given a path, against a copy of a real `Mods.sqlite`.
+`test:profiles` (`node --test tests/profiles.test.js`) proves the operations
+against a throwaway database and, when given a path, against a copy of a real
+`Mods.sqlite`.
 
 ## Verification — what has to pass before a release
 
-**`npm run check:release` is the gate.** It runs `phase4`, `phase5` and `phase6`,
-and `.github/workflows/release.yml` runs that script and nothing else decides
-whether a release happens. Those three are in the gate because each seeds its own
-throwaway data — a temp SQLite database, a temp label store, pure functions — and
-so can run on any machine, including a clean CI one.
+**`npm run check:release` is the gate.** It runs the `test:*` mirrors plus
+selfcheck and clean, and `.github/workflows/release.yml` runs that script and
+nothing else decides whether a release happens. Each suite seeds its own
+throwaway data — temp SQLite databases, temp label stores, pure functions — and
+so can run on any machine, including a clean CI one. The authoritative list is
+`package.json` `check:release` — read the script, not this file, for the current
+chain; a new area adds a suite and joins the gate in the same edit, so
+`release.yml` cannot drift out of step.
 
 | Suite | Covers | In the gate |
 |---|---|---|
-| `phase0` | round-trips a real `.Civ6Cfg` | **no** — needs a fixture you supply |
-| `phase1` | scan a Saves folder, diff it | **no** — needs a fixture you supply |
-| `phase2` | add/remove/save a config | **no** — needs a fixture you supply |
-| `phase4` | profiles, registration, removal, native paths | yes |
-| `phase5` | the label store, including a rescan that renumbers `ModRowId` | yes |
-| `phase6` | the six sort orderings, and the page's wiring to them | yes |
+| `phase0` | round-trips a real `.Civ6Cfg` | **no** — manual tool, needs a fixture you supply |
+| `phase1` | scan a Saves folder, diff it | **no** — manual tool, needs a fixture you supply |
+| `phase2` | add/remove/save a config | **no** — manual tool, needs a fixture you supply |
+| `test:profiles` | profiles, registration, removal, native paths | yes |
+| `test:labels` | the label store, including a rescan that renumbers `ModRowId` | yes |
+| `test:sorting` | the six sort orderings, and the page's wiring to them | yes |
+| `test:loadorder` | load order: store, identity, apply, sync, view, import/export | yes |
+| `test:scripts` | browser scripts | yes |
+| `test:replay` | conflict replay | yes |
+| `test:shadowing` | UI shadowing | yes |
+| `test:packaging` | release packaging | yes |
+| `phase9-selfcheck` | conflict-diagnosis selfcheck (`node src/server.js --selfcheck`) | yes |
+| `test:game-setup` | setup rounds and verdicts | yes |
+| `phaseclean` | stray-artifact gate (`node src/phase-clean.js`) | yes |
+| `lint:comments` | comment-legibility lint (`eslint src public`) | yes |
 
 `phase0`, `phase1` and `phase2` need a real `.Civ6Cfg` in `fixtures/`, which is
 git-ignored because a real config names your game and session. They are
 deliberately kept out: a suite that fails on every machine, CI included, makes a
 gate permanently red, and a permanently red gate is one people learn to read
-past. `phase0` now says so and exits non-zero rather than reporting a pass it
+past. `phase0` says so and exits non-zero rather than reporting a pass it
 did not earn.
-
-**A new area adds a suite, and the suite joins the gate.** The list is in
-`package.json` as `check:release`, so adding a suite and adding it to the gate
-are the same edit and `release.yml` cannot drift out of step.
 
 **Running the checks without publishing.** Dispatch `release.yml` with
 `mode=verify` and leave the tag empty to check whatever branch you are on. Every
@@ -316,14 +325,16 @@ between the two is a real possibility rather than a hypothetical one.
 
 ## Possible follow-ups
 
-- Delete local mods / "open Steam page to unsubscribe" for Workshop mods.
-- Sync a profile with a `.Civ6Cfg`'s mod list (the other direction of this).
+- Delete local mods / "open Steam page to unsubscribe" for Workshop mods — done in v1.5.0 (`Remove mod` deletes the folder from disk; the dialog links the Workshop page).
+- Sync a profile with a `.Civ6Cfg`'s mod list (the other direction of this) — still open: no code path syncs either direction (nothing in `src/` maps a profile to a config mod list).
 
-- Proper UTF-8/UTF-16 handling for non-Latin mod titles (cosmetic only today).
-- One-click launcher (e.g. a `.cmd` / packaged app) so there's no terminal at all.
-- Extend beyond mods to other config settings (needs more of the format mapped).
+- Proper UTF-8/UTF-16 handling for non-Latin mod titles (cosmetic only today) — still open: titles are still ASCII-encoded (`src/civ6cfg.js` `writeString`), so non-Latin names degrade to `?` in the display title only.
+- One-click launcher (e.g. a `.cmd` / packaged app) so there's no terminal at all — done since upstream v1.0.0 (`Civ6 Mod Toolkit.cmd`, shipped in every release zip via `.github/workflows/release.yml`, documented in `README.md`).
+- Extend beyond mods to other config settings (needs more of the format mapped) — done in v1.9.1 (game-setup round toggles for rulesets, modes, and settings).
 - Backup names only have second resolution, so two writes in the same second
-  share a file name and the second overwrites the first.
+  share a file name and the second overwrites the first — still open:
+  `timestamp()` in `src/editor.js` is `YYYYMMDD-HHMMSS`, and `src/modsdb.js`
+  prunes backups of the same shape.
 
 ## Load order model — one integer per ACTION, not per mod
 
@@ -419,16 +430,3 @@ between the two is a real possibility rather than a hypothetical one.
 - The server never takes paths from the client: every file path used in a
   database write is resolved server-side from known roots, never from a request
   body.
-
-## Verification gate — extension past phase4-6
-
-- As of v1.6.0 the gate section above was accurate: `npm run check:release`
-  ran `phase4`, `phase5` and `phase6`, and `.github/workflows/release.yml` ran
-  that script and nothing else decided a release. Since extended by later
-  areas: the gate is no longer phase4-6 only.
-- The authoritative list is `package.json` `check:release` — the suite table
-  above extends by adding one row per new suite in the same edit that adds the
-  suite, and `release.yml` still runs that script and nothing else. Read the
-  script, not this file, for the current chain.
-- The standing rule is unchanged: a new area adds a suite and joins the gate
-  in the same edit, so `release.yml` cannot drift out of step.

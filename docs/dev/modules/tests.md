@@ -39,6 +39,12 @@ state goes under OS temp via `makeTmp` (canonicalised once via
 `src/phase4`-up proof scripts were deleted at cutover after 1:1 cover was
 proven per file.
 
+## Mirror-authoring trap
+
+`node:test` runs every `describe` body before any `it()` runs, so never mutate
+shared state at body level. The profiles mirror records each check at load and
+replays the recordings inside `it()` blocks instead (record-then-replay).
+
 ## UI variables note
 
 `public/style.css` theming is pure CSS and has no mirror: the `:root`
