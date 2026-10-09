@@ -17,12 +17,12 @@ A mod toolkit for Sid Meier's Civilization VI that runs outside the game:
   and switch between them here, and export/import a profile as a `.json` file,
   so a set-up can be moved to another computer or shared.
 
-> **This is a maintained fork** of
+> **This is a standalone project by Klear2012**, built on the original work of
 > [cru121](https://github.com/cru121/Civ6-Mod-Toolkit) (Steam:
-> *evzenhouzvicka*), last updated 25 September 2026. Releases and fixes happen
-> here — [CHANGELOG.md](CHANGELOG.md) has what this fork adds, and please
+> *evzenhouzvicka*). Releases and fixes happen here —
+> [CHANGELOG.md](CHANGELOG.md) describes the changes, and please
 > [report problems here](https://github.com/Klear2012/Civ6-Mod-Toolkit/issues).
-> The MIT licence and original copyright are unchanged.
+> MIT licence — Copyright (c) 2026 cru121 and Copyright (c) 2026 Klear2012 — see [LICENSE](LICENSE).
 
 Website: <https://klear2012.github.io/Civ6-Mod-Toolkit/>
 
@@ -364,13 +364,13 @@ configuration).
 
 ## Authors & feedback
 
-Originally by **cru121** (Steam: *evzenhouzvicka*), now maintained by
-**Klear2012**. The MIT licence and original copyright are unchanged — see
-[LICENSE](LICENSE).
+Originally by **cru121** (Steam: *evzenhouzvicka*), maintained and developed by
+**Klear2012**. The MIT licence applies — Copyright (c) 2026 cru121 and
+Copyright (c) 2026 Klear2012 — see [LICENSE](LICENSE).
 
 Questions, bugs or ideas? Please
 [open an issue on this repo](https://github.com/Klear2012/Civ6-Mod-Toolkit/issues).
-Upstream is not being worked on, so issues filed there will not be seen.
+This repo is developed independently, so filing them here is how they get seen.
 
 ## What's under the hood
 

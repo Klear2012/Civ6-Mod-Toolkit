@@ -2,10 +2,10 @@
 
 All notable changes to this project are recorded here.
 
-This project is a fork of [cru121/Civ6-Mod-Toolkit](https://github.com/cru121/Civ6-Mod-Toolkit),
-which was last updated on 25 September 2026. Everything from **v1.1.0** onward is
-new in this fork; **v1.0.0** and earlier are upstream's work, under the same MIT
-licence and with the original copyright left intact.
+This project started from [cru121/Civ6-Mod-Toolkit](https://github.com/cru121/Civ6-Mod-Toolkit),
+last updated on 25 September 2026, and has been developed independently since.
+**v1.0.0** and earlier are cru121's work; everything from **v1.1.0** onward is
+new here, under the same MIT licence and with the original copyright left intact.
 
 Versions are tagged, and each tag produces a Windows zip on the
 [releases page](https://github.com/Klear2012/Civ6-Mod-Toolkit/releases/latest).
