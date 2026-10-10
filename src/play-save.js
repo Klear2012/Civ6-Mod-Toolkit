@@ -26,6 +26,21 @@ const saveParser = require('./civ6-save-parser');
 const REFUSAL_RUNNING = 'Civilization VI is already running. Quit the game first, then play from the save.';
 const NO_SAVES = 'No autosaves were found in the saves folder. Play a few turns first, then try again.';
 
+// Prefix marking a staged launch copy. Distinctive so the startup sweep
+// recognises its own files and never touches a real save.
+const STAGING_PREFIX = 'ToolkitBoot_';
+
+/**
+ * Plain-words refusal when the staged name is already taken. Never
+ * overwrites: the user removes the leftover copy, then tries again.
+ */
+function stagingCollisionError(saveName, plantedCopy) {
+  return `The save "${saveName}" was not started: "${plantedCopy}" is still in the saves folder `
+    + 'from an earlier try, so there was nowhere safe to prepare the launch. '
+    + 'Delete that temporary file (its name starts with ToolkitBoot_ and it is only a copy), '
+    + 'then try again. Nothing was changed.';
+}
+
 /**
  * Where the game's AppOptions.txt lives. Overridable so tests never touch
  * the real file (see ADR-006).
@@ -51,9 +66,9 @@ function flagPathOf(appOptions) {
  * Copy AppOptions aside and plant the boot flag. A stale flag means a
  * previous crash, so it is reconciled first and the restore is logged.
  */
-function backupAppOptions(appOptions) {
+function backupAppOptions(appOptions, opts = {}) {
   const target = appOptions || appOptionsPath();
-  reconcileUnrestoredBoot(target);
+  reconcileUnrestoredBoot(target, opts);
   let hadOriginal = true;
   try {
     hadOriginal = fs.statSync(target).isFile();
@@ -63,6 +78,23 @@ function backupAppOptions(appOptions) {
   if (hadOriginal) fs.copyFileSync(target, backupPathOf(target));
   fs.writeFileSync(flagPathOf(target), JSON.stringify({ at: new Date().toISOString(), hadOriginal }));
   return { appOptions: target, backupPath: backupPathOf(target), hadOriginal };
+}
+
+/**
+ * Record a staged launch copy in the boot flag so the restore and the
+ * startup reconcile delete that exact file. Best effort, never throws.
+ */
+function noteStagedCopy(appOptions, stagedCopy) {
+  const target = appOptions || appOptionsPath();
+  const flag = flagPathOf(target);
+  try {
+    const state = JSON.parse(fs.readFileSync(flag, 'utf8'));
+    state.stagedCopy = stagedCopy;
+    fs.writeFileSync(flag, JSON.stringify(state));
+  } catch (_) {
+    /* a missing flag means nothing is tracking the boot */
+  }
+  return { appOptions: target, stagedCopy };
 }
 
 /**
@@ -104,9 +136,10 @@ function readPlayNowSave(appOptions) {
 
 /**
  * Undo a boot: put the backup bytes back (or remove a file the boot
- * created) and clear the flag and backup. With no flag there is nothing
- * to undo. Never throws: a failed restore keeps the flag so the next
- * startup reconcile retries it.
+ * created), delete the staged launch copy when there is one, and clear
+ * the flag and backup. With no flag there is nothing to undo. Never
+ * throws: a failed restore keeps the flag so the next startup reconcile
+ * retries it.
  */
 function restoreAppOptions(appOptions) {
   const target = appOptions || appOptionsPath();
@@ -140,6 +173,13 @@ function restoreAppOptions(appOptions) {
   } catch (_) {
     return { restored: false };
   }
+  if (state && typeof state.stagedCopy === 'string' && state.stagedCopy) {
+    try {
+      fs.unlinkSync(state.stagedCopy);
+    } catch (_) {
+      /* already gone; the reconcile sweep covers what this misses */
+    }
+  }
   try {
     fs.unlinkSync(backupPathOf(target));
   } catch (_) {
@@ -154,11 +194,66 @@ function restoreAppOptions(appOptions) {
 }
 
 /**
- * Startup reconcile: a leftover boot flag means a previous run crashed
- * mid-boot, so restore the backup now. Always safe to call; reports
- * whether it did anything so the caller can log the single line.
+ * Every saves folder the toolkit knows: the explicit override plus the
+ * live Single/Multi sides. Used only to sweep leftover staged copies.
  */
-function reconcileUnrestoredBoot(appOptions) {
+function knownSavesRoots(opts = {}) {
+  const roots = [];
+  if (opts.savesRoot) roots.push(opts.savesRoot);
+  if (process.env.CIV6_SAVES) roots.push(process.env.CIV6_SAVES);
+  for (const mode of ['single', 'multi']) {
+    try {
+      const side = paths.getSavesDir(mode);
+      if (side && side.custom && side.root) roots.push(side.root);
+      else if (side && side.root) roots.push(path.dirname(side.root));
+    } catch (_) {
+      /* defaults unavailable */
+    }
+  }
+  return [...new Set(roots.filter(Boolean))];
+}
+
+/**
+ * Delete staged launch copies left by an interrupted boot. Only the
+ * distinctive prefix matches, so real saves are never touched. Prompt
+ * deletion plus this sweep keeps each copy transient, which is why no
+ * cloud-sync detection exists: there is nothing long-lived to sync.
+ * Never throws; returns the removed paths.
+ */
+function sweepStaleStagingCopies(roots) {
+  const removed = [];
+  for (const root of Array.isArray(roots) ? roots : [roots]) {
+    if (!root) continue;
+    for (const side of ['Single', 'Multi']) {
+      let entries;
+      try {
+        entries = fs.readdirSync(path.join(root, side), { withFileTypes: true });
+      } catch (_) {
+        continue;
+      }
+      for (const e of entries) {
+        if (!e.isFile() || !e.name.startsWith(STAGING_PREFIX)) continue;
+        const full = path.join(root, side, e.name);
+        try {
+          fs.unlinkSync(full);
+          removed.push(full);
+        } catch (_) {
+          /* a running game may hold it; the next start retries */
+        }
+      }
+    }
+  }
+  return removed;
+}
+
+/**
+ * Startup reconcile: a leftover boot flag means a previous run crashed
+ * mid-boot, so restore the backup now (the staged copy noted in the flag
+ * goes with it). Stale staged copies are swept on the same path whether
+ * or not a flag exists. Always safe to call; reports whether it did
+ * anything so the caller can log the single line.
+ */
+function reconcileUnrestoredBoot(appOptions, opts = {}) {
   const target = appOptions || appOptionsPath();
   let flagged = false;
   try {
@@ -166,10 +261,18 @@ function reconcileUnrestoredBoot(appOptions) {
   } catch (_) {
     flagged = false;
   }
-  if (!flagged) return { reconciled: false };
+  const stagedRemoved = sweepStaleStagingCopies(knownSavesRoots(opts));
+  if (!flagged) {
+    if (!stagedRemoved.length) return { reconciled: false };
+    console.log('Play-from-save: removed a leftover temporary launch file from an interrupted boot.');
+    return { reconciled: false, stagedRemoved };
+  }
   const r = restoreAppOptions(target);
-  if (r.restored) console.log('Play-from-save: restored AppOptions left over from an interrupted boot.');
-  return { reconciled: r.restored };
+  if (r.restored) {
+    console.log('Play-from-save: restored AppOptions left over from an interrupted boot.'
+      + (stagedRemoved.length ? ' A leftover temporary launch file was removed too.' : ''));
+  }
+  return { reconciled: r.restored, stagedRemoved };
 }
 
 // ---- save listing ---------------------------------------------------------
@@ -445,10 +548,11 @@ function defaultLauncher(exe) {
 }
 
 /**
- * Value the game reads: the save below the Saves folder with forward
- * slashes and no leading prefix.
+ * The saves folder a save lives under, with its Saves-relative path, or
+ * null when the save sits outside every known folder. Shared by the plant
+ * shape and the staging plan so both agree on the root.
  */
-function toPlayNowSaveValue(savePath, opts = {}) {
+function findSavesRoot(savePath, opts = {}) {
   const candidates = [];
   if (opts.savesRoot) candidates.push(opts.savesRoot);
   if (process.env.CIV6_SAVES) candidates.push(process.env.CIV6_SAVES);
@@ -475,14 +579,46 @@ function toPlayNowSaveValue(savePath, opts = {}) {
     if (!root) continue;
     try {
       const rel = path.relative(root, savePath);
-      if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) {
-        return String(rel).replace(/\\/g, '/').replace(/^(\.\/)+/, '').replace(/^\/+/, '');
-      }
+      if (rel && !rel.startsWith('..') && !path.isAbsolute(rel)) return { root, rel };
     } catch (_) {
       /* next candidate */
     }
   }
+  return null;
+}
+
+/**
+ * Value the game reads: the save below the Saves folder with forward
+ * slashes and no leading prefix.
+ */
+function toPlayNowSaveValue(savePath, opts = {}) {
+  const found = findSavesRoot(savePath, opts);
+  if (found) {
+    return String(found.rel).replace(/\\/g, '/').replace(/^(\.\/)+/, '').replace(/^\/+/, '');
+  }
   return String(path.basename(savePath)).replace(/\\/g, '/');
+}
+
+/**
+ * Staging plan for a boot: the game only loads saves one level below a
+ * side folder (Single/X), so a deeper save (Single/auto/X) boots through
+ * a byte copy staged beside it as Single/ToolkitBoot_X, and the copy's
+ * value is planted instead. The original file is never moved or changed.
+ */
+function stagingPlanFor(savePath, opts = {}) {
+  const found = findSavesRoot(savePath, opts);
+  if (!found) return { needsStaging: false };
+  const segs = String(found.rel).split(/[\\/]/).filter(Boolean);
+  if (segs.length <= 2) return { needsStaging: false };
+  const side = segs[0];
+  const dest = path.join(found.root, side, `${STAGING_PREFIX}${path.basename(savePath)}`);
+  return {
+    needsStaging: true,
+    root: found.root,
+    side,
+    dest,
+    plantedCopy: `${side}/${STAGING_PREFIX}${path.basename(savePath)}`,
+  };
 }
 
 /**
@@ -582,10 +718,10 @@ async function waitForGameThenRestore(appOptions, opts = {}) {
 
 /**
  * One shared boot: refuse while running, preflight required mods, back up
- * AppOptions, write the Saves-relative PlayNowSave, launch, then restore
- * only after the logs confirm the load. Missing mods warn BEFORE anything
- * is written unless proceedWithoutMods is set. Restores in a finally when
- * the launch fails; reconcile covers a crashed toolkit or a deferred load.
+ * AppOptions, plant the PlayNowSave, launch, then restore only after the
+ * logs confirm the load. Deeper saves boot through a staged byte copy,
+ * deleted with the restore. Missing mods warn BEFORE anything is written
+ * unless proceedWithoutMods is set (see reconcileUnrestoredBoot).
  */
 async function bootSave(savePath, opts = {}) {
   let isFile = false;
@@ -617,8 +753,34 @@ async function bootSave(savePath, opts = {}) {
   }
 
   const appOptions = opts.appOptions || appOptionsPath();
-  const planted = toPlayNowSaveValue(savePath, opts);
-  backupAppOptions(appOptions);
+  backupAppOptions(appOptions, opts);
+  const plan = stagingPlanFor(savePath, opts);
+  let planted;
+  if (plan.needsStaging) {
+    let taken = false;
+    try {
+      taken = fs.statSync(plan.dest).isFile();
+    } catch (_) {
+      taken = false;
+    }
+    if (taken) {
+      restoreAppOptions(appOptions);
+      return { ok: false, code: 'staging-collision', error: stagingCollisionError(path.basename(savePath), plan.plantedCopy), save: savePath };
+    }
+    try {
+      fs.copyFileSync(savePath, plan.dest, fs.constants.COPYFILE_EXCL);
+    } catch (e) {
+      restoreAppOptions(appOptions);
+      if (e && e.code === 'EEXIST') {
+        return { ok: false, code: 'staging-collision', error: stagingCollisionError(path.basename(savePath), plan.plantedCopy), save: savePath };
+      }
+      return { ok: false, code: 'staging-failed', error: `The save "${path.basename(savePath)}" could not be prepared for launch. Nothing was changed - try again.`, save: savePath };
+    }
+    noteStagedCopy(appOptions, plan.dest);
+    planted = plan.plantedCopy;
+  } else {
+    planted = toPlayNowSaveValue(savePath, opts);
+  }
   writePlayNowSave(appOptions, planted);
 
   if (opts.dryRun || process.env.CIV6_NO_BOOT) {
@@ -660,12 +822,16 @@ async function playLatest(opts = {}) {
 
 module.exports = {
   REFUSAL_RUNNING,
+  STAGING_PREFIX,
   appOptionsPath,
   backupAppOptions,
+  noteStagedCopy,
   writePlayNowSave,
   readPlayNowSave,
   setPlayNowSave,
   toPlayNowSaveValue,
+  stagingPlanFor,
+  sweepStaleStagingCopies,
   defaultLoadConfirmed,
   waitForGameThenRestore,
   restoreAppOptions,

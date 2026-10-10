@@ -295,7 +295,7 @@ describe('planted PlayNowSave shape', () => {
   it('plants a Multi save as Multi/...', () => {
     assert.equal(playSave.toPlayNowSaveValue(multiSave), 'Multi/MultiSave.Civ6Save');
   });
-  it('boots plant the relative value the menu reads', async () => {
+  it('boots stage a deep save as a copy and plant the copy the menu reads', async () => {
     fs.writeFileSync(APP, APP_ORIGINAL);
     const fakeExe = path.join(TMP, 'fake-game.exe');
     fs.writeFileSync(fakeExe, 'exe');
@@ -316,10 +316,11 @@ describe('planted PlayNowSave shape', () => {
       loadTimeoutMs: 1000,
     });
     assert.equal(r.ok, true);
-    assert.equal(seen.playNow, 'Single/auto/AutoSave_0001.Civ6Save');
-    assert.equal(r.planted, 'Single/auto/AutoSave_0001.Civ6Save');
+    assert.equal(seen.playNow, 'Single/ToolkitBoot_AutoSave_0001.Civ6Save');
+    assert.equal(r.planted, 'Single/ToolkitBoot_AutoSave_0001.Civ6Save');
     assert.equal(r.restored, true);
     assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+    assert.ok(!fs.existsSync(path.join(savesRoot, 'Single', 'ToolkitBoot_AutoSave_0001.Civ6Save')));
   });
 });
 
@@ -346,10 +347,154 @@ describe('no early restore', () => {
     assert.equal(r.ok, true);
     assert.equal(r.restored, false);
     assert.equal(r.deferred, true);
-    assert.equal(playSave.readPlayNowSave(APP), 'Single/auto/AutoSave_0001.Civ6Save');
+    assert.equal(playSave.readPlayNowSave(APP), 'Single/ToolkitBoot_AutoSave_0001.Civ6Save');
     assert.ok(fs.existsSync(`${APP}.toolkit-boot`));
     const rec = playSave.reconcileUnrestoredBoot(APP);
     assert.equal(rec.reconciled, true);
+    assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+    assert.ok(!fs.existsSync(path.join(TMP, 'plant', 'Saves', 'Single', 'ToolkitBoot_AutoSave_0001.Civ6Save')));
+  });
+});
+
+describe('staging-copy boot', () => {
+  // A save nested deeper than one level boots through a byte copy staged
+  // beside it. No live boot is needed here: the launch, the log markers and
+  // the single-level load are proven live separately, and these mirrors
+  // cover only the staging mechanism (plan, copy bytes, plant shape,
+  // deletion, refusal, sweep).
+  const savesRoot = path.join(TMP, 'stage', 'Saves');
+  const deepSave = path.join(savesRoot, 'Single', 'auto', 'AutoSave_0002.Civ6Save');
+  const rootSave = path.join(savesRoot, 'Single', 'RootStage.Civ6Save');
+  const stagedDest = (name) => path.join(savesRoot, 'Single', `${playSave.STAGING_PREFIX}${name}`);
+  before(() => {
+    putSave(deepSave, 1000);
+    putSave(rootSave, 2000);
+  });
+  it('plans staging only for saves deeper than one level', () => {
+    const deep = playSave.stagingPlanFor(deepSave, { savesRoot });
+    assert.equal(deep.needsStaging, true);
+    assert.equal(deep.plantedCopy, 'Single/ToolkitBoot_AutoSave_0002.Civ6Save');
+    assert.equal(deep.dest, stagedDest('AutoSave_0002.Civ6Save'));
+    assert.equal(playSave.stagingPlanFor(rootSave, { savesRoot }).needsStaging, false);
+    assert.equal(playSave.stagingPlanFor(path.join(TMP, 'elsewhere.Civ6Save'), { savesRoot }).needsStaging, false);
+  });
+  it('stages the exact bytes, plants the copy, then deletes it with the restore', async () => {
+    fs.writeFileSync(APP, APP_ORIGINAL);
+    const fakeExe = path.join(TMP, 'fake-game.exe');
+    fs.writeFileSync(fakeExe, 'exe');
+    const beforeBytes = fs.readFileSync(deepSave);
+    const seen = {};
+    let calls = 0;
+    const r = await playSave.bootSave(deepSave, {
+      appOptions: APP,
+      savesRoot,
+      installed: INSTALLED_ALL,
+      parseFn: stubParseTurnDispenser(),
+      exePath: fakeExe,
+      gameStatusFn: () => Promise.resolve({ running: ++calls > 1, known: true, processes: [] }),
+      launcherFn: () => {
+        seen.playNow = playSave.readPlayNowSave(APP);
+        seen.stagedBytes = fs.readFileSync(stagedDest('AutoSave_0002.Civ6Save'));
+        return Promise.resolve();
+      },
+      pollIntervalMs: 5,
+      loadConfirmedFn: () => Promise.resolve(true),
+      loadTimeoutMs: 1000,
+    });
+    assert.equal(r.ok, true);
+    assert.equal(seen.playNow, 'Single/ToolkitBoot_AutoSave_0002.Civ6Save');
+    assert.equal(r.planted, 'Single/ToolkitBoot_AutoSave_0002.Civ6Save');
+    assert.ok(seen.stagedBytes.equals(beforeBytes), 'staged copy must carry the exact save bytes');
+    assert.ok(!fs.existsSync(stagedDest('AutoSave_0002.Civ6Save')), 'staged copy deleted after the confirmed load');
+    assert.equal(r.restored, true);
+    assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+    assert.ok(fs.readFileSync(deepSave).equals(beforeBytes), 'original save never modified');
+  });
+  it('refuses in plain words when the staged name is taken, changing nothing', async () => {
+    // No savesRoot here on purpose: with it the startup sweep would heal the
+    // leftover first, and this mirror covers the refusal branch instead.
+    fs.writeFileSync(APP, APP_ORIGINAL);
+    const dest = stagedDest('AutoSave_0002.Civ6Save');
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, 'someone-elses-file');
+    const beforeBytes = fs.readFileSync(deepSave);
+    try {
+      const fakeExe = path.join(TMP, 'fake-game.exe');
+      fs.writeFileSync(fakeExe, 'exe');
+      let launched = 0;
+      const r = await playSave.bootSave(deepSave, {
+        appOptions: APP,
+        installed: INSTALLED_ALL,
+        parseFn: stubParseTurnDispenser(),
+        exePath: fakeExe,
+        gameStatusFn: closedGame,
+        launcherFn: () => { launched += 1; return Promise.resolve(); },
+      });
+      assert.equal(r.ok, false);
+      assert.equal(r.code, 'staging-collision');
+      assert.ok(/try again/i.test(r.error), r.error);
+      assert.ok(/nothing was changed/i.test(r.error), r.error);
+      assert.equal(launched, 0);
+      assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+      assert.ok(!fs.existsSync(`${APP}.toolkit-boot`));
+      assert.equal(fs.readFileSync(dest, 'utf8'), 'someone-elses-file');
+      assert.ok(fs.readFileSync(deepSave).equals(beforeBytes), 'original save never modified');
+    } finally {
+      fs.unlinkSync(dest);
+    }
+  });
+  it('a crashed staged boot reconciles the plant and the leftover copy', () => {
+    fs.writeFileSync(APP, APP_ORIGINAL);
+    const dest = stagedDest('AutoSave_0002.Civ6Save');
+    playSave.backupAppOptions(APP, { savesRoot });
+    fs.copyFileSync(deepSave, dest);
+    playSave.noteStagedCopy(APP, dest);
+    playSave.writePlayNowSave(APP, 'Single/ToolkitBoot_AutoSave_0002.Civ6Save');
+    // Crash here: no restore call. The next start must put it back.
+    const rec = playSave.reconcileUnrestoredBoot(APP, { savesRoot });
+    assert.equal(rec.reconciled, true);
+    assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+    assert.ok(!fs.existsSync(dest), 'leftover staged copy deleted');
+    assert.ok(!fs.existsSync(`${APP}.toolkit-boot`));
+  });
+  it('sweeps a stale staged copy even with no boot flag', () => {
+    const dest = stagedDest('Orphan.Civ6Save');
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.writeFileSync(dest, 'orphan-bytes');
+    const before = fs.readdirSync(path.join(savesRoot, 'Single'));
+    const rec = playSave.reconcileUnrestoredBoot(APP, { savesRoot });
+    assert.ok(!fs.existsSync(dest), 'stale staged copy swept');
+    assert.ok((rec.stagedRemoved || []).includes(dest));
+    assert.ok(before.includes('RootStage.Civ6Save'), 'real saves are never swept');
+    assert.ok(fs.existsSync(rootSave));
+  });
+  it('a root-level save plants directly with zero staging', async () => {
+    fs.writeFileSync(APP, APP_ORIGINAL);
+    const fakeExe = path.join(TMP, 'fake-game.exe');
+    fs.writeFileSync(fakeExe, 'exe');
+    const seen = {};
+    let calls = 0;
+    const r = await playSave.bootSave(rootSave, {
+      appOptions: APP,
+      savesRoot,
+      installed: INSTALLED_ALL,
+      parseFn: stubParseTurnDispenser(),
+      exePath: fakeExe,
+      gameStatusFn: () => Promise.resolve({ running: ++calls > 1, known: true, processes: [] }),
+      launcherFn: () => {
+        seen.playNow = playSave.readPlayNowSave(APP);
+        seen.staged = fs.readdirSync(path.join(savesRoot, 'Single')).filter((n) => n.startsWith(playSave.STAGING_PREFIX));
+        return Promise.resolve();
+      },
+      pollIntervalMs: 5,
+      loadConfirmedFn: () => Promise.resolve(true),
+      loadTimeoutMs: 1000,
+    });
+    assert.equal(r.ok, true);
+    assert.equal(seen.playNow, 'Single/RootStage.Civ6Save');
+    assert.equal(r.planted, 'Single/RootStage.Civ6Save');
+    assert.deepEqual(seen.staged, [], 'no staging copy for a root-level save');
+    assert.equal(r.restored, true);
     assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
   });
 });
