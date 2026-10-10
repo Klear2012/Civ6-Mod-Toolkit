@@ -14,6 +14,8 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 ### Added
 
+- The Conflicts differential gains a "near the crash" section grouping the last stretch of the game log by responsible mod, and lists the game's own known-harmless lines separately instead of counting them as errors. No behavior change to game writes.
+
 ### Fixed
 
 ## v1.9.2 — 10 October 2026

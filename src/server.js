@@ -882,17 +882,49 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
   } else if (fs.statSync(logPath).size > MAX_CONFLICT_LOG_BYTES) {
     differential = { available: false, reason: `Database.log is larger than ${MAX_CONFLICT_LOG_BYTES} bytes`, logPath };
   } else {
-    const entries = conflictReplay.parseDatabaseLog(fs.readFileSync(logPath, 'utf8'));
+    const logText = fs.readFileSync(logPath, 'utf8');
+    const entries = conflictReplay.parseDatabaseLog(logText);
     const diff = conflictReplay.differentialValidate(report, entries, collected);
     const attributed = attributeDifferential(
       diff, entries, loadings, folderMap, nameById);
+    // Known-benign Firaxis rows (conflict-crash-vicinity): tag log-side rows
+    // in place (replayOnly errors are mod SQL, never benign), collect them
+    // for the collapsed list, and tally counted = logErrors - benign.
+    const entryByLine = new Map(entries.map((e) => [e.line, e]));
+    const markBenign = (row) => {
+      const hit = entryByLine.get(row.logLine);
+      const b = hit ? conflictReplay.isBenignLogError(hit) : { benign: false };
+      return { ...row, benign: !!b.benign, ...(b.benign ? { benignWhy: b.why } : {}) };
+    };
+    const agreements = attributed.agreements.map(markBenign);
+    const logOnly = attributed.logOnly.map(markBenign);
+    const replayOnly = attributed.replayOnly.map((r) => ({ ...r, benign: false }));
+    const benign = [...agreements, ...logOnly].filter((r) => r.benign);
+    // Crash vicinity: trailing-window groups over the same parsed entries,
+    // display names resolved here so the page renders names, never raw ids.
+    const vicinity = conflictReplay.buildCrashVicinity(entries, loadings, folderMap,
+      { totalLines: logText.split(/\r?\n/).length });
+    for (const g of vicinity.groups) {
+      if (g.modId && !g.modName) g.modName = conflictDisplayName(g.modId, nameById);
+    }
     differential = {
       available: true, logPath,
-      agreements: attributed.agreements,
-      replayOnly: attributed.replayOnly,
-      logOnly: attributed.logOnly,
+      agreements,
+      replayOnly,
+      logOnly,
+      benign,
+      tallies: {
+        logErrors: entries.length,
+        benign: conflictReplay.countBenignErrors(entries),
+        counted: entries.length - conflictReplay.countBenignErrors(entries),
+      },
       replayErrors: diff.replayErrors,
       logErrors: diff.logErrors,
+      crashVicinity: {
+        window: vicinity.window,
+        totalLines: vicinity.totalLines,
+        groups: vicinity.groups,
+      },
     };
   }
 

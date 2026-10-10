@@ -2171,6 +2171,108 @@ function formatDifferential(diff) {
   return lines.join('\n');
 }
 
+// Crash vicinity + known-benign Firaxis rows (conflict-crash-vicinity).
+// The game writes Database.log sequentially and a crash ends the log, so
+// the last CRASH_VICINITY_WINDOW lines are where the culprit cluster lives.
+// buildCrashVicinity groups those entries by attributed mod reusing
+// attributeErrorWithFallback (no new correlation); entries sharing one
+// timestamp tag carry it as sameMoment (surfaced linkage, not recomputed).
+// isBenignLogError tags the game's own harmless lines; benign rows stay
+// listed but leave every error tally.
+
+const CRASH_VICINITY_WINDOW = 100;
+
+// Leading [timestamp] tag of one parsed entry's raw text, or null.
+function entryTimestampTag(entry) {
+  const m = /^\s*(\[[^\]]*\])/.exec(String((entry && entry.text) || ''));
+  return m ? m[1] : null;
+}
+
+// The game's own harmless Database.log lines, matched case-insensitively
+// against the entry text. Returns { benign, why }: why is the one player
+// line the collapsed list shows. Anything else is not benign, never
+// attributed here (attribution stays with attributeErrorWithFallback).
+function isBenignLogError(entry) {
+  const hay = `${String((entry && entry.text) || '')}\n${String((entry && entry.message) || '')}`;
+  if (/rulersofthesahara/i.test(hay)) {
+    return { benign: true, why: 'the game\u2019s own Sahara content logs this on every load \u2014 it never breaks mods' };
+  }
+  if (/juliuscaesar/i.test(hay) && /districts|units/i.test(hay)) {
+    return { benign: true, why: 'the game\u2019s own Caesar pack logs this \u2014 it never breaks mods' };
+  }
+  if (/catherinedemedici_modifiers/i.test(hay)) {
+    return { benign: true, why: 'the game\u2019s own Catherine content logs this \u2014 it never breaks mods' };
+  }
+  if (/loc_clickout_[a-z0-9_]+/i.test(hay) && /\[localization\]/i.test(hay)) {
+    return { benign: true, why: 'the game\u2019s own menu text logs this \u2014 it never breaks mods' };
+  }
+  return { benign: false, why: null };
+}
+
+// How many parsed entries are benign (the tally drop: counted = all - this).
+function countBenignErrors(entries) {
+  return (entries || []).filter((e) => isBenignLogError(e).benign).length;
+}
+
+// Trailing-window grouping over parsed Database.log entries. totalLines is
+// the raw log line count (null falls back to the last entry's line, so the
+// window still ends at the last error). Groups sort by newest entry line
+// desc with the unattributed bucket pinned last (cfDiffGroups convention,
+// see ADR-004). Pure: inputs never mutated.
+function buildCrashVicinity(entries, loadings, folderMap, { totalLines = null, window = CRASH_VICINITY_WINDOW } = {}) {
+  const list = entries || [];
+  const lastLine = list.reduce((m, e) => Math.max(m, (e && e.line) || 0), 0);
+  const total = totalLines == null ? lastLine : totalLines;
+  const inWindow = list.filter((e) => e && e.line > total - window);
+  const tagCount = new Map();
+  for (const e of inWindow) {
+    const t = entryTimestampTag(e);
+    if (t) tagCount.set(t, (tagCount.get(t) || 0) + 1);
+  }
+  const rows = inWindow.map((e) => {
+    const fb = attributeErrorWithFallback(e, loadings, folderMap);
+    const tag = entryTimestampTag(e);
+    const benign = isBenignLogError(e);
+    return {
+      line: e.line,
+      text: e.text,
+      message: e.message,
+      fileHint: e.fileHint || null,
+      timestampMs: tag ? parseLogTimestampMs(tag) : null,
+      timestampTag: tag,
+      strength: fb.strength,
+      approximate: !!fb.approximate,
+      attribution: fb.attribution || null,
+      benign: benign.benign === true,
+      ...(benign.benign === true ? { benignWhy: benign.why } : {}),
+      sameMoment: tag && (tagCount.get(tag) || 0) > 1 ? tag : null,
+    };
+  });
+  const byMod = new Map();
+  for (const r of rows) {
+    const attr = r.attribution || {};
+    const key = attr.modId || ' unattributed';
+    if (!byMod.has(key)) byMod.set(key, { modId: attr.modId || null, modName: attr.modName || null, entries: [] });
+    byMod.get(key).entries.push(r);
+  }
+  const groups = [...byMod.values()].map((g) => ({
+    modId: g.modId,
+    modName: g.modName,
+    count: g.entries.length,
+    newestLine: Math.max(...g.entries.map((e) => e.line)),
+    entries: g.entries.sort((x, y) => y.line - x.line),
+  }));
+  groups.sort((a, b) => {
+    const au = a.modId ? 0 : 1;
+    const bu = b.modId ? 0 : 1;
+    if (au !== bu) return au - bu;
+    return b.newestLine - a.newestLine;
+  });
+  return {
+    window, totalLines: total, count: rows.length, groups,
+  };
+}
+
 // --differential fixture: two replay failures plus a three-line
 // Database.log-format text. The log carries bad-a's own replay error (one
 // agreement), stays silent about bad-b (one replay-only divergence), and
@@ -2306,6 +2408,10 @@ module.exports = {
   collectReplayErrors,
   differentialValidate,
   formatDifferential,
+  CRASH_VICINITY_WINDOW,
+  isBenignLogError,
+  countBenignErrors,
+  buildCrashVicinity,
   differentialFixtureLog,
   assertDifferential,
   REPLAY_ENVELOPE_REF,

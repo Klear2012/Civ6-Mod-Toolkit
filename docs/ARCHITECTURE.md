@@ -60,6 +60,11 @@ UTF-16 via `iconv-lite`. Never assume UTF-8 near game files.
   mod with its winner, or an honest *undefined* when no winner is decidable.
 - **Database.log differential** shows where the replay and the game agree
   and where each saw what the other missed.
+- **Crash vicinity** groups the trailing window of the game log by attributed
+  mod on the differential response (`crashVicinity`, newest first, unattributed
+  bucket last) as a lead into the full differential, not the verdict.
+- **Benign game-own rows** (known-harmless Firaxis log lines) are tagged on the
+  response, excluded from error tallies, and listed collapsed as the game's own.
 
 Behavior contracts: `openspec/specs/` (conflict-replay, shadowing-enumeration,
 log-pairing, load-order-edit, game-setup, mod-name-display, replay-text-tables).

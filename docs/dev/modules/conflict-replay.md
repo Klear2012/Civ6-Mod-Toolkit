@@ -19,7 +19,7 @@ path). Behavior contracts: `openspec/specs/conflict-replay/`,
 | Gates | `normGateId`, `gateContextOf`, `gateSetupKeysFor`, `gateIsAsserted`, `gateAssumedMatch`, `evalGateCondition`, `evaluateGate` | Criteria gating and assumed setup |
 | Provenance | `ensureProvenanceSchema`, `installProvenanceTriggers`, `setProvenanceWriter`, `readProvenanceWrites` | Winner/loser attribution per contested row and column |
 | Collisions | `fileLimitationFlags`, `buildCollisions`, `formatCollision`, `leadingVerb`, `formatZeroRows` | Per-file collision report |
-| Log differential | `parseDatabaseLog`, `resolveLogSourceMod`, `attributeLogSources`, `parseLogTimestampMs`, `parseModdingLog`, `normalizeDbMessage`, `dbMessagesMatch`, `collectReplayErrors`, `differentialValidate`, `formatDifferential`, `differentialFixtureLog`, `assertDifferential` | Where the replay and the game agree, and where each saw what the other missed |
+| Log differential | `parseDatabaseLog`, `resolveLogSourceMod`, `attributeLogSources`, `parseLogTimestampMs`, `parseModdingLog`, `normalizeDbMessage`, `dbMessagesMatch`, `collectReplayErrors`, `differentialValidate`, `formatDifferential`, `differentialFixtureLog`, `assertDifferential`, `buildCrashVicinity`, `isBenignLogError` | Where the replay and the game agree, and where each saw what the other missed |
 | Envelope | `REPLAY_ENVELOPE_REF`, `buildReplayEnvelope`, `formatReplayEnvelope`, `envelopeFixtureModSet` | Bounded replay envelope plus fixture |
 | Text tables | `TEXT_TABLE_NAMES`, `TEXT_TABLE_COLUMNS`, `cleanSqlIdent`, `isTextTableName`, `textTableMiss`, `textColumnMiss`, `uniqueMissTable`, `textColumnFallback`, `textSchemaSql`, `createTextSchemaCopy` | Localisation-table handling |
 | Replay | `stmtTargets`, `routeStatementTargets`, `preprocessFile`, `collectStatements`, `replayOrdered`, `holdLiveExclusiveForCopy`, `lockedCopyTrial` | Ordered statement replay; live-lock trial |
@@ -30,6 +30,10 @@ path). Behavior contracts: `openspec/specs/conflict-replay/`,
 2. Collect each mod's statements in load order (`collectStatements`).
 3. Replay them (`replayOrdered`) and read back provenance and collisions.
 4. Destroy the scratch dir (`destroyTempCopy`).
+
+## Crash vicinity and benign rows
+
+The differential response carries `crashVicinity` (trailing-window groups, newest first) for the Conflicts page "near the crash" section, and benign game-own rows are tagged so the page can leave them out of the tallies while still listing them. Both reuse the same attribution the differential already serves.
 
 ## What it does not do
 

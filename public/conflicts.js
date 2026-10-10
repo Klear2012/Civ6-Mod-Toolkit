@@ -356,14 +356,15 @@ function cfCalibrationFileHtml(label, mods) {
 }
 
 // The differential as one list: agreements, replay-only, and log-only rows
-// together, so grouping below sees every row.
+// together, so grouping below sees every row. Benign game-own rows are set
+// aside here: they render only in their own collapsed list, never as findings.
 function cfDiffRows() {
   const d = cfState.replay && cfState.replay.differential;
   if (!d || !d.available) return null;
   const rows = [];
-  for (const a of d.agreements || []) rows.push({ ...a, side: 'agree' });
-  for (const r of d.replayOnly || []) rows.push({ ...r, side: 'replay-only' });
-  for (const l of d.logOnly || []) rows.push({ ...l, side: 'log-only' });
+  for (const a of d.agreements || []) if (!a.benign) rows.push({ ...a, side: 'agree' });
+  for (const r of d.replayOnly || []) if (!r.benign) rows.push({ ...r, side: 'replay-only' });
+  for (const l of d.logOnly || []) if (!l.benign) rows.push({ ...l, side: 'log-only' });
   return rows;
 }
 
@@ -470,6 +471,55 @@ function cfDiffGroupHtml(g) {
     + `${g.findings.map(cfDiffRowHtml).join('')}</div>`;
 }
 
+// Known-benign Firaxis rows: the game's own harmless lines, tagged
+// server-side. A collapsed list by construction: counted nowhere, shown here
+// with the one player line saying why each is harmless.
+function cfBenignHtml(benign) {
+  const rows = benign || [];
+  if (!rows.length) return '';
+  const items = rows.map((r) => {
+    const what = r.logText || r.replayError || r.message || '';
+    const why = r.benignWhy || 'the game logs this on its own';
+    return '<div class="lo-row" title="Already set aside \u2014 nothing to fix here."><span class="lo-mod">Game log line ' + esc(n(r.logLine)) + ': ' + esc(what) + '</span>'
+      + '<span class="lo-detail">' + esc(why) + '.</span></div>';
+  }).join('');
+  return '<details class="lo-band"><summary><span class="lo-value">The game\u2019s own (harmless)</span>'
+    + '<span class="lo-bandnote">' + esc(n(rows.length)) + ' set aside</span></summary>' + items + '</details>';
+}
+
+// Crash vicinity: the trailing window of the game log grouped by attributed
+// mod, so a crashing player meets the last thing the game recorded first.
+// Collapsed by construction: crash context is a lead, not the verdict. The
+// unattributed group stays visible; benign rows render muted.
+function cfVicinityEntryHtml(e) {
+  const tag = e.benign
+    ? ' <span class="lo-tag" title="The game logs this on its own \u2014 already set aside, nothing to fix here.">game\u2019s own</span>'
+    : '';
+  const detail = e.sameMoment
+    ? 'logged at the same moment as a nearby line \u2014 read them together'
+    : (e.benignWhy || '');
+  return '<div class="lo-row" title="The last thing the game recorded \u2014 open the named file if there is one.">'
+    + '<span class="lo-mod">Line ' + esc(n(e.line)) + ': ' + esc(e.message || e.text) + '</span>' + tag
+    + (detail ? '<span class="lo-detail">' + esc(detail) + '.</span>' : '');
+}
+
+function cfVicinityGroupHtml(g) {
+  const head = g.modId
+    ? '<span class="lo-value">' + renderCivText(g.modName || g.modId) + '</span><span class="lo-bandnote">' + esc(n(g.count)) + ' near the crash</span>'
+    : '<span class="lo-value" title="These errors name no mod \u2014 read the statement text for clues, then check your mod files.">Mod unknown</span>'
+      + '<span class="lo-bandnote">' + esc(n(g.count)) + ' no mod could be named for</span>';
+  return '<div class="lo-band"><div class="lo-bandhead">' + head + '</div>'
+    + g.entries.map(cfVicinityEntryHtml).join('') + '</div>';
+}
+
+function cfCrashVicinityHtml(vic) {
+  if (!vic || !vic.groups || !vic.groups.length) return '';
+  const lines = vic.groups.reduce((s, g) => s + g.count, 0);
+  return '<details class="lo-band"><summary><span class="lo-value">Near the crash \u2014 the last ' + esc(n(vic.window)) + ' lines of the game log</span>'
+    + '<span class="lo-bandnote" title="The game writes its log in order and a crash ends it \u2014 the last lines are where the culprit cluster lives. Start here when the game crashes.">' + esc(n(lines)) + ' lines grouped</span></summary>'
+    + vic.groups.map(cfVicinityGroupHtml).join('') + '</details>';
+}
+
 // Differential section only, so the search box and the toggle re-render it
 // without touching the collisions or the gated-out lists.
 function cfRenderDiff() {
@@ -506,6 +556,8 @@ function cfRenderDiff() {
     if (hidden) bits.push(`${n(hidden)} unnamed finding${hidden === 1 ? '' : 's'} hidden`);
     note = bits.join(' · ');
   }
+  html = cfCrashVicinityHtml(diff.crashVicinity) + html;
+  html += cfBenignHtml(diff.benign);
   html += cfCalibrationHtml(d.calibration);
   $('cfReplayDiff').innerHTML = html;
   const noteEl = $('cfDiffNote');

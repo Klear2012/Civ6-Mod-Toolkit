@@ -932,3 +932,78 @@ describe('Test 15: load-overrides import/export controls sit beside Re-apply-all
       && /addEventListener\('gamestatus'/.test(lov));
   });
 });
+
+describe('Test 16: crash vicinity + benign sections (conflict-crash-vicinity)', () => {
+  const cfSrc16 = fs.readFileSync(path.join(PUB, 'conflicts.js'), 'utf8');
+  const escStub16 = (s) => String(s == null ? '' : s).replace(/[&<>"]/g, (c) => (
+    { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const renderStub16 = (s) => escStub16(String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ''));
+  const els16 = {};
+  const dollarStub16 = (id) => {
+    if (!els16[id]) els16[id] = { textContent: '', innerHTML: '', disabled: false, value: 'off', checked: false, addEventListener() {} };
+    return els16[id];
+  };
+  let cx16 = null;
+  let cxErr16 = '';
+  try {
+    cx16 = vm.createContext({ $: dollarStub16, pages: {}, n: (v) => (v == null ? '' : Number(v).toLocaleString()),
+      esc: escStub16, renderCivText: renderStub16,
+      stripCivText: (s) => String(s == null ? '' : s).replace(/\[([^\]]+)\]/g, ' ').replace(/\s+/g, ' ').trim(),
+      api: async () => ({ ok: true }), toast() {}, window: {} });
+    vm.runInContext(cfSrc16, cx16, { filename: 'conflicts.js' });
+  } catch (e) { cxErr16 = e.message; }
+  it('the conflicts script loads headless under stubs', () => {
+    assert.ok(cx16 !== null, cxErr16);
+  });
+  if (cx16) {
+    const run16 = (expr) => vm.runInContext(expr, cx16);
+    const VIC = '{ window: 100, totalLines: 500, groups: ['
+      + '{ modId: "m1", modName: "[COLOR_GREEN]Green Mod[ENDCOLOR]", count: 1, newestLine: 495,'
+      + ' entries: [{ line: 495, text: "boom", message: "UNIQUE failed", fileHint: null,'
+      + ' timestampMs: 495.001, timestampTag: "[495.001]", strength: "context-proven", approximate: false,'
+      + ' attribution: {}, benign: false, sameMoment: null }] },'
+      + '{ modId: null, modName: null, count: 1, newestLine: 490,'
+      + ' entries: [{ line: 490, text: "lost", message: "no such table", fileHint: null,'
+      + ' timestampMs: 490.001, timestampTag: "[490.001]", strength: "unattributed", approximate: false,'
+      + ' attribution: { kind: "unattributed" }, benign: false, sameMoment: null }] }] }';
+    it('vicinity renders collapsed with the window in the header', () => {
+      const h = run16(`cfCrashVicinityHtml(${VIC})`);
+      assert.ok(/^<details/.test(h) && /Near the crash/.test(h) && /100 lines/.test(h)
+        && /Green Mod/.test(h) && !/\[COLOR/i.test(h), h.slice(0, 220));
+    });
+    it('  the unattributed vicinity group stays visible', () => {
+      const h = run16(`cfCrashVicinityHtml(${VIC})`);
+      assert.ok(/Mod unknown/.test(h) && /Line 490/.test(h), h.slice(0, 400));
+    });
+    it('  empty vicinity renders nothing', () => {
+      assert.ok(run16('cfCrashVicinityHtml(null)') === ''
+        && run16('cfCrashVicinityHtml({ window: 100, totalLines: 0, groups: [] })') === '');
+    });
+    it('same-moment entries say to read them together', () => {
+      const e = run16('cfVicinityEntryHtml({ line: 7, message: "x", text: "x", benign: false, sameMoment: "[7.001]", benignWhy: null })');
+      assert.ok(/same moment/.test(e) && /Line 7/.test(e), e.slice(0, 200));
+    });
+    it('benign rows leave the findings groups', () => {
+      const legacy = run16('cfState.replay = {"differential":{"available":true,"agreements":[],"replayOnly":[],"logOnly":['
+        + '{"responsibleModId":"m1","responsibleModName":"Mod One","fileLabel":"A.xml","stmtIndex":null,'
+        + '"logLine":5,"logText":"real failure","strength":"hint-matched","approximate":false,"attribution":{}}]}};'
+        + ' cfDiffGroups().reduce((s,g)=>s+g.findings.length,0)');
+      assert.ok(legacy === 1, `legacy findings=${legacy}`);
+      const total = run16('cfState.replay = {"differential":{"available":true,"agreements":[],"replayOnly":[],"logOnly":['
+        + '{"responsibleModId":"m1","responsibleModName":"Mod One","fileLabel":"A.xml","stmtIndex":null,'
+        + '"logLine":5,"logText":"real failure","strength":"hint-matched","approximate":false,"attribution":{},"benign":false},'
+        + '{"responsibleModId":null,"fileLabel":"B.xml","stmtIndex":null,'
+        + '"logLine":6,"logText":"RulersOfTheSahara x","strength":"unattributed","approximate":false,'
+        + '"attribution":{},"benign":true,"benignWhy":"harmless"}]}};'
+        + ' cfDiffGroups().reduce((s,g)=>s+g.findings.length,0)');
+      assert.ok(total === 1, `findings=${total}`);
+    });
+    it('benign list renders collapsed with the why line', () => {
+      const b = run16('cfBenignHtml([{ logLine: 6, logText: "RulersOfTheSahara x", benignWhy: "the game\\u2019s own Sahara content logs this" }])');
+      assert.ok(/^<details/.test(b) && /harmless/.test(b) && /Sahara/.test(b) && /1 set aside/.test(b), b.slice(0, 220));
+    });
+    it('  empty benign renders nothing', () => {
+      assert.ok(run16('cfBenignHtml(null)') === '' && run16('cfBenignHtml([])') === '');
+    });
+  }
+});

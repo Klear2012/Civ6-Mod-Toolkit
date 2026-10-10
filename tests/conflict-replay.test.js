@@ -1,7 +1,7 @@
 'use strict';
 
 // tests/conflict-replay.test.js — node:test mirror of the conflict-replay
-// library (src/conflict-replay.js; 9 suites, 253 executed checks).
+// library (src/conflict-replay.js; 10 suites, 267 executed checks).
 //
 // Record-then-replay (Wave 3 phase4 pattern): node:test runs every describe
 // body before any it(), so the scratch-DB flows CANNOT live in describe
@@ -1375,6 +1375,84 @@ suite('--text-tables', () => {
 
   if (current.recs.every((r) => r.cond)) fs.rmSync(scratch, { recursive: true, force: true });
 });
+// ---- suite: --crash-vicinity (conflict-crash-vicinity tracks 1+2) ----
+
+suite('--crash-vicinity', () => {
+  const folderMap = {
+    workshop: { 1111111111: { modId: 'mod-alpha', name: 'Alpha Mod' } },
+    local: [{ folder: 'MyLocalMod', modId: 'mod-local', name: 'Local Mod' }],
+  };
+  const L = [];
+  L.push('[100.001] [Gameplay] ERROR: no such table: NoSuchOld'); // line 1: outside the window
+  for (let i = 2; i <= 105; i += 1) L.push(`[${(100 + i / 1000).toFixed(3)}] [Gameplay] Update ${i}...`);
+  L.push('[106.001] [Gameplay] ERROR: no such table: NoSuchLone'); // 106: unattributed
+  L.push('[107.001] [Gameplay] from file D:/Synthetic/workshop/content/289070/1111111111/Data/Alpha_A.xml'); // 107
+  L.push('[107.001] [Gameplay] ERROR: UNIQUE constraint failed: AlphaA.Id'); // 108: alpha
+  L.push('[107.001] [Gameplay] ERROR: UNIQUE constraint failed: AlphaB.Id'); // 109: alpha, same moment
+  L.push('[110.001] [Gameplay] ERROR: RulersOfTheSahara progress era set failed'); // 110: benign
+  L.push('[111.001] [Gameplay] ERROR: RulersOfTheSahara leader load warning'); // 111: benign
+  L.push('[112.001] [Gameplay] ERROR: JuliusCaesar Districts load warning'); // 112: benign
+  L.push('[113.001] [Gameplay] ERROR: CatherineDeMedici_Modifiers apply warning'); // 113: benign
+  L.push('[114.001] [Gameplay] ERROR: Missing [Localization] LOC_CLICKOUT_CLOSE Entry'); // 114: benign
+  L.push('[115.001] [Gameplay] ERROR: UNIQUE constraint failed: RealT.Id'); // 115: real
+  L.push('[116.001] [Gameplay] ERROR: no such table: NoSuchHinted -- file: hinted.sql statement 2'); // 116
+  L.push('[117.001] [Gameplay] from file C:/Games/Mods/MyLocalMod/Data/Beta_Traits.xml'); // 117
+  L.push('[117.001] [Gameplay] ERROR: UNIQUE constraint failed: Beta.Id'); // 118: local
+  const entries = cr.parseDatabaseLog(L.join('\n'));
+  check('fixture parses to twelve ERROR entries', entries.length === 12, `got ${entries.length}`);
+  const vic = cr.buildCrashVicinity(entries, [], folderMap, { totalLines: L.length });
+  check('error outside the 100-line window is excluded',
+    vic.count === 11 && vic.groups.every((g) => g.entries.every((e) => e.line > 1)),
+    `count=${vic.count}`);
+  check('window entries grouped by attributed mod',
+    (vic.groups.find((g) => g.modId === 'mod-alpha') || { count: -1 }).count === 2,
+    JSON.stringify(vic.groups.map((g) => `${g.modId}:${g.count}`)));
+  check('attributed groups sort newest-first',
+    vic.groups[0].modId === 'mod-local' && vic.groups[1].modId === 'mod-alpha',
+    vic.groups.map((g) => `${g.modId}@${g.newestLine}`).join(', '));
+  check('unattributed bucket stays visible and sorts last',
+    vic.groups.length === 3 && vic.groups[2].modId === null && vic.groups[2].count > 0,
+    JSON.stringify(vic.groups.map((g) => `${g.modId}:${g.count}`)));
+  check('entries sort line-desc inside the group',
+    (vic.groups.find((g) => g.modId === 'mod-alpha').entries.map((e) => e.line)).join(',') === '109,108');
+  const pair = vic.groups.find((g) => g.modId === 'mod-alpha').entries;
+  check('same-moment pair shares its tag, lone entries carry none',
+    pair.every((e) => e.sameMoment === '[107.001]')
+    && vic.groups[2].entries.every((e) => e.sameMoment === null),
+    JSON.stringify(pair.map((e) => e.sameMoment)));
+  const sample = pair[0];
+  check('entries carry timestampMs + line + text + strength + fileHint',
+    typeof sample.timestampMs === 'number' && typeof sample.line === 'number'
+    && typeof sample.text === 'string' && typeof sample.strength === 'string'
+    && 'fileHint' in sample,
+    JSON.stringify({ timestampMs: sample.timestampMs, strength: sample.strength }));
+  const empty = cr.buildCrashVicinity([], [], folderMap, { totalLines: 0 });
+  check('empty log yields no groups', empty.groups.length === 0 && empty.count === 0);
+  const benignHits = [
+    '[210.001] [Gameplay] ERROR: RulersOfTheSahara progress era set failed',
+    '[210.002] [Gameplay] ERROR: RulersOfTheSahara leader load warning',
+    '[210.003] [Gameplay] ERROR: JuliusCaesar Units art load warning',
+    '[210.004] [Gameplay] ERROR: CatherineDeMedici_Modifiers apply warning',
+    '[210.005] [Gameplay] ERROR: Missing [Localization] LOC_CLICKOUT_BACK Entry',
+  ].map((t) => cr.parseDatabaseLog(t)[0]);
+  check('each benign pattern matches (Sahara x2, Caesar, Catherine, clickout)',
+    benignHits.every((e) => cr.isBenignLogError(e).benign), JSON.stringify(benignHits.map((e) => e.message)));
+  check('benign rows name why in player words',
+    benignHits.every((e) => /never breaks mods/.test(cr.isBenignLogError(e).why || '')));
+  const real = [
+    '[211.001] [Gameplay] ERROR: UNIQUE constraint failed: RealT.Id',
+    '[211.002] [Gameplay] ERROR: no such table: NoSuchReal',
+  ].map((t) => cr.parseDatabaseLog(t)[0]);
+  check('non-matching real errors are unaffected',
+    real.every((e) => !cr.isBenignLogError(e).benign));
+  const benignCount = cr.countBenignErrors(entries);
+  check('tallies drop exactly by benign count',
+    benignCount === 5 && entries.length - benignCount === 7,
+    `benign=${benignCount} of ${entries.length}`);
+  check('benign window entries stay grouped with their flag',
+    vic.groups.flatMap((g) => g.entries).filter((e) => e.benign).length === 5);
+});
+
 for (const s of suites) {
   describe(s.name, () => {
     for (const rec of s.recs) {
