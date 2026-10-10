@@ -322,6 +322,6 @@ function getCacheDir() {
 
 module.exports = {
   getSources, getSavesDir, getModsDb, getLogsDir, getCacheDir,
-  myGamesRoot, localGamesRoot, toNativePath,
+  myGamesRoot, localGamesRoot, toNativePath, steamPathFromRegistry,
   overridesFile, overridesStatus, writeOverrides,
 };

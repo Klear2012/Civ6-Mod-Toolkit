@@ -31,6 +31,7 @@ const loTransfer = require('./loadorder-transfer');
 const shadowing = require('./shadowing');
 const packaging = require('./packaging');
 const conflictReplay = require('./conflict-replay');
+const playSave = require('./play-save');
 const { runConflictSelfcheck } = require('./server-selfcheck');
 
 const { version: VERSION } = require('../package.json');
@@ -95,6 +96,33 @@ function resolveConfigPath(p) {
   }
   const lower = full.toLowerCase();
   const inside = allowedConfigRoots().some((r) => lower === r || lower.startsWith(r + path.sep));
+  if (!inside) return null;
+  try {
+    if (!fs.statSync(full).isFile()) return null;
+  } catch (_) {
+    return null;
+  }
+  return full;
+}
+
+// Save paths the client sends back (play-from-save picker) are resolved
+// against the saves folders like config paths: a value pointing outside is
+// refused, and only .Civ6Save files resolve at all.
+function allowedSaveRoots() {
+  const roots = [paths.getSavesDir('single').root, paths.getSavesDir('multi').root];
+  return [...new Set(roots.map((r) => path.resolve(r).toLowerCase()))];
+}
+
+function resolveSavePath(p) {
+  if (typeof p !== 'string' || !/\.Civ6Save$/i.test(p)) return null;
+  let full = null;
+  try {
+    full = path.resolve(p);
+  } catch (_) {
+    return null;
+  }
+  const lower = full.toLowerCase();
+  const inside = allowedSaveRoots().some((r) => lower === r || lower.startsWith(r + path.sep));
   if (!inside) return null;
   try {
     if (!fs.statSync(full).isFile()) return null;
@@ -1742,6 +1770,52 @@ async function handleGetGame(req, res, url) {
   return send(res, 200, await gameStatus());
 }
 
+// Play from save: boot the game straight into a save through AppOptions'
+// PlayNowSave key. The list is read-only and works while Civ6 runs; both
+// boots refuse while it runs and restore AppOptions afterwards.
+async function handleGetPlaySaves(req, res, url) {
+  const savesMode = url.searchParams.get('saves') === 'multi' ? 'multi' : 'single';
+  const saves = paths.getSavesDir(savesMode);
+  return send(res, 200, {
+    savesRoot: saves.root,
+    savesExists: saves.exists,
+    savesMode: saves.mode,
+    savesCustom: saves.custom,
+    saves: saves.exists ? playSave.listSaves(saves.root) : [],
+  });
+}
+
+// One boot result, one status: refused-while-running and needs-mods-first
+// are conflicts, unknown saves are missing, a failed launch is a server
+// error, anything else is a bad request.
+function playSaveStatus(res, r) {
+  if (r.ok) return send(res, 200, r);
+  const status = r.code === 'civ6-running' || r.code === 'missing-mods' ? 409
+    : r.code === 'no-save' || r.code === 'no-saves' ? 404
+      : r.code === 'launch-failed' ? 500 : 400;
+  return send(res, status, r);
+}
+
+// POST /api/play-save/latest { mode?, variant?, proceedWithoutMods? } ->
+// boot the newest autosave with no picker (dx11/dx12 chosen per call).
+async function handlePostPlayLatest(req, res, url) {
+  const body = await readBody(req);
+  return playSaveStatus(res, await playSave.playLatest({
+    mode: body.mode, variant: body.variant, proceedWithoutMods: !!body.proceedWithoutMods,
+  }));
+}
+
+// POST /api/play-save/boot { path, variant?, proceedWithoutMods? } ->
+// boot the picked save after the required-mod preflight.
+async function handlePostPlayBoot(req, res, url) {
+  const body = await readBody(req);
+  const full = resolveSavePath(body.path);
+  if (!full) return send(res, 400, { error: 'invalid save path' });
+  return playSaveStatus(res, await playSave.bootSave(full, {
+    variant: body.variant, proceedWithoutMods: !!body.proceedWithoutMods,
+  }));
+}
+
 // GET /api/config?path=... -> enabled + available-to-add for one config
 async function handleGetConfig(req, res, url) {
   const full = resolveConfigPath(url.searchParams.get('path'));
@@ -1868,6 +1942,9 @@ const ROUTES = [
   { method: 'POST', match: '/api/modgroups/', kind: 'prefix', handler: handlePostModgroupsAction },
   { method: 'POST', match: '/api/ping', handler: handlePostPing },
   { method: 'GET', match: '/api/game', handler: handleGetGame },
+  { method: 'GET', match: '/api/play-save/saves', handler: handleGetPlaySaves },
+  { method: 'POST', match: '/api/play-save/latest', handler: handlePostPlayLatest },
+  { method: 'POST', match: '/api/play-save/boot', handler: handlePostPlayBoot },
   { method: 'GET', match: '/api/config', handler: handleGetConfig },
   { method: 'POST', match: '/api/paths', handler: handlePostPaths },
   { method: 'POST', match: '/api/save', handler: handlePostSave },
@@ -1990,6 +2067,11 @@ server.listen(PORT, HOST, () => {
   // mods, which replaces rows, and repairing an override against row ids that are
   // about to be replaced would be repairing the wrong thing.
   syncLoadOrderOverrides();
+
+  // A crashed boot leaves AppOptions pointing at its save: put the backup
+  // back now. No-op unless a previous run died mid-boot (it logs when it
+  // restores), the same way every other startup step carries on.
+  playSave.reconcileUnrestoredBoot();
 });
 }
 
