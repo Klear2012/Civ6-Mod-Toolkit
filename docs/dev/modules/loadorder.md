@@ -2,8 +2,7 @@
 
 What it is: the single place that computes mod load order and applies user
 overrides. Who calls it: `src/server.js` (pages + API), `src/loadorder-fit.js`
-(fit geometry — split out, see its header). Behavior contract:
-`openspec/specs/load-order-edit/spec.md` (global order, profile is a filter).
+(fit geometry — split out, see its header).
 
 ## Reference (exported surface, grouped)
 

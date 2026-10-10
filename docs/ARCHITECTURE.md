@@ -45,7 +45,7 @@ deleted at cutover after 1:1 cover was proven per file.
   not a separate order.
 - `load-order-overrides.json`, `mod-labels.json`, `game-setup.json`: per-user
   local files, never committed. Shapes are documented in
-  `docs/dev/modules/` and `docs/user/`.
+  `docs/dev/modules/`.
 
 ## Encoding
 
@@ -66,13 +66,10 @@ UTF-16 via `iconv-lite`. Never assume UTF-8 near game files.
 - **Benign game-own rows** (known-harmless Firaxis log lines) are tagged on the
   response, excluded from error tallies, and listed collapsed as the game's own.
 
-Behavior contracts: `openspec/specs/` (conflict-replay, shadowing-enumeration,
-log-pairing, load-order-edit, game-setup, mod-name-display, replay-text-tables).
-Page-level how-tos: `docs/user/`. Module internals: `docs/dev/modules/`.
+Module internals: `docs/dev/modules/`.
 
 ## For maintainers with the full checkout
 
-Change history (`openspec/changes/`), the planning index
-(`docs/TRACEABILITY.md`), and the decision log (`docs/decisions/`) are
-local-only and not in git. Public readers need nothing from them: behavior
-is in `openspec/specs/`, rationale summaries are in `docs/dev/`.
+Change history (`openspec/changes/`) and the planning index
+(`docs/TRACEABILITY.md`) are local-only and not in git. Public readers
+need nothing from them: rationale summaries are in `docs/dev/`.

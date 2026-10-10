@@ -3,8 +3,8 @@
 // Conflict-replay library: temp-copy lifecycle, ordered replay with per-file
 // SAVEPOINT abort emulation, preprocessing stages, criteria gating,
 // provenance, Database.log differential, envelope, live-lock trial,
-// assumed gates, and text-table replay. Required by both src/server.js (live
-// report path) and src/phase9-conflict-replay.js (the 9-suite proof wrapper).
+// assumed gates, and text-table replay. Required by src/server.js (live
+// report path).
 // Pure move from src/phase9-conflict-replay.js (wave4); behavior unchanged.
 
 const fs = require('fs');

@@ -4,8 +4,7 @@ What it is: the extracted replay engine — temp-copy lifecycle, ordered replay
 with per-file abort emulation, preprocessing stages, criteria gating,
 provenance, `Database.log` differential, envelope, live-lock trial, assumed
 gates, and text-table replay. Who calls it: `src/server.js` (the live report
-path). Behavior contracts: `openspec/specs/conflict-replay/`,
-`openspec/specs/log-pairing/`, `openspec/specs/replay-text-tables/`. See
+path). See
 `adr/ADR-009-extract-conflict-replay-library.md` and
 `adr/ADR-001-disposable-copy-replay.md`.
 
