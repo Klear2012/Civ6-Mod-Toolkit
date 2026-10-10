@@ -279,10 +279,17 @@ function getSources() {
   return sources;
 }
 
-function getSavesDir() {
+// The game keeps Single- and Multiplayer saves as siblings under Saves/.
+// `mode` picks which side to show ('multi' or anything else for Single, the
+// long-standing default). A custom `saves` override replaces both sides, so
+// it reports custom:true and the Single/Multi choice has nothing to switch.
+function getSavesDir(mode) {
   const { overrides: ov } = loadOverrides();
-  const dir = ov.saves || process.env.CIV6_SAVES || path.join(myGamesRoot(), 'Saves', 'Single');
-  return { root: dir, exists: existsDir(dir) };
+  const custom = ov.saves || process.env.CIV6_SAVES;
+  if (custom) return { root: custom, exists: existsDir(custom), custom: true, mode: 'custom' };
+  const side = String(mode || '').toLowerCase() === 'multi' ? 'Multi' : 'Single';
+  const dir = path.join(myGamesRoot(), 'Saves', side);
+  return { root: dir, exists: existsDir(dir), custom: false, mode: side.toLowerCase() };
 }
 
 // The game's mod database (holds which mods are enabled). Lives under

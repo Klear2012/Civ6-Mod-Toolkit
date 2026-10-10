@@ -103,6 +103,12 @@
       <span id="configMeta" class="meta"></span>
       <button id="deleteConfig" class="danger" disabled title="Delete this configuration file">Delete config…</button>
     </section>
+    <div class="saves-toggle" id="savesToggle">
+      <span class="toggle-label">Show saves from</span>
+      <label class="toggle" title="Show single-player game configurations"><input type="radio" name="savesMode" id="savesSingle" value="single" checked /> Single-player</label>
+      <label class="toggle" title="Show multiplayer game configurations"><input type="radio" name="savesMode" id="savesMulti" value="multi" /> Multiplayer</label>
+      <span id="savesNote" class="meta"></span>
+    </div>
     <p class="hint">Add or remove mods in an existing game configuration without recreating it.</p>
 
     <main id="editor" hidden>

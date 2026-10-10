@@ -13,6 +13,7 @@ const { execFile } = require('child_process');
 
 const paths = require('./paths');
 const cfg = require('./civ6cfg');
+const configscan = require('./configscan');
 const { scanMods, normId } = require('./modinfo');
 const inventory = require('./inventory');
 const editor = require('./editor');
@@ -67,20 +68,40 @@ function groupId(v) {
   return Number.isInteger(n) && n > 0 ? n : null;
 }
 
-function listConfigs() {
-  const saves = paths.getSavesDir();
-  const out = [];
-  if (saves.exists) {
-    for (const f of fs.readdirSync(saves.root)) {
-      if (!/\.Civ6Cfg$/i.test(f)) continue;
-      const full = path.join(saves.root, f);
-      let mods = null;
-      try { mods = cfg.listMods(fs.readFileSync(full)).mods.length; } catch (_) { /* skip */ }
-      out.push({ name: f, path: full, mods });
-    }
+function listConfigs(mode) {
+  const saves = paths.getSavesDir(mode);
+  // Name-matched scan only: mod counts used to readFileSync+parse every file
+  // here, which stalled the picker on big folders. Counts now come from the
+  // per-config endpoint when one is opened.
+  const configs = saves.exists ? configscan.scanConfigDir(saves.root) : [];
+  return { savesRoot: saves.root, savesExists: saves.exists, savesMode: saves.mode, savesCustom: saves.custom, configs };
+}
+
+// Config paths the client sends back (dropdown values, save/delete targets)
+// are resolved against the saves folders, never trusted blindly: a value
+// pointing outside is refused like a wrong extension.
+function allowedConfigRoots() {
+  const roots = [paths.getSavesDir('single').root, paths.getSavesDir('multi').root];
+  return [...new Set(roots.map((r) => path.resolve(r).toLowerCase()))];
+}
+
+function resolveConfigPath(p) {
+  if (!isConfigPath(p)) return null;
+  let full = null;
+  try {
+    full = path.resolve(p);
+  } catch (_) {
+    return null;
   }
-  out.sort((a, b) => a.name.localeCompare(b.name));
-  return { savesRoot: saves.root, savesExists: saves.exists, configs: out };
+  const lower = full.toLowerCase();
+  const inside = allowedConfigRoots().some((r) => lower === r || lower.startsWith(r + path.sep));
+  if (!inside) return null;
+  try {
+    if (!fs.statSync(full).isFile()) return null;
+  } catch (_) {
+    return null;
+  }
+  return full;
 }
 
 // Civ text markup - [COLOR_GREEN]…[ENDCOLOR], [ICON_*], [NEWLINE] - has no place
@@ -996,13 +1017,14 @@ async function conflictReplayReport(modsDbPath, { foreignKeys = false } = {}) {
 async function handleGetState(req, res, url) {
   const sources = paths.getSources();
   const installed = scanMods(sources);
+  const savesMode = url.searchParams.get('saves') === 'multi' ? 'multi' : 'single';
   return send(res, 200, {
     sources,
-    saves: paths.getSavesDir(),
+    saves: paths.getSavesDir(savesMode),
     logs: paths.getLogsDir(),
     cache: paths.getCacheDir(),
     pathsError: paths.overridesStatus().error,
-    ...listConfigs(),
+    ...listConfigs(savesMode),
     installed: installed.map((m) => ({ id: m.id, idNorm: m.idNorm, name: m.name, type: m.type })),
   });
 }
@@ -1722,13 +1744,13 @@ async function handleGetGame(req, res, url) {
 
 // GET /api/config?path=... -> enabled + available-to-add for one config
 async function handleGetConfig(req, res, url) {
-  const p = url.searchParams.get('path');
-  if (!isConfigPath(p) || !fs.existsSync(p)) return send(res, 400, { error: 'invalid config path' });
+  const full = resolveConfigPath(url.searchParams.get('path'));
+  if (!full) return send(res, 400, { error: 'invalid config path' });
   const installed = scanMods(paths.getSources());
   let view;
-  try { view = inventory.configView(fs.readFileSync(p), installed); }
+  try { view = inventory.configView(fs.readFileSync(full), installed); }
   catch (e) { return send(res, 500, { error: `parse failed: ${e.message}` }); }
-  return send(res, 200, { path: p, name: path.basename(p), ...view });
+  return send(res, 200, { path: full, name: path.basename(full), ...view });
 }
 
 // POST /api/paths -> persist overrides to civ6-paths.json
@@ -1752,7 +1774,8 @@ async function handlePostPaths(req, res, url) {
 async function handlePostSave(req, res, url) {
   const body = await readBody(req);
   const { path: p, add = [], remove = [], mode = 'overwrite', newName } = body;
-  if (!isConfigPath(p) || !fs.existsSync(p)) return send(res, 400, { error: 'invalid config path' });
+  const full = resolveConfigPath(p);
+  if (!full) return send(res, 400, { error: 'invalid config path' });
 
   const installed = scanMods(paths.getSources());
   const byNorm = new Map(installed.map((m) => [m.idNorm, m]));
@@ -1763,18 +1786,18 @@ async function handlePostSave(req, res, url) {
     adds.push({ id: m.id, name: m.name });
   }
 
-  let outPath = p;
+  let outPath = full;
   if (mode === 'new') {
     let base = String(newName || '').trim();
     base = path.basename(base); // no directory traversal
     if (!base) return send(res, 400, { error: 'newName required for "new" mode' });
     if (!/\.Civ6Cfg$/i.test(base)) base += '.Civ6Cfg';
-    outPath = path.join(path.dirname(p), base);
+    outPath = path.join(path.dirname(full), base);
     if (fs.existsSync(outPath)) return send(res, 409, { error: `file already exists: ${base}` });
   }
 
   try {
-    const summary = editor.saveConfig(p, {
+    const summary = editor.saveConfig(full, {
       adds,
       removes: remove,
       outPath,
@@ -1789,11 +1812,11 @@ async function handlePostSave(req, res, url) {
 // POST /api/delete -> back up then delete a config file
 async function handlePostDelete(req, res, url) {
   const body = await readBody(req);
-  const p = body.path;
-  if (!isConfigPath(p) || !fs.existsSync(p)) return send(res, 400, { error: 'invalid config path' });
+  const full = resolveConfigPath(body.path);
+  if (!full) return send(res, 400, { error: 'invalid config path' });
   try {
-    const backupPath = editor.backupFile(p); // recoverable delete
-    fs.unlinkSync(p);
+    const backupPath = editor.backupFile(full); // recoverable delete
+    fs.unlinkSync(full);
     return send(res, 200, { ok: true, backupPath });
   } catch (e) {
     return send(res, 500, { error: e.message });

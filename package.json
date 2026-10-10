@@ -19,8 +19,9 @@
     "test:packaging": "node --test tests/packaging.test.js",
     "phase9-selfcheck": "node src/server.js --selfcheck",
     "test:game-setup": "node --test tests/game-setup.test.js",
+    "test:config-scan": "node --test tests/config-scan.test.js",
     "phaseclean": "node src/phase-clean.js",
-    "check:release": "npm run test:profiles && npm run test:labels && npm run test:sorting && npm run test:loadorder && npm run test:scripts && npm run test:replay && npm run test:shadowing && npm run test:packaging && npm run phase9-selfcheck && npm run test:game-setup && npm run phaseclean && npm run lint:comments",
+    "check:release": "npm run test:profiles && npm run test:labels && npm run test:sorting && npm run test:loadorder && npm run test:scripts && npm run test:replay && npm run test:shadowing && npm run test:packaging && npm run phase9-selfcheck && npm run test:game-setup && npm run test:config-scan && npm run phaseclean && npm run lint:comments",
     "edit": "node src/edit-config.js",
     "lint:comments": "eslint src public"
   },

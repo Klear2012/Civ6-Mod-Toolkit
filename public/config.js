@@ -5,6 +5,7 @@
 const configPage = {
   stale: true,         // reload the config list next time the page is shown
   configPath: null,
+  savesMode: 'single', // which saves folder the picker lists
   view: null,          // { enabled:[], availableToAdd:[] }
   addSet: new Set(),   // idNorm to add
   removeSet: new Set(),// idNorm to remove
@@ -15,16 +16,42 @@ const state = configPage;
 // ---- load overall state ----------------------------------------------------
 
 async function loadState() {
-  const s = await api('/api/state');
+  const s = await api('/api/state?saves=' + state.savesMode);
   state.stale = false;
+  if (s.savesMode === 'single' || s.savesMode === 'multi') state.savesMode = s.savesMode;
 
+  // Single/Multi choice, or a plain-words note when a custom folder replaces both.
+  const custom = !!s.savesCustom;
+  const single = $('savesSingle'), multi = $('savesMulti');
+  if (single && multi) {
+    single.disabled = custom;
+    multi.disabled = custom;
+    if (!custom) {
+      if (state.savesMode === 'multi') multi.checked = true; else single.checked = true;
+    }
+  }
+  const note = $('savesNote');
+  if (note) note.textContent = custom ? 'Showing your own configurations folder (set on the Dashboard), so there is no Single/Multiplayer choice.' : '';
+
+  // The list carries names and locations only; the mod count for the open
+  // config comes from the per-config endpoint on selection (see loadConfig).
+  const folderWord = state.savesMode === 'multi' ? 'Multiplayer' : 'Single-player';
   const sel = $('configSelect');
   if (!s.configs.length) {
-    sel.innerHTML = '<option value="">No .Civ6Cfg files found in configurations folder</option>';
-    $('configMeta').textContent = s.savesExists ? '' : 'Configurations folder not found — set it on the Dashboard.';
+    sel.innerHTML = `<option value="">No configurations found in the ${folderWord} saves folder</option>`;
+    $('configMeta').textContent = s.savesExists ? '' : `${folderWord} saves folder not found — set it on the Dashboard.`;
   } else {
+    const seen = new Set();
+    const dupes = new Set();
+    for (const c of s.configs) {
+      if (seen.has(c.name)) dupes.add(c.name);
+      seen.add(c.name);
+    }
     sel.innerHTML = '<option value="">Choose a config…</option>' +
-      s.configs.map((c) => `<option value="${esc(c.path)}">${esc(c.name)}${c.mods != null ? ` — ${c.mods} mods` : ''}</option>`).join('');
+      s.configs.map((c) => {
+        const label = dupes.has(c.name) ? `${c.name} — ${c.rel}` : c.name;
+        return `<option value="${esc(c.path)}">${esc(label)}</option>`;
+      }).join('');
     $('configMeta').textContent = '';
   }
   // keep current selection if still present
@@ -113,6 +140,14 @@ function updateBar() {
 // ---- events ----------------------------------------------------------------
 
 $('configSelect').addEventListener('change', (e) => loadConfig(e.target.value).catch((err) => toast(err.message, 'err')));
+for (const id of ['savesSingle', 'savesMulti']) {
+  $(id).addEventListener('change', (e) => {
+    if (!e.target.checked) return;
+    state.savesMode = e.target.value;
+    state.configPath = null;
+    loadState().then(() => loadConfig('')).catch((err) => toast(err.message, 'err'));
+  });
+}
 $('availFilter').addEventListener('input', renderConfig);
 $('showDlc').addEventListener('change', (e) => { state.showDlc = e.target.checked; if (state.view) renderConfig(); });
 
