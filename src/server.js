@@ -32,6 +32,7 @@ const shadowing = require('./shadowing');
 const packaging = require('./packaging');
 const conflictReplay = require('./conflict-replay');
 const playSave = require('./play-save');
+const playModset = require('./play-modset');
 const { runConflictSelfcheck } = require('./server-selfcheck');
 
 const { version: VERSION } = require('../package.json');
@@ -1331,6 +1332,9 @@ async function handleGetDashboard(req, res, url) {
     // What the last sync did, so the page can say so rather than the user
     // having to remember.
     sync: lastSync,
+    // Whether a pre-boot mod set is waiting to be put back (play-from-save
+    // switched the enabled set and the game has not been restored since).
+    modsSnapshotPending: playModset.modsSnapshotPending(),
   });
 }
 
@@ -1776,12 +1780,25 @@ async function handleGetGame(req, res, url) {
 async function handleGetPlaySaves(req, res, url) {
   const savesMode = url.searchParams.get('saves') === 'multi' ? 'multi' : 'single';
   const saves = paths.getSavesDir(savesMode);
+  // What Continue boots: the newest autosave across both sides, with the
+  // turn and time the preview shows. One extra parse of one file; the rows
+  // above already parse every file in this side.
+  const bothRoots = [...new Set([paths.getSavesDir('single'), paths.getSavesDir('multi')]
+    .filter((s) => s.exists).map((s) => s.root))];
+  const newest = playSave.findLatestAutosave(bothRoots);
+  let latest = null;
+  if (newest) {
+    const info = playSave.readSaveInfo(newest.path);
+    latest = { name: newest.name, turn: info.turn, mtimeMs: newest.mtimeMs };
+  }
   return send(res, 200, {
     savesRoot: saves.root,
     savesExists: saves.exists,
     savesMode: saves.mode,
     savesCustom: saves.custom,
     saves: saves.exists ? playSave.listSaves(saves.root) : [],
+    latest,
+    skipIntroAvailable: playSave.hasPlayIntroVideo(),
   });
 }
 
@@ -1796,16 +1813,18 @@ function playSaveStatus(res, r) {
   return send(res, status, r);
 }
 
-// POST /api/play-save/latest { mode?, variant?, proceedWithoutMods? } ->
-// boot the newest autosave with no picker (dx11/dx12 chosen per call).
+// POST /api/play-save/latest { mode?, variant?, skipIntro?, syncMods? } ->
+// boot the newest autosave with no picker (dx11/dx12 chosen per call,
+// intro skip opt-in, save's-mods switch on unless syncMods is false).
 async function handlePostPlayLatest(req, res, url) {
   const body = await readBody(req);
   return playSaveStatus(res, await playSave.playLatest({
     mode: body.mode, variant: body.variant, proceedWithoutMods: !!body.proceedWithoutMods,
+    skipIntro: !!body.skipIntro, syncMods: body.syncMods !== false,
   }));
 }
 
-// POST /api/play-save/boot { path, variant?, proceedWithoutMods? } ->
+// POST /api/play-save/boot { path, variant?, skipIntro?, syncMods? } ->
 // boot the picked save after the required-mod preflight.
 async function handlePostPlayBoot(req, res, url) {
   const body = await readBody(req);
@@ -1813,7 +1832,19 @@ async function handlePostPlayBoot(req, res, url) {
   if (!full) return send(res, 400, { error: 'invalid save path' });
   return playSaveStatus(res, await playSave.bootSave(full, {
     variant: body.variant, proceedWithoutMods: !!body.proceedWithoutMods,
+    skipIntro: !!body.skipIntro, syncMods: body.syncMods !== false,
   }));
+}
+
+// POST /api/play-save/restore-mods {} -> put the pre-boot mod set back.
+// Refused while Civ6 runs; succeeds with nothing to do when the set is
+// already as snapshotted.
+async function handlePostPlayRestoreMods(req, res, url) {
+  const modsDb = paths.getModsDb();
+  if (!modsDb.exists) return send(res, 400, { error: 'Mod database not found.' });
+  const r = await playModset.restoreModSet(modsDb.path);
+  if (!r.ok) return send(res, r.code === 'civ6-running' ? 409 : 400, r);
+  return send(res, 200, r);
 }
 
 // GET /api/config?path=... -> enabled + available-to-add for one config
@@ -1945,6 +1976,7 @@ const ROUTES = [
   { method: 'GET', match: '/api/play-save/saves', handler: handleGetPlaySaves },
   { method: 'POST', match: '/api/play-save/latest', handler: handlePostPlayLatest },
   { method: 'POST', match: '/api/play-save/boot', handler: handlePostPlayBoot },
+  { method: 'POST', match: '/api/play-save/restore-mods', handler: handlePostPlayRestoreMods },
   { method: 'GET', match: '/api/config', handler: handleGetConfig },
   { method: 'POST', match: '/api/paths', handler: handlePostPaths },
   { method: 'POST', match: '/api/save', handler: handlePostSave },

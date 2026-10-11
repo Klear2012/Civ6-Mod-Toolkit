@@ -20,6 +20,7 @@ const paths = require('./paths');
 const { gameStatus } = require('./game');
 const { scanMods, normId } = require('./modinfo');
 const saveParser = require('./civ6-save-parser');
+const playModset = require('./play-modset');
 
 // Told to the user when a boot cannot start. Plain player words: what is
 // happening and what to do next, never a process name or an exit code.
@@ -477,6 +478,35 @@ function preflight(savePath, installed, opts = {}) {
   };
 }
 
+// ---- intro skip -----------------------------------------------------------
+
+const INTRO_KEY = 'PlayIntroVideo';
+
+/** Whether this install's AppOptions has the intro key at all. */
+function hasPlayIntroVideo(appOptions) {
+  const target = appOptions || appOptionsPath();
+  try {
+    return new RegExp(`^${INTRO_KEY}[ \\t]*.*$`, 'm').test(fs.readFileSync(target, 'utf8'));
+  } catch (_) {
+    return false;
+  }
+}
+
+/**
+ * Set the intro key to skipped (0) or leave the text untouched. Only the
+ * opt-in boot path calls this with true; a false never writes, so the
+ * intro is never silently enabled or touched behind the user's back.
+ */
+function setPlayIntroVideo(text, skip) {
+  if (!skip) return text;
+  const line = `${INTRO_KEY} 0`;
+  if (new RegExp(`^${INTRO_KEY}[ \\t]*.*$`, 'm').test(text)) {
+    return text.replace(new RegExp(`^${INTRO_KEY}[ \\t]*.*$`, 'm'), line);
+  }
+  const nl = text.includes('\r\n') ? '\r\n' : '\n';
+  return `${text}${text.endsWith('\n') ? '' : nl}${line}${nl}`;
+}
+
 // ---- game exe -------------------------------------------------------------
 
 const GAME_DIR_NAME = "Sid Meier's Civilization VI";
@@ -741,6 +771,32 @@ async function bootSave(savePath, opts = {}) {
     return { ok: false, code: 'missing-mods', warning: pre.warning, missing: pre.missing, save: savePath, turn: pre.turn };
   }
 
+  // Save's-mods switch (opt-in per call): snapshot the current enabled set
+  // and enable exactly what the save needs. Refuses with names before
+  // anything is written when a required mod is unreachable. Skipped when
+  // the caller plays anyway: proceeding means mods as-is, not switched.
+  let modsSwitched = null;
+  const undoOpts = { readStateFn: opts.readStateFn, applyChangesFn: opts.applyChangesFn, gameStatusFn: opts.gameStatusFn };
+  if (opts.syncMods && !opts.proceedWithoutMods) {
+    try {
+      modsSwitched = playModset.switchToSaveMods(opts.dbPath, pre.mods.map((m) => m.id), {
+        saveMods: pre.mods,
+        readStateFn: opts.readStateFn,
+        applyChangesFn: opts.applyChangesFn,
+      });
+    } catch (e) {
+      if (e && e.message === 'unswitchable') {
+        const unknown = e.unknown || [];
+        return { ok: false, code: 'missing-mods', warning: playModset.unswitchableWarning(unknown, pre.name), missing: unknown, save: savePath, turn: pre.turn };
+      }
+      return { ok: false, code: 'modswitch-failed', error: `The mods could not be switched for "${pre.name}". Nothing was changed - try again.`, save: savePath };
+    }
+  }
+  const didSwitch = !!(modsSwitched && modsSwitched.switched);
+  async function undoSwitch() {
+    if (didSwitch) await playModset.undoModSwitch(opts.dbPath, undoOpts);
+  }
+
   let exe = opts.exePath || process.env.CIV6_EXE || findGameExe(opts.variant);
   try {
     if (!exe || !fs.statSync(exe).isFile()) exe = null;
@@ -765,12 +821,14 @@ async function bootSave(savePath, opts = {}) {
     }
     if (taken) {
       restoreAppOptions(appOptions);
+      await undoSwitch();
       return { ok: false, code: 'staging-collision', error: stagingCollisionError(path.basename(savePath), plan.plantedCopy), save: savePath };
     }
     try {
       fs.copyFileSync(savePath, plan.dest, fs.constants.COPYFILE_EXCL);
     } catch (e) {
       restoreAppOptions(appOptions);
+      await undoSwitch();
       if (e && e.code === 'EEXIST') {
         return { ok: false, code: 'staging-collision', error: stagingCollisionError(path.basename(savePath), plan.plantedCopy), save: savePath };
       }
@@ -782,9 +840,15 @@ async function bootSave(savePath, opts = {}) {
     planted = toPlayNowSaveValue(savePath, opts);
   }
   writePlayNowSave(appOptions, planted);
+  // Opt-in only: skip the intro video for this boot, inside the same
+  // backup envelope (a false leaves the file untouched).
+  if (opts.skipIntro) {
+    fs.writeFileSync(appOptions, setPlayIntroVideo(fs.readFileSync(appOptions, 'utf8'), true));
+  }
 
   if (opts.dryRun || process.env.CIV6_NO_BOOT) {
     restoreAppOptions(appOptions);
+    await undoSwitch();
     return { ok: true, dryRun: true, save: savePath, planted, exe, turn: pre.turn, warning: pre.warning, restored: true };
   }
 
@@ -797,13 +861,16 @@ async function bootSave(savePath, opts = {}) {
   } catch (e) {
     launchError = e;
   } finally {
-    if (!launched) restoreAppOptions(appOptions);
+    if (!launched) {
+      restoreAppOptions(appOptions);
+      await undoSwitch();
+    }
   }
   if (!launched) {
     return { ok: false, code: 'launch-failed', error: launchError && launchError.message ? launchError.message : 'The game could not be started.' };
   }
   const done = await waitForGameThenRestore(appOptions, opts);
-  return { ok: true, save: savePath, planted, exe, turn: pre.turn, warning: pre.warning, restored: done.restored, deferred: !!done.deferred };
+  return { ok: true, save: savePath, planted, exe, turn: pre.turn, warning: pre.warning, restored: done.restored, deferred: !!done.deferred, modsSwitched: didSwitch ? { changed: modsSwitched.changed } : null };
 }
 
 /**
@@ -829,6 +896,8 @@ module.exports = {
   writePlayNowSave,
   readPlayNowSave,
   setPlayNowSave,
+  setPlayIntroVideo,
+  hasPlayIntroVideo,
   toPlayNowSaveValue,
   stagingPlanFor,
   sweepStaleStagingCopies,

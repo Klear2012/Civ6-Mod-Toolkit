@@ -627,5 +627,161 @@ describe('exe lookup and hard rules', () => {
     assert.ok(/\/api\/play-save\/saves/.test(src));
     assert.ok(/\/api\/play-save\/latest/.test(src));
     assert.ok(/\/api\/play-save\/boot/.test(src));
+    assert.ok(/\/api\/play-save\/restore-mods/.test(src));
+  });
+});
+
+describe('skip-intro opt-in', () => {
+  const INTRO_APP = path.join(TMP, 'AppOptions-intro.txt');
+  const WITH_KEY = ['EnableAsserts 1', 'PlayIntroVideo 1', ''].join('\n');
+  it('sets an existing key to skipped, nothing else moves', () => {
+    const after = playSave.setPlayIntroVideo(WITH_KEY, true);
+    assert.ok(/^PlayIntroVideo 0$/m.test(after));
+    assert.deepEqual(
+      after.split('\n').filter((l) => !/^PlayIntroVideo/.test(l)),
+      WITH_KEY.split('\n').filter((l) => !/^PlayIntroVideo/.test(l)));
+  });
+  it('appends the key when absent, and a false never writes', () => {
+    const noKey = 'EnableAsserts 1\n';
+    assert.ok(/^PlayIntroVideo 0$/m.test(playSave.setPlayIntroVideo(noKey, true)));
+    assert.equal(playSave.setPlayIntroVideo(WITH_KEY, false), WITH_KEY);
+  });
+  it('the probe answers whether this install has the key', () => {
+    fs.writeFileSync(INTRO_APP, WITH_KEY);
+    assert.equal(playSave.hasPlayIntroVideo(INTRO_APP), true);
+    fs.writeFileSync(INTRO_APP, 'EnableAsserts 1\n');
+    assert.equal(playSave.hasPlayIntroVideo(INTRO_APP), false);
+  });
+  it('a ticked boot plants the skip and restores it afterwards', async () => {
+    fs.writeFileSync(INTRO_APP, WITH_KEY);
+    const fakeExe = path.join(TMP, 'fake-game.exe');
+    fs.writeFileSync(fakeExe, 'exe');
+    const seen = {};
+    let calls = 0;
+    const save = path.join(TMP, 'saves-list', 'Newer.Civ6Save');
+    const r = await playSave.bootSave(save, {
+      appOptions: INTRO_APP,
+      installed: INSTALLED_ALL,
+      parseFn: stubParseTurnDispenser(),
+      skipIntro: true,
+      exePath: fakeExe,
+      gameStatusFn: () => Promise.resolve({ running: ++calls > 1, known: true, processes: [] }),
+      launcherFn: () => {
+        seen.intro = fs.readFileSync(INTRO_APP, 'utf8').match(/^PlayIntroVideo.*$/m)[0];
+        return Promise.resolve();
+      },
+      pollIntervalMs: 5,
+      loadConfirmedFn: () => Promise.resolve(true),
+      loadTimeoutMs: 1000,
+    });
+    assert.equal(r.ok, true);
+    assert.equal(seen.intro, 'PlayIntroVideo 0');
+    assert.equal(fs.readFileSync(INTRO_APP, 'utf8'), WITH_KEY);
+  });
+});
+
+describe('save-mods switch inside the boot', () => {
+  const playModset = require('../src/play-modset');
+  const SWDB = path.join(TMP, 'switch', 'Mods.sqlite');
+  before(() => { fs.mkdirSync(path.dirname(SWDB), { recursive: true }); });
+  const swSidecar = () => `${SWDB}.toolkit-modset`;
+  const swState = () => ({
+    ok: true,
+    mods: [
+      { modId: '02a8bdde-67ea-4d38-9540-26e685e3156e', idNorm: '02a8bdde-67ea-4d38-9540-26e685e3156e', name: 'Aztec', disabled: true },
+      { modId: '11111111-1111-1111-1111-111111111111', idNorm: '11111111-1111-1111-1111-111111111111', name: 'Terra', disabled: true },
+    ],
+  });
+  const bootOpts = (over = {}) => {
+    let polls = 0;
+    const flip = () => Promise.resolve({ running: ++polls > 1, known: true, processes: [] });
+    return {
+      appOptions: APP,
+      dbPath: SWDB,
+      installed: INSTALLED_ALL,
+      parseFn: stubParseTurnDispenser(),
+      readStateFn: swState,
+      applyChangesFn: (db, changes) => { (over.seen || {}).applied = changes; return { changed: changes.length }; },
+      gameStatusFn: over.gameStatusFn || flip,
+      exePath: path.join(TMP, 'fake-game.exe'),
+      launcherFn: () => Promise.resolve(),
+      pollIntervalMs: 5,
+      loadConfirmedFn: () => Promise.resolve(true),
+      loadTimeoutMs: 1000,
+      ...over,
+    };
+  };
+  it('switches to the save set and leaves the snapshot for after quit', async () => {
+    fs.writeFileSync(APP, APP_ORIGINAL);
+    try { fs.unlinkSync(swSidecar()); } catch (_) { /* absent */ }
+    const seen = {};
+    const r = await playSave.bootSave(path.join(TMP, 'saves-list', 'Newer.Civ6Save'), bootOpts({ seen, syncMods: true }));
+    assert.equal(r.ok, true);
+    assert.deepEqual(seen.applied, [
+      { modId: '02a8bdde-67ea-4d38-9540-26e685e3156e', enabled: true },
+      { modId: '11111111-1111-1111-1111-111111111111', enabled: true },
+    ]);
+    assert.equal(r.modsSwitched.changed, 2);
+    assert.equal(playModset.modsSnapshotPending(SWDB), true);
+    try { fs.unlinkSync(swSidecar()); } catch (_) { /* absent */ }
+    assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+  });
+  it('an unreachable required mod refuses with names, changing nothing', async () => {
+    fs.writeFileSync(APP, APP_ORIGINAL);
+    try { fs.unlinkSync(swSidecar()); } catch (_) { /* absent */ }
+    const seen = {};
+    const r = await playSave.bootSave(path.join(TMP, 'saves-list', 'Newer.Civ6Save'), bootOpts({
+      seen,
+      syncMods: true,
+      readStateFn: () => ({ ok: true, mods: [] }),
+    }));
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'missing-mods');
+    assert.ok(r.warning.includes('02a8bdde-67ea-4d38-9540-26e685e3156e'), r.warning);
+    assert.equal(seen.applied, undefined);
+    assert.equal(playModset.modsSnapshotPending(SWDB), false);
+    assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+  });
+  it('a failed launch undoes the switch it just made', async () => {
+    fs.writeFileSync(APP, APP_ORIGINAL);
+    try { fs.unlinkSync(swSidecar()); } catch (_) { /* absent */ }
+    const calls = [];
+    const flipped = () => ({
+      ok: true,
+      mods: [
+        { modId: '02a8bdde-67ea-4d38-9540-26e685e3156e', idNorm: '02a8bdde-67ea-4d38-9540-26e685e3156e', name: 'Aztec', disabled: false },
+        { modId: '11111111-1111-1111-1111-111111111111', idNorm: '11111111-1111-1111-1111-111111111111', name: 'Terra', disabled: false },
+      ],
+    });
+    const r = await playSave.bootSave(path.join(TMP, 'saves-list', 'Newer.Civ6Save'), bootOpts({
+      syncMods: true,
+      gameStatusFn: closedGame,
+      readStateFn: () => (calls.length ? flipped() : swState()),
+      applyChangesFn: (db, changes) => { calls.push(changes); return { changed: changes.length }; },
+      launcherFn: () => Promise.reject(new Error('spawn failed')),
+    }));
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'launch-failed');
+    assert.equal(calls.length, 2);
+    assert.equal(playModset.modsSnapshotPending(SWDB), false);
+    assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+  });
+});
+
+describe('dx variant naming', () => {
+  it('the dx11 boot names the dx11 exe when none is found', async () => {
+    fs.writeFileSync(APP, APP_ORIGINAL);
+    const r = await playSave.bootSave(path.join(TMP, 'saves-list', 'Newer.Civ6Save'), {
+      appOptions: APP,
+      installed: INSTALLED_ALL,
+      parseFn: stubParseTurnDispenser(),
+      gameStatusFn: closedGame,
+      variant: 'dx11',
+      exePath: path.join(TMP, 'no-such-exe.exe'),
+    });
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'no-exe');
+    assert.ok(r.error.includes('CivilizationVI.exe'), r.error);
+    assert.ok(!r.error.includes('DX12'), r.error);
   });
 });

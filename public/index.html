@@ -49,6 +49,45 @@
 
     <section class="panel">
       <div class="panel-head">
+        <h2>Play</h2>
+      </div>
+      <p class="hint">Start the game straight into a save. Your mods are switched to the save's set first — put them back afterwards.</p>
+      <div class="toolbar">
+        <button id="playContinue" type="button" title="Start the game straight into your latest autosave — switches your mods to the save's set first (you can put them back after you quit)">Continue</button>
+        <button id="playPickerBtn" type="button" class="secondary" title="Choose which save to start in — switches your mods to that save's set first">Load from save…</button>
+        <div class="seg" id="playDxSeg" title="Which game version to start — remembered for next time">
+          <button type="button" data-dx="dx11">DX11</button>
+          <button type="button" data-dx="dx12">DX12</button>
+        </div>
+        <label class="toggle" id="playSkipWrap" title="Skip the intro video this one time — your own setting is put back afterwards"><input type="checkbox" id="playSkipIntro" /> Skip intro</label>
+      </div>
+      <div class="meta" id="playPreview"></div>
+      <div class="meta" id="playSkipNote"></div>
+      <div class="meta" id="playProgress"></div>
+      <div id="playMissing"></div>
+      <div class="alert info" id="playRestoreBanner" hidden></div>
+    </section>
+
+    <dialog id="playDialog" class="dialog">
+      <button type="button" class="dialog-close" id="playDialogClose" title="Close">×</button>
+      <div id="playDialogBody">
+        <h3>Load from save</h3>
+        <div class="saves-toggle">
+          <span class="toggle-label">Show saves from</span>
+          <label class="toggle"><input type="radio" name="playSavesMode" id="playSavesSingle" value="single" checked /> Single-player</label>
+          <label class="toggle"><input type="radio" name="playSavesMode" id="playSavesMulti" value="multi" /> Multiplayer</label>
+        </div>
+        <label for="playSaveSelect">Save file</label>
+        <select id="playSaveSelect"><option value="">Loading…</option></select>
+        <div class="meta" id="playPickedMeta"></div>
+        <div class="toolbar">
+          <button id="playBoot" type="button" title="Start the game in this save — switches your mods to its set first (you can put them back after you quit)">Load this save</button>
+        </div>
+      </div>
+    </dialog>
+
+    <section class="panel">
+      <div class="panel-head">
         <h2>Folder setup</h2>
         <div class="panel-actions">
           <!-- Writes to the game's mod database, so it says so. -->
