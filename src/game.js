@@ -8,19 +8,32 @@ const { execFile } = require('child_process');
 // CivilizationVI.exe, CivilizationVI_DX12.exe, ...
 const GAME_EXE = /^civilizationvi(_dx12)?\.exe$/i;
 
-function gameStatus() {
+/** Game processes as { name, pid }; known is false when tasklist cannot answer. */
+function gameProcesses() {
   return new Promise((resolve) => {
-    if (process.platform !== 'win32') return resolve({ running: false, known: false, processes: [] });
+    if (process.platform !== 'win32') return resolve({ known: false, processes: [] });
     execFile('tasklist', ['/FO', 'CSV', '/NH'], { windowsHide: true, maxBuffer: 8 * 1024 * 1024 }, (err, out) => {
-      if (err) return resolve({ running: false, known: false, processes: [] });
-      const processes = [];
-      for (const line of out.split(/\r?\n/)) {
-        const name = (line.match(/^"([^"]+)"/) || [])[1];
-        if (name && GAME_EXE.test(name) && !processes.includes(name)) processes.push(name);
-      }
-      resolve({ running: processes.length > 0, known: true, processes });
+      if (err) return resolve({ known: false, processes: [] });
+      resolve({ known: true, processes: parseGameProcesses(out) });
     });
   });
 }
 
-module.exports = { gameStatus };
+/** Game rows of tasklist CSV output (`"Image","PID",...`). */
+function parseGameProcesses(csv) {
+  const processes = [];
+  for (const line of csv.split(/\r?\n/)) {
+    const m = line.match(/^"([^"]+)","(\d+)"/);
+    if (m && GAME_EXE.test(m[1])) processes.push({ name: m[1], pid: Number(m[2]) });
+  }
+  return processes;
+}
+
+function gameStatus() {
+  return gameProcesses().then(({ known, processes }) => {
+    const names = [...new Set(processes.map((p) => p.name))];
+    return { running: names.length > 0, known, processes: names };
+  });
+}
+
+module.exports = { gameStatus, gameProcesses, parseGameProcesses };

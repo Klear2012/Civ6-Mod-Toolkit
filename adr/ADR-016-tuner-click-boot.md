@@ -3,6 +3,7 @@
 ## Summary
 
 **Status:** Accepted
+**Superseded by:** ADR-017 (its "no OS clicks/keys" boundary clause only; the rest of this decision stands)
 **Date:** 2026-10-11
 **Scope:** play-from-save boot trigger and load verdict only — how bootSave starts the load and how it reads the result; nothing else gains a live-game trigger
 **Applies to:** `bootSave` in `src/play-save.js` only

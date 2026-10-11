@@ -22,6 +22,7 @@
     "test:config-scan": "node --test tests/config-scan.test.js",
     "test:play-save": "node --test tests/play-save.test.js",
     "test:tuner": "node --test tests/tuner.test.js",
+    "test:leader-escape": "node --test tests/leader-escape.test.js",
     "phaseclean": "node src/phase-clean.js",
     "check:release": "npm run test:profiles && npm run test:labels && npm run test:sorting && npm run test:loadorder && npm run test:scripts && npm run test:replay && npm run test:shadowing && npm run test:packaging && npm run test:tuner && npm run phase9-selfcheck && npm run test:game-setup && npm run test:config-scan && npm run test:play-save && npm run phaseclean && npm run lint:comments",
     "edit": "node src/edit-config.js",
