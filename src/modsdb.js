@@ -85,6 +85,12 @@ function usable(text) {
 // title other mods use when they reference it, else the raw value.
 const MODS_SQL = `
   SELECT m.ModId AS modId, s.Path AS path, gi.Disabled AS disabled,
+    -- Whether the mod is switched on in any profile but the active one. A
+    -- registered mod the game treats as on until explicitly switched off
+    -- (default-on) has no row in the active group, so the join above reads
+    -- null; this second lookup tells that state apart from genuinely absent.
+    (SELECT 1 FROM ModGroupItems gi2 WHERE gi2.ModRowId = m.ModRowId
+      AND gi2.ModGroupRowId <> ? AND gi2.Disabled = 0 LIMIT 1) AS onElsewhere,
     COALESCE(
       (SELECT Text FROM LocalizedText WHERE ModRowId = m.ModRowId AND Tag = p.Value AND Locale = 'en_US'),
       (SELECT Text FROM LocalizedText WHERE Tag = p.Value AND Locale = 'en_US' LIMIT 1),
@@ -138,8 +144,10 @@ const REL_SQL = `
   WHERE r.Relationship IN ('Dependency', 'Block')`;
 
 // -> { ok, error?, activeGroup, groups:[], mods:[{ modId, idNorm, name, path,
-//      source, disabled, teaser, hidden, requires:[{id,title}], blocks:[{id,title}] }] }
-// disabled is null when the mod has no row in the active group.
+//      source, disabled, defaultOn, teaser, hidden, requires:[{id,title}], blocks:[{id,title}] }] }
+// disabled is null when the mod has no row in the active group AND is switched
+// on nowhere else; rowless-in-active but on elsewhere reads as enabled
+// (disabled false, defaultOn true), which is how the game treats such mods.
 function readModState(dbPath) {
   if (!DatabaseSync) return { ok: false, error: loadError, groups: [], mods: [] };
   let db;
@@ -153,16 +161,18 @@ function readModState(dbPath) {
       const entry = { id: normId(r.otherId), title: prettyName(r.otherTitle || r.otherId) };
       rels.get(k)[r.rel === 'Dependency' ? 'requires' : 'blocks'].push(entry);
     }
-    const mods = db.prepare(MODS_SQL).all(active ? active.id : -1).map((r) => {
+    const mods = db.prepare(MODS_SQL).all(active ? active.id : -1, active ? active.id : -1).map((r) => {
       const idNorm = normId(r.modId);
       const rel = rels.get(idNorm) || { requires: [], blocks: [] };
+      const defaultOn = r.disabled == null && r.onElsewhere != null;
       return {
         modId: r.modId,
         idNorm,
         name: prettyName(r.name) || r.modId,
         path: r.path,
         source: classifyPath(r.path),
-        disabled: r.disabled == null ? null : !!r.disabled,
+        disabled: r.disabled == null ? (defaultOn ? false : null) : !!r.disabled,
+        defaultOn,
         lastChanged: lastWriteMs(r.lastWriteTicks),
         teaser: usable(r.teaser),
         hidden: r.showInBrowser === 'AlwaysHidden',
@@ -278,13 +288,16 @@ function applyChanges(dbPath, changes) {
     if (!active) throw new Error('the mod database has no mod group');
 
     const rowIds = new Map(db.prepare('SELECT ModId, ModRowId FROM Mods').all().map((r) => [normId(r.ModId), r.ModRowId]));
-    const update = db.prepare('UPDATE ModGroupItems SET Disabled = ? WHERE ModGroupRowId = ? AND ModRowId = ?');
+    // Upsert, not update: an explicit toggle from the rowless default-on state
+    // creates the row with the toggled value. On demand only - nothing here
+    // backfills rows for mods the user never touched.
+    const upsert = db.prepare(`INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)
+      ON CONFLICT (ModGroupRowId, ModRowId) DO UPDATE SET Disabled = excluded.Disabled`);
 
     for (const c of changes) {
       const rowId = rowIds.get(normId(c.modId));
       if (rowId == null) throw new Error(`mod ${c.modId} is not in the game's database yet (start the game once)`);
-      const n = update.run(c.enabled ? 0 : 1, active.id, rowId).changes;
-      if (n !== 1) throw new Error(`mod ${c.modId} is not part of the active mod group`);
+      upsert.run(active.id, rowId, c.enabled ? 0 : 1);
     }
 
     // Read back what we wrote.
@@ -987,7 +1000,9 @@ function registerMods(dbPath, files, enabled = true, groupId = null) {
 // The ONLY place that decides what "not added yet" means (see ADR-013: one
 // owner per shared truth); list, dashboard and startup sync all read it.
 // Pending is never-scanned or no-profile-row, both fixed by registerMods();
-// a mod off in the active profile is switchable, not pending. `state` may be
+// a mod off in the active profile is switchable, not pending, and so is a
+// default-on mod (rowless in use but on elsewhere): the toggle creates its
+// row, so there is nothing for a sync to fix. `state` may be
 // a readModState() result the caller already has, to skip a second read.
 function findUnregistered(dbPath, sources, state) {
   requireDb();
@@ -1004,7 +1019,7 @@ function findUnregistered(dbPath, sources, state) {
     if (d.source === 'base' || d.hidden || !/\.modinfo$/i.test(d.path)) continue;
     inDb.add(d.idNorm);
     const f = disk.get(d.idNorm);
-    if (f && d.disabled == null) {
+    if (f && d.disabled == null && !d.defaultOn) {
       pending.push({ id: d.modId, idNorm: d.idNorm, name: f.name, path: f.path, reason: 'no-profile-row' });
     }
   }

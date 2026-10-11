@@ -30,6 +30,7 @@ const fs = require('fs');
 const path = require('path');
 const { DatabaseSync } = require('node:sqlite');
 const db = require('../src/modsdb');
+const playModset = require('../src/play-modset');
 const { toNativePath } = require('../src/paths');
 const { makeTmp } = require('./helpers');
 
@@ -1090,6 +1091,198 @@ suite('Test 21: civ6-paths.json when it is broken', (check) => {
 
   if (wasFile === undefined) delete process.env.CIV6_PATHS_FILE;
   else process.env.CIV6_PATHS_FILE = wasFile;
+});
+
+// --- default-on: rowless in the active group but on elsewhere reads enabled ---
+//
+// Shape of the live diagnosis (active group with no row for DLCs the game
+// shows enabled): Babylon-class mods with Disabled=0 rows everywhere but the
+// active group, Poland/Ethiopia-class with an explicit active row, and
+// synthetic rowless-everywhere controls. A separate database, so the suites
+// above (which mutate DB_PATH in order) are unaffected.
+//
+// The save-mods switch assertions live here rather than in
+// tests/play-modset.test.js because that mirror belongs to the in-flight
+// play-from-save change; play-modset is only required, never modified.
+const DB2_PATH = path.join(TMP, 'Mods-defaulton.sqlite');
+const BABYLON = '8424840c-1111-4222-8333-444444444444';
+const BYZ = 'aaaaaaaa-1111-4222-8333-444444444444';
+const POLAND = 'bbbbbbbb-1111-4222-8333-444444444444';
+const ETHIOPIA = 'cccccccc-1111-4222-8333-444444444444';
+const OFFMOD = 'dddddddd-1111-4222-8333-444444444444';
+const OFFELSE = 'eeeeeeee-1111-4222-8333-444444444444';
+const NOWHERE = 'ffffffff-1111-4222-8333-444444444444';
+const raw2 = (sql, ...a) => {
+  const conn = new DatabaseSync(DB2_PATH, { readOnly: true });
+  try { return conn.prepare(sql).all(...a); } finally { conn.close(); }
+};
+
+function seedDefaultOn() {
+  const d = new DatabaseSync(DB2_PATH);
+  d.exec(`
+    CREATE TABLE ModGroups(ModGroupRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL,
+      Name TEXT NOT NULL, CanDelete BOOLEAN DEFAULT 1, Selected BOOLEAN DEFAULT 0, SortIndex INTEGER DEFAULT 100);
+    CREATE TABLE ModGroupItems(ModGroupRowId INTEGER NOT NULL, ModRowId INTEGER NOT NULL,
+      Disabled BOOLEAN DEFAULT 0, PRIMARY KEY(ModGroupRowId, ModRowId));
+    CREATE TABLE ScannedFiles(ScannedFileRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, Path TEXT UNIQUE, LastWriteTime INTEGER DEFAULT 0);
+    CREATE TABLE Mods(ModRowId INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, ScannedFileRowId INTEGER NOT NULL,
+      ModId TEXT NOT NULL, Version INTEGER NOT NULL);
+    CREATE TABLE ModProperties(ModRowId INTEGER NOT NULL, Name TEXT NOT NULL, Value TEXT NOT NULL,
+      PRIMARY KEY(ModRowId, Name));
+    CREATE TABLE LocalizedText(ModRowId INTEGER NOT NULL, Tag TEXT NOT NULL, Locale TEXT NOT NULL, Text TEXT NOT NULL,
+      PRIMARY KEY(ModRowId, Tag, Locale));
+    CREATE TABLE ModRelationships(ModRowId INTEGER NOT NULL, OtherModId TEXT NOT NULL, Relationship TEXT NOT NULL, OtherModTitle TEXT);`);
+  const mods = [
+    [BABYLON, 'Babylon Pack', '../../DLC/Babylon/Babylon.modinfo'],
+    [BYZ, 'Byzantium and Gaul Pack', '../../DLC/Byzantium/Byzantium.modinfo'],
+    [POLAND, 'Jadwiga (Poland)', '../../DLC/Poland/Poland.modinfo'],
+    [ETHIOPIA, 'Ethiopia Pack', '../../DLC/Ethiopia/Ethiopia.modinfo'],
+    [OFFMOD, 'Off Mod', '../../DLC/OffMod/OffMod.modinfo'],
+    [OFFELSE, 'Off Elsewhere Mod', '../../DLC/OffElse/OffElse.modinfo'],
+    [NOWHERE, 'Nowhere Mod', '../../DLC/Nowhere/Nowhere.modinfo'],
+  ];
+  mods.forEach(([id, name, p], i) => {
+    d.prepare('INSERT INTO ScannedFiles (Path) VALUES (?)').run(p);
+    d.prepare('INSERT INTO Mods (ScannedFileRowId, ModId, Version) VALUES (?, ?, 1)').run(i + 1, id);
+    d.prepare('INSERT INTO ModProperties (ModRowId, Name, Value) VALUES (?, ?, ?)').run(i + 1, 'Name', name);
+  });
+  d.exec(`INSERT INTO ModGroups (Name, CanDelete, Selected, SortIndex) VALUES
+    ('LOC_MODS_GROUP_DEFAULT_NAME', 0, 0, 0), ('Old profile', 1, 0, 100),
+    ('Other profile', 1, 0, 100), ('phase 2', 1, 1, 100)`);
+  const rowIdOf = (id) => mods.findIndex(([m]) => m === id) + 1;
+  const item = d.prepare('INSERT INTO ModGroupItems (ModGroupRowId, ModRowId, Disabled) VALUES (?, ?, ?)');
+  for (const g of [1, 2, 3]) item.run(g, rowIdOf(BABYLON), 0);
+  for (const g of [1, 2]) item.run(g, rowIdOf(BYZ), 0);
+  item.run(1, rowIdOf(POLAND), 0);
+  item.run(4, rowIdOf(POLAND), 0);
+  item.run(4, rowIdOf(ETHIOPIA), 0);
+  item.run(4, rowIdOf(OFFMOD), 1);
+  item.run(1, rowIdOf(OFFMOD), 0);
+  item.run(1, rowIdOf(OFFELSE), 1);
+  d.close();
+}
+seedDefaultOn();
+const byId2 = () => new Map(db.readModState(DB2_PATH).mods.map((m) => [m.modId, m]));
+
+suite('Test 22: rowless-in-active but on elsewhere reads as enabled', (check) => {
+  const st = db.readModState(DB2_PATH);
+  check('read ok, active group is phase 2', st.ok && st.activeGroup && st.activeGroup.name === 'phase 2',
+    st.ok ? String(st.activeGroup && st.activeGroup.name) : st.error);
+  const byId = byId2();
+  const babylon = byId.get(BABYLON);
+  check('Babylon-class reads enabled, marked default-on',
+    babylon && babylon.disabled === false && babylon.defaultOn === true,
+    JSON.stringify({ disabled: babylon && babylon.disabled, defaultOn: babylon && babylon.defaultOn }));
+  const byz = byId.get(BYZ);
+  check('same shape reads the same way',
+    byz && byz.disabled === false && byz.defaultOn === true, String(byz && byz.disabled));
+  for (const [id, label] of [[POLAND, 'Poland'], [ETHIOPIA, 'Ethiopia']]) {
+    const m = byId.get(id);
+    check(`${label}-class (explicit active row) outcome unchanged, unmarked`,
+      m && m.disabled === false && m.defaultOn === false, String(m && m.disabled));
+  }
+  const off = byId.get(OFFMOD);
+  check('explicitly off stays off', off && off.disabled === true && off.defaultOn === false,
+    String(off && off.disabled));
+  const offElse = byId.get(OFFELSE);
+  check('rowless with only disabled rows elsewhere stays unavailable',
+    offElse && offElse.disabled === null && offElse.defaultOn === false, String(offElse && offElse.disabled));
+  const nowhere = byId.get(NOWHERE);
+  check('rowless everywhere stays unavailable',
+    nowhere && nowhere.disabled === null && nowhere.defaultOn === false, String(nowhere && nowhere.disabled));
+  // The two one-line mappings the browser and the toggle guard branch on
+  // (src/server.js:175 and public/mods.js:57-58): data-level proof the UI
+  // renders default-on DLCs as enabled and toggleable, with no wording change.
+  const serverEnabled = (dd) => (dd.disabled == null ? null : !dd.disabled);
+  check('server mapping gives Babylon enabled, nowhere null',
+    serverEnabled(babylon) === true && serverEnabled(nowhere) === null);
+  const canToggle = (scanned, enabled) => scanned && enabled != null;
+  check('toggle gate opens for Babylon, stays shut for nowhere',
+    canToggle(true, serverEnabled(babylon)) === true && canToggle(true, serverEnabled(nowhere)) === false);
+});
+
+suite('Test 23: toggling from rowless creates exactly one row', (check) => {
+  check('Babylon starts with no row in the active group',
+    raw2('SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId WHERE i.ModGroupRowId = 4 AND lower(m.ModId) = ?', BABYLON)[0].n === 0);
+  db.applyChanges(DB2_PATH, [{ modId: BABYLON, enabled: false }]);
+  const rows = raw2('SELECT Disabled d FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId WHERE i.ModGroupRowId = 4 AND lower(m.ModId) = ?', BABYLON);
+  check('one row created, switched off', rows.length === 1 && rows[0].d === 1, JSON.stringify(rows));
+  const total = raw2('SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId WHERE lower(m.ModId) = ?', BABYLON)[0].n;
+  check('nothing else touched', total === 4, `rows=${total}`);
+  const seen = byId2().get(BABYLON);
+  check('reads as an explicit off, no longer default-on',
+    seen.disabled === true && seen.defaultOn === false, String(seen.disabled));
+  db.applyChanges(DB2_PATH, [{ modId: BABYLON, enabled: true }]);
+  const back = raw2('SELECT Disabled d FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId WHERE i.ModGroupRowId = 4 AND lower(m.ModId) = ?', BABYLON);
+  check('toggling back on reuses the row, still exactly one', back.length === 1 && back[0].d === 0, JSON.stringify(back));
+  check('unknown mods still refuse', fails(() => db.applyChanges(DB2_PATH, [{ modId: 'no-such-mod', enabled: true }])));
+  const polBefore = raw2('SELECT count(*) n FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId WHERE lower(m.ModId) = ?', POLAND)[0].n;
+  db.applyChanges(DB2_PATH, [{ modId: POLAND, enabled: false }]);
+  const polRows = raw2('SELECT Disabled d FROM ModGroupItems i JOIN Mods m ON m.ModRowId = i.ModRowId WHERE lower(m.ModId) = ? ORDER BY i.ModGroupRowId', POLAND);
+  check('explicit-row toggle still updates in place, no row added',
+    polRows.length === polBefore && polRows[polRows.length - 1].d === 1, JSON.stringify(polRows));
+  db.applyChanges(DB2_PATH, [{ modId: POLAND, enabled: true }]);
+  check('explicit-row toggle back on', byId2().get(POLAND).disabled === false);
+});
+
+suite('Test 24: the save-mods switch shares the same have-definition', (check) => {
+  // Test 23 gave Babylon an explicit row; put the diagnosed shape back first.
+  const del = new DatabaseSync(DB2_PATH);
+  try {
+    del.prepare('DELETE FROM ModGroupItems WHERE ModGroupRowId = 4 AND ModRowId = (SELECT ModRowId FROM Mods WHERE lower(ModId) = ?)').run(BABYLON);
+  } finally { del.close(); }
+  const reshaped = byId2().get(BABYLON);
+  check('Babylon is rowless-but-on again', reshaped.disabled === false && reshaped.defaultOn === true,
+    String(reshaped && reshaped.disabled));
+  // Save requires the Babylon-class DLC plus Poland: previously this refused
+  // naming the rowless DLC; now the same readModState the mod list uses says
+  // it is on, so there is nothing to warn about.
+  const applied = [];
+  const r = playModset.switchToSaveMods(DB2_PATH, [BABYLON, POLAND], {
+    saveMods: [{ id: BABYLON, title: 'Babylon Pack' }, { id: POLAND, title: 'Jadwiga (Poland)' }],
+    applyChangesFn: (base, changes) => { applied.push(...changes); return { changed: changes.length }; },
+  });
+  check('no unswitchable refusal for default-on DLCs', r.switched === true, JSON.stringify(r));
+  const got = applied.map((c) => `${c.modId}=${c.enabled}`).sort();
+  const want = [`${BYZ}=false`, `${ETHIOPIA}=false`].sort();
+  check('only the other on-mods flip off', JSON.stringify(got) === JSON.stringify(want), JSON.stringify(got));
+  let err = null;
+  try {
+    playModset.switchToSaveMods(DB2_PATH, [NOWHERE], {
+      saveMods: [{ id: NOWHERE, title: 'Nowhere Mod' }],
+      applyChangesFn: () => ({ changed: 0 }),
+    });
+  } catch (e) { err = e; }
+  check('genuinely unavailable mods still refuse with names',
+    err && err.message === 'unswitchable' && err.unknown.length === 1 && err.unknown[0].id === NOWHERE,
+    err ? err.message : 'no refusal');
+  const snap = playModset.snapshotModSet(DB2_PATH);
+  const prev = new Map(snap.previous.map((p) => [p.modId, p.enabled]));
+  check('the snapshot keeps default-on mods as on', prev.get(BABYLON) === true, String(prev.get(BABYLON)));
+  try { fs.unlinkSync(`${DB2_PATH}.toolkit-modset`); } catch (_) { /* recreated per switch */ }
+});
+
+suite('Test 25: default-on mods are not sync-pending', (check) => {
+  const diskRoot = path.join(TMP, 'defaulton-disk');
+  const writeDisk = (dir, id, name) => {
+    fs.mkdirSync(path.join(diskRoot, dir), { recursive: true });
+    fs.writeFileSync(path.join(diskRoot, dir, `${dir}.modinfo`),
+      `<Mod id="${id}" version="1"><Properties><Name>${name}</Name></Properties></Mod>`);
+  };
+  writeDisk('BabylonDisk', BABYLON, 'Babylon Pack');
+  writeDisk('OffElseDisk', OFFELSE, 'Off Elsewhere Mod');
+  const FRESH = '99999999-0000-4111-8222-333333333333';
+  writeDisk('FreshDisk', FRESH, 'Fresh Mod');
+  const sources = [{ root: diskRoot, exists: true, type: 'local' }];
+  for (const [label, st] of [['fresh read', null], ['shared read', db.readModState(DB2_PATH)]]) {
+    const todo = st ? db.findUnregistered(DB2_PATH, sources, st) : db.findUnregistered(DB2_PATH, sources);
+    const ids = new Map(todo.pending.map((p) => [p.idNorm, p.reason]));
+    check(`${label}: default-on DLC is not pending`, !ids.has(BABYLON));
+    check(`${label}: off-elsewhere rowless mod still wants a sync row`,
+      ids.get(OFFELSE) === 'no-profile-row', String(ids.get(OFFELSE)));
+    check(`${label}: unscanned disk mod is still found`,
+      ids.get(FRESH) === 'never-scanned', String(ids.get(FRESH)));
+  }
 });
 
 // --- replay the recordings as the it phase (nothing mutates here) ---
