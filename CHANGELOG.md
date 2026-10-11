@@ -14,10 +14,18 @@ Versions are tagged, and each tag produces a Windows zip on the
 
 ### Added
 
+### Fixed
+
+## v1.9.3 — 11 October 2026
+
+### Added
+
 - The Conflicts differential gains a "near the crash" section grouping the last stretch of the game log by responsible mod, and lists the game's own known-harmless lines separately instead of counting them as errors. No behavior change to game writes.
 - The tuner bridge talks to the running game over its FireTuner port: reads run in the GameCore context and writes run through the InGame context where the game itself accepts or rejects each action, plus a thin `node src/tuner.js "<lua>"` command printing JSON on the same path. Proven live against a real game; no behavior change to existing features.
 
 ### Fixed
+
+- Official DLC and similar default-on mods with no row in the active profile now read as enabled instead of unavailable, and switching one from that state creates its profile row on demand.
 
 ## v1.9.2 — 10 October 2026
 
