@@ -21,6 +21,8 @@ const { gameStatus } = require('./game');
 const { scanMods, normId } = require('./modinfo');
 const saveParser = require('./civ6-save-parser');
 const playModset = require('./play-modset');
+const tuner = require('./tuner');
+const leaderScreen = require('./leader-escape');
 
 // Told to the user when a boot cannot start. Plain player words: what is
 // happening and what to do next, never a process name or an exit code.
@@ -652,11 +654,12 @@ function stagingPlanFor(savePath, opts = {}) {
 }
 
 /**
- * Whether the logs confirm the save loaded. True on a fresh join marker;
- * never throws.
+ * Log folders the load verdict reads. Factored once so the boolean probe
+ * and the three-way check below agree on the roots. logsDirs overrides
+ * the discovery outright so tests stay hermetic (see ADR-006).
  */
-function defaultLoadConfirmed(opts = {}) {
-  const sinceMs = opts.loadSinceMs || 0;
+function candidateLogsDirs(opts = {}) {
+  if (Array.isArray(opts.logsDirs)) return [...new Set(opts.logsDirs.filter(Boolean))];
   const dirs = [];
   if (opts.logsDir) dirs.push(opts.logsDir);
   if (process.env.CIV6_LOGS_DIR) dirs.unshift(process.env.CIV6_LOGS_DIR);
@@ -678,24 +681,166 @@ function defaultLoadConfirmed(opts = {}) {
   } catch (_) {
     /* ignore */
   }
-  const checks = [
-    ['net_message_debug.log', /MultiplayerJoinGameComplete/],
-    ['LoadGameViewState.log', /GAMECORE_UNSERIALIZE_GAMESTATE took/],
-    ['Lua.log', /OnLoadGameViewStateDone/],
-  ];
-  for (const dir of [...new Set(dirs.filter(Boolean))]) {
-    for (const [name, re] of checks) {
-      const fp = path.join(dir, name);
-      try {
-        const st = fs.statSync(fp);
-        if (sinceMs && st.mtimeMs < sinceMs) continue;
-        if (re.test(fs.readFileSync(fp, 'utf8'))) return true;
-      } catch (_) {
-        /* missing log */
-      }
+  return [...new Set(dirs.filter(Boolean))];
+}
+
+// Fresh-join markers proving the save loaded: a fresh marker is the only
+// verdict the restore trusts (see ADR-004).
+const LOAD_POSITIVE_CHECKS = [
+  ['net_message_debug.log', /MultiplayerJoinGameComplete/],
+  ['LoadGameViewState.log', /GAMECORE_UNSERIALIZE_GAMESTATE took/],
+  ['Lua.log', /OnLoadGameViewStateDone/],
+];
+
+// The instant-reject line: the game leaves the loading screen without
+// loading anything, so no content marker ever follows it.
+const LOAD_REJECT_FILE = 'net_message_debug.log';
+const LOAD_REJECT_RE = /LoadGameViewState leaving[^\r\n]*early exit of the game state/;
+
+/**
+ * Whole text of one log when rewritten since sinceMs, else null. A stale
+ * file belongs to an earlier session and never counts for this boot.
+ */
+function readFreshLog(dir, name, sinceMs) {
+  try {
+    const fp = path.join(dir, name);
+    if (sinceMs && fs.statSync(fp).mtimeMs < sinceMs) return null;
+    return fs.readFileSync(fp, 'utf8');
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
+ * Whether the logs confirm the save loaded. True on a fresh join marker;
+ * never throws.
+ */
+function defaultLoadConfirmed(opts = {}) {
+  const sinceMs = opts.loadSinceMs || 0;
+  for (const dir of candidateLogsDirs(opts)) {
+    for (const [name, re] of LOAD_POSITIVE_CHECKS) {
+      const text = readFreshLog(dir, name, sinceMs);
+      if (text !== null && re.test(text)) return true;
     }
   }
   return false;
+}
+
+/**
+ * Three-way load verdict over the same logs the boolean probe reads.
+ * Loaded wins first: the reject signature holds only with zero content
+ * markers, so any fresh join marker means the save is in.
+ *
+ * A fresh early-exit line with no marker means the game refused the load,
+ * and the matching line is quoted as the reason. Anything else is unknown,
+ * and the caller keeps polling until its timeout. Never throws.
+ */
+function checkLoadState(opts = {}) {
+  const sinceMs = opts.loadSinceMs || 0;
+  const dirs = candidateLogsDirs(opts);
+  for (const dir of dirs) {
+    for (const [name, re] of LOAD_POSITIVE_CHECKS) {
+      const text = readFreshLog(dir, name, sinceMs);
+      if (text !== null && re.test(text)) return { state: 'loaded' };
+    }
+  }
+  for (const dir of dirs) {
+    const text = readFreshLog(dir, LOAD_REJECT_FILE, sinceMs);
+    if (text === null) continue;
+    const hit = text.split(/\r?\n/).find((line) => LOAD_REJECT_RE.test(line));
+    if (hit) return { state: 'failed', reason: hit.trim() };
+  }
+  return { state: 'unknown' };
+}
+
+/**
+ * The injected load probe may answer boolean (the older stub shape) or
+ * three-way; both feed the same verify loop. Anything unrecognised polls
+ * on as unknown rather than failing the boot on a probe bug.
+ */
+function normalizeLoadState(value) {
+  if (value && typeof value === 'object' && typeof value.state === 'string') {
+    if (value.state === 'loaded') return { state: 'loaded' };
+    if (value.state === 'failed') return { state: 'failed', reason: value.reason || null };
+    return { state: 'unknown' };
+  }
+  return { state: value ? 'loaded' : 'unknown' };
+}
+
+// ---- tuner click ------------------------------------------------------------
+
+// Menu transition the planted save loads through: fired once over the tuner
+// when the main menu is up, so the boot needs zero mouse clicks.
+const TUNER_MENU_LUA = 'OnStateTransition("MainMenu")';
+
+// Menu wait: repoll period and total cap for the handshake to report the
+// menu. Past the cap the boot falls back to a manual click, never fails.
+const TUNER_MENU_POLL_MS = 2000;
+const TUNER_MENU_TIMEOUT_MS = 90000;
+
+// Plain-words fallback: what happened and the one click that finishes it.
+const NEEDS_MANUAL_CLICK = 'The save did not start by itself. The game is open at the menu — click Play and the save will load.';
+
+/**
+ * Whether a handshake describes the reduced main menu: the state list
+ * names MainMenu while no game is loaded (both execution states absent).
+ */
+function tunerMenuReady(handle) {
+  if (!handle || !Array.isArray(handle.states)) return false;
+  const names = handle.states.map((s) => s && s.name);
+  return names.includes('MainMenu') && handle.gamecoreIndex == null && handle.ingameIndex == null;
+}
+
+/**
+ * Fire the menu transition once the tuner reports the menu. Resolves
+ * issued on the single call, else with a plain-words needsManualClick
+ * reason when the menu never becomes ready (or the call itself fails):
+ * the caller leaves the menu up and the user clicks Play.
+ *
+ * Never throws and never clicks anything itself. The option hooks
+ * (openBridgeFn, executeFn, closeBridgeFn, sleeper, menuPollIntervalMs,
+ * menuTimeoutMs) keep tests off the live port (see ADR-015).
+ */
+async function defaultTunerClick(opts = {}) {
+  const openBridge = opts.openBridgeFn || tuner.openBridge;
+  const execute = opts.executeFn || tuner.executeInState;
+  const close = opts.closeBridgeFn || tuner.closeBridge;
+  const wait = opts.sleeper || sleep;
+  const interval = opts.menuPollIntervalMs == null ? TUNER_MENU_POLL_MS : opts.menuPollIntervalMs;
+  const timeout = opts.menuTimeoutMs == null ? TUNER_MENU_TIMEOUT_MS : opts.menuTimeoutMs;
+  const start = Date.now();
+  for (;;) {
+    let handle = null;
+    try {
+      handle = await openBridge({ attempts: 1 });
+      if (tunerMenuReady(handle)) {
+        const index = handle.states.find((s) => s && s.name === 'MainMenu').index;
+        try {
+          await execute(handle, index, TUNER_MENU_LUA);
+          return { issued: true, state: index };
+        } catch (_) {
+          return { issued: false, needsManualClick: NEEDS_MANUAL_CLICK };
+        } finally {
+          try {
+            close(handle);
+          } catch (_) {
+            /* already gone */
+          }
+        }
+      }
+    } catch (_) {
+      /* menu not up yet */
+    }
+    if (handle) {
+      try {
+        close(handle);
+      } catch (_) {
+        /* already gone */
+      }
+    }
+    if (Date.now() - start > timeout) return { issued: false, needsManualClick: NEEDS_MANUAL_CLICK };
+    await wait(interval);
+  }
 }
 
 /**
@@ -710,8 +855,9 @@ async function waitForGameThenRestore(appOptions, opts = {}) {
   const timeout = opts.pollTimeoutMs == null ? 60000 : opts.pollTimeoutMs;
   const loadTimeout = opts.loadTimeoutMs == null ? 10 * 60 * 1000 : opts.loadTimeoutMs;
   const bootMs = Date.now();
-  const confirmedFn = opts.loadConfirmedFn
-    || (() => defaultLoadConfirmed({ ...opts, loadSinceMs: bootMs }));
+  const stateFn = opts.loadConfirmedFn
+    ? async () => normalizeLoadState(await opts.loadConfirmedFn())
+    : (() => checkLoadState({ ...opts, loadSinceMs: bootMs }));
   const started = Date.now();
   for (;;) {
     let running = false;
@@ -729,16 +875,20 @@ async function waitForGameThenRestore(appOptions, opts = {}) {
   }
   const loadStart = Date.now();
   for (;;) {
-    let ok = false;
+    let state = { state: 'unknown' };
     try {
-      ok = await confirmedFn();
+      state = normalizeLoadState(await stateFn());
     } catch (_) {
-      ok = false;
+      state = { state: 'unknown' };
     }
-    if (ok) break;
+    if (state.state === 'loaded') break;
+    if (state.state === 'failed') {
+      console.log(`Play-from-save: the save did not load — the game log says "${state.reason || 'the load ended early'}". AppOptions stays planted and restores on the next toolkit start.`);
+      return { restored: false, deferred: true, loadState: 'failed', loadReason: state.reason || null };
+    }
     if (Date.now() - loadStart > loadTimeout) {
       console.log('Play-from-save: load not yet confirmed, AppOptions stays planted and restores on the next toolkit start.');
-      return { restored: false, deferred: true };
+      return { restored: false, deferred: true, loadState: 'unknown' };
     }
     await wait(interval);
   }
@@ -752,6 +902,9 @@ async function waitForGameThenRestore(appOptions, opts = {}) {
  * logs confirm the load. Deeper saves boot through a staged byte copy,
  * deleted with the restore. Missing mods warn BEFORE anything is written
  * unless proceedWithoutMods is set (see reconcileUnrestoredBoot).
+ *
+ * After launch the tuner fires the menu transition (default on, with a
+ * manual click fallback); a refused load reports the log line straight away.
  */
 async function bootSave(savePath, opts = {}) {
   let isFile = false;
@@ -853,6 +1006,7 @@ async function bootSave(savePath, opts = {}) {
   }
 
   const launcher = opts.launcherFn || defaultLauncher;
+  const launchStartMs = Date.now();
   let launched = false;
   let launchError = null;
   try {
@@ -869,8 +1023,60 @@ async function bootSave(savePath, opts = {}) {
   if (!launched) {
     return { ok: false, code: 'launch-failed', error: launchError && launchError.message ? launchError.message : 'The game could not be started.' };
   }
+  // Tuner click (default on, real-log path only): with the menu up, one
+  // transition call loads the planted save with zero mouse clicks. An
+  // injected load verdict means a stubbed load with no live menu, so the
+  // step is skipped there. It never fails the boot: a menu that never
+  // becomes ready falls back to a manual click instead.
+  let tunerClick = { issued: false, skipped: true };
+  if (opts.tunerClick !== false && !opts.loadConfirmedFn) {
+    const clickFn = opts.tunerClickFn || defaultTunerClick;
+    try {
+      tunerClick = await clickFn(opts);
+    } catch (_) {
+      tunerClick = { issued: false, needsManualClick: NEEDS_MANUAL_CLICK };
+    }
+  }
   const done = await waitForGameThenRestore(appOptions, opts);
-  return { ok: true, save: savePath, planted, exe, turn: pre.turn, warning: pre.warning, restored: done.restored, deferred: !!done.deferred, modsSwitched: didSwitch ? { changed: modsSwitched.changed } : null };
+  // Leader-screen Escape (ADR-017): once the logs park the game at the Begin
+  // Game screen, one Escape continues it. Live launches only: a stubbed
+  // launch has no game window, and a refused load never reaches the leader.
+  let leader = { state: 'skipped' };
+  const leaderFn = opts.leaderEscapeFn
+    || (opts.leaderEscape !== false && !opts.launcherFn && !opts.loadConfirmedFn ? leaderScreen.escapeLeaderScreen : null);
+  if (leaderFn && done.loadState !== 'failed') {
+    try {
+      leader = await leaderFn({ ...opts, loadSinceMs: launchStartMs, logsDirs: candidateLogsDirs(opts) });
+    } catch (_) {
+      leader = { state: 'needsManualClick', needsManualClick: leaderScreen.LEADER_MANUAL_CLICK };
+    }
+  }
+  // A refused load is final: report it with the log line quoted instead of
+  // waiting out the timeout, leaving the plant for the startup reconcile.
+  if (done.loadState === 'failed') {
+    const reason = done.loadReason || 'the load ended early with no explanation';
+    return {
+      ok: false,
+      code: 'load-rejected',
+      error: `The save "${pre.name}" did not load — the game refused it straight away. `
+        + `The game log says: "${reason}". `
+        + 'The game is still open at the menu; load the save yourself from there, or quit the game and try again.',
+      save: savePath,
+      planted,
+      exe,
+      turn: pre.turn,
+      warning: pre.warning,
+      restored: false,
+      deferred: true,
+      loadReason: reason,
+    };
+  }
+  const result = { ok: true, save: savePath, planted, exe, turn: pre.turn, warning: pre.warning, restored: done.restored, deferred: !!done.deferred, modsSwitched: didSwitch ? { changed: modsSwitched.changed } : null };
+  if (tunerClick.needsManualClick && done.loadState !== 'loaded') result.needsManualClick = tunerClick.needsManualClick;
+  if (leader.state !== 'skipped') result.leaderEscape = leader.state;
+  if (leader.needsManualClick) result.needsManualClick = leader.needsManualClick;
+  if (leader.state === 'unconfirmed') console.log('Play-from-save: Escape was sent, but the game log does not yet confirm the map. Check the game window.');
+  return result;
 }
 
 /**
@@ -902,6 +1108,10 @@ module.exports = {
   stagingPlanFor,
   sweepStaleStagingCopies,
   defaultLoadConfirmed,
+  checkLoadState,
+  defaultTunerClick,
+  NEEDS_MANUAL_CLICK,
+  TUNER_MENU_LUA,
   waitForGameThenRestore,
   restoreAppOptions,
   reconcileUnrestoredBoot,

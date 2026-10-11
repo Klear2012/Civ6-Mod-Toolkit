@@ -223,3 +223,101 @@ describe('leader Escape helpers', () => {
     assert.equal(await leader.sendEscape(-1), false);
   });
 });
+
+describe('leader Escape in the boot', () => {
+  // Temp save, AppOptions and game exe only. The boot runs through the
+  // stub launcher, so the live default stays off unless a test injects it.
+  const playSave = require('../src/play-save');
+  const BOOT = path.join(TMP, 'boot');
+  const save = path.join(BOOT, 'saves-list', 'Newer.Civ6Save');
+  const app = path.join(BOOT, 'AppOptions.txt');
+  const fakeExe = path.join(BOOT, 'fake-game.exe');
+  const SILENT = path.join(BOOT, 'logs-silent');
+  const REJECT_DIR = path.join(BOOT, 'logs-reject');
+  const REJECT = 'LoadGameViewState leaving the network session due to an early exit of the game state.';
+  const APP_TEXT = 'PlayNowSave \nEnableAsserts 1\n';
+  function flipStatus() {
+    let calls = 0;
+    return () => Promise.resolve({ running: ++calls > 1, known: true, processes: [] });
+  }
+  function bootOpts(over = {}) {
+    return {
+      appOptions: app,
+      installed: [],
+      parseFn: () => ({ GAME_TURN: 203, MOD_BLOCK_1: [] }),
+      exePath: fakeExe,
+      gameStatusFn: flipStatus(),
+      launcherFn: () => Promise.resolve(),
+      tunerClick: false,
+      logsDirs: [SILENT],
+      pollIntervalMs: 5,
+      loadTimeoutMs: 40,
+      ...over,
+    };
+  }
+  function reset() {
+    fs.mkdirSync(path.dirname(save), { recursive: true });
+    fs.writeFileSync(save, 'save-bytes');
+    fs.writeFileSync(app, APP_TEXT);
+    fs.writeFileSync(fakeExe, 'exe');
+    fs.mkdirSync(SILENT, { recursive: true });
+  }
+  function restore() {
+    playSave.reconcileUnrestoredBoot(app);
+    assert.equal(fs.readFileSync(app, 'utf8'), APP_TEXT);
+  }
+
+  it('an injected verdict reaches the boot result, with the boot time and log folders', async () => {
+    reset();
+    const seen = [];
+    const r = await playSave.bootSave(save, bootOpts({
+      leaderEscapeFn: (o) => {
+        seen.push(o);
+        return Promise.resolve({ state: 'needsManualClick', needsManualClick: leader.LEADER_MANUAL_CLICK });
+      },
+    }));
+    assert.equal(seen.length, 1);
+    assert.equal(typeof seen[0].loadSinceMs, 'number');
+    assert.deepEqual(seen[0].logsDirs, [SILENT]);
+    assert.equal(r.ok, true);
+    assert.equal(r.leaderEscape, 'needsManualClick');
+    assert.equal(r.needsManualClick, leader.LEADER_MANUAL_CLICK);
+    restore();
+  });
+
+  it('a loaded verdict from the leader step leaves no manual-click message', async () => {
+    reset();
+    const r = await playSave.bootSave(save, bootOpts({
+      leaderEscapeFn: () => Promise.resolve({ state: 'loaded', presses: 1 }),
+    }));
+    assert.equal(r.leaderEscape, 'loaded');
+    assert.equal(r.needsManualClick, undefined);
+    restore();
+  });
+
+  it('a stubbed launch never reaches the live leader step', async () => {
+    reset();
+    const r = await playSave.bootSave(save, bootOpts());
+    assert.equal(r.leaderEscape, undefined);
+    assert.equal(r.needsManualClick, undefined);
+    restore();
+  });
+
+  it('a refused load skips the leader step', async () => {
+    reset();
+    fs.mkdirSync(REJECT_DIR, { recursive: true });
+    const fp = path.join(REJECT_DIR, 'net_message_debug.log');
+    fs.writeFileSync(fp, `setup\n${REJECT}\n`);
+    const ahead = new Date(Date.now() + 60000);
+    fs.utimesSync(fp, ahead, ahead);
+    let stepCalls = 0;
+    const r = await playSave.bootSave(save, bootOpts({
+      logsDirs: [REJECT_DIR],
+      loadTimeoutMs: 5000,
+      leaderEscapeFn: () => { stepCalls += 1; return Promise.resolve({ state: 'loaded' }); },
+    }));
+    assert.equal(r.code, 'load-rejected');
+    assert.equal(stepCalls, 0);
+    restore();
+  });
+});

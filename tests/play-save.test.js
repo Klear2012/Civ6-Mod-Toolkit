@@ -785,3 +785,176 @@ describe('dx variant naming', () => {
     assert.ok(!r.error.includes('DX12'), r.error);
   });
 });
+
+describe('load verdict: confirmed, refused, or unknown', () => {
+  const LOGS = path.join(TMP, 'logs-verify');
+  const SILENT = path.join(TMP, 'logs-silent');
+  const REJECT = 'LoadGameViewState leaving the network session due to an early exit of the game state.';
+  before(() => {
+    fs.mkdirSync(LOGS, { recursive: true });
+    fs.mkdirSync(SILENT, { recursive: true });
+  });
+  function clearLogs() {
+    for (const f of fs.readdirSync(LOGS)) fs.unlinkSync(path.join(LOGS, f));
+  }
+  it('a fresh join marker reads as loaded', () => {
+    clearLogs();
+    fs.writeFileSync(path.join(LOGS, 'Lua.log'), 'setup\nOnLoadGameViewStateDone\n');
+    assert.deepEqual(
+      playSave.checkLoadState({ logsDirs: [LOGS], loadSinceMs: Date.now() - 60000 }),
+      { state: 'loaded' });
+  });
+  it('the early-exit line reads as refused with the reason quoted', () => {
+    clearLogs();
+    fs.writeFileSync(path.join(LOGS, 'net_message_debug.log'), `setup\n${REJECT}\n`);
+    const r = playSave.checkLoadState({ logsDirs: [LOGS], loadSinceMs: Date.now() - 60000 });
+    assert.equal(r.state, 'failed');
+    assert.equal(r.reason, REJECT);
+  });
+  it('a stale marker from an earlier session reads as unknown', () => {
+    clearLogs();
+    const fp = path.join(LOGS, 'Lua.log');
+    fs.writeFileSync(fp, 'OnLoadGameViewStateDone\n');
+    const old = new Date(Date.now() - 120000);
+    fs.utimesSync(fp, old, old);
+    assert.deepEqual(
+      playSave.checkLoadState({ logsDirs: [LOGS], loadSinceMs: Date.now() - 60000 }),
+      { state: 'unknown' });
+  });
+  it('silent logs read as unknown', () => {
+    assert.deepEqual(
+      playSave.checkLoadState({ logsDirs: [SILENT], loadSinceMs: Date.now() - 60000 }),
+      { state: 'unknown' });
+  });
+  it('silent logs time out as unknown through the shared loop', async () => {
+    const r = await playSave.waitForGameThenRestore(APP, {
+      gameStatusFn: () => Promise.resolve({ running: true, known: true, processes: [] }),
+      logsDirs: [SILENT],
+      pollIntervalMs: 5,
+      loadTimeoutMs: 40,
+    });
+    assert.equal(r.restored, false);
+    assert.equal(r.deferred, true);
+    assert.equal(r.loadState, 'unknown');
+  });
+  it('the early-exit line fails fast through the shared loop, quoting the reason', async () => {
+    clearLogs();
+    const fp = path.join(LOGS, 'net_message_debug.log');
+    fs.writeFileSync(fp, `setup\n${REJECT}\n`);
+    // Dated ahead: bootMs is captured when the loop starts, so a fixture
+    // written just before must still read as this-boot's, like a live log
+    // the game keeps open.
+    const ahead = new Date(Date.now() + 60000);
+    fs.utimesSync(fp, ahead, ahead);
+    const start = Date.now();
+    const r = await playSave.waitForGameThenRestore(APP, {
+      gameStatusFn: () => Promise.resolve({ running: true, known: true, processes: [] }),
+      logsDirs: [LOGS],
+      pollIntervalMs: 5,
+      loadTimeoutMs: 5000,
+    });
+    assert.equal(r.loadState, 'failed');
+    assert.equal(r.loadReason, REJECT);
+    assert.ok(Date.now() - start < 5000, 'a refused load must not wait out the timeout');
+  });
+});
+
+describe('tuner click in the boot', () => {
+  // No live boot is needed here: the plant plus launch plus single menu
+  // call loading the save is proven live separately, and these mirrors
+  // cover only the toolkit side (one call fired when the menu is ready, a
+  // manual fallback with zero calls when it never is, and the refused-load
+  // report). The real log path is used throughout (no loadConfirmedFn
+  // stub), so the click step runs exactly as in production, with short
+  // timeouts instead of the production defaults.
+  const save = path.join(TMP, 'saves-list', 'Newer.Civ6Save');
+  const fakeExe = path.join(TMP, 'fake-game.exe');
+  const SILENT = path.join(TMP, 'logs-silent');
+  function flipStatus() {
+    let calls = 0;
+    return () => Promise.resolve({ running: ++calls > 1, known: true, processes: [] });
+  }
+  function bootOpts(over = {}) {
+    return {
+      appOptions: APP,
+      installed: INSTALLED_ALL,
+      parseFn: stubParseTurnDispenser(),
+      exePath: fakeExe,
+      gameStatusFn: flipStatus(),
+      launcherFn: () => Promise.resolve(),
+      closeBridgeFn: () => {},
+      logsDirs: [SILENT],
+      pollIntervalMs: 5,
+      loadTimeoutMs: 60,
+      ...over,
+    };
+  }
+  function reset() {
+    fs.writeFileSync(APP, APP_ORIGINAL);
+    fs.writeFileSync(fakeExe, 'exe');
+  }
+  it('fires the single menu-transition call when the menu is ready', async () => {
+    reset();
+    const calls = [];
+    const menu = { states: [{ index: 24, name: 'MainMenu' }], gamecoreIndex: null, ingameIndex: null };
+    const r = await playSave.bootSave(save, bootOpts({
+      openBridgeFn: () => Promise.resolve(menu),
+      executeFn: (handle, index, lua) => {
+        calls.push([index, lua]);
+        return Promise.resolve({ lines: [], sawAck: true, ended: 'ack-quiet' });
+      },
+    }));
+    assert.deepEqual(calls, [[24, 'OnStateTransition("MainMenu")']]);
+    assert.equal(r.ok, true);
+    assert.equal(r.needsManualClick, undefined);
+    assert.equal(r.deferred, true);
+    playSave.reconcileUnrestoredBoot(APP);
+    assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+  });
+  it('menu-never-ready falls back to a manual click, issuing zero calls', async () => {
+    reset();
+    let executions = 0;
+    const r = await playSave.bootSave(save, bootOpts({
+      openBridgeFn: () => Promise.reject(new Error('refused')),
+      executeFn: () => { executions += 1; return Promise.resolve(); },
+      menuPollIntervalMs: 5,
+      menuTimeoutMs: 40,
+    }));
+    assert.equal(executions, 0);
+    assert.ok(r.needsManualClick, 'expected a manual-click reason');
+    assert.ok(/click Play/i.test(r.needsManualClick), r.needsManualClick);
+    assert.equal(r.ok, true);
+    assert.equal(r.deferred, true);
+    playSave.reconcileUnrestoredBoot(APP);
+    assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+  });
+  it('a refused load reports the log line instead of waiting out the timeout', async () => {
+    reset();
+    const dir = path.join(TMP, 'logs-reject');
+    fs.mkdirSync(dir, { recursive: true });
+    const line = 'LoadGameViewState leaving the network session due to an early exit of the game state.';
+    const fp = path.join(dir, 'net_message_debug.log');
+    fs.writeFileSync(fp, `setup\n${line}\n`);
+    // Dated ahead, as above: the boot captures bootMs after the tuner
+    // phase, and only this-boot logs count.
+    const ahead = new Date(Date.now() + 60000);
+    fs.utimesSync(fp, ahead, ahead);
+    const start = Date.now();
+    const r = await playSave.bootSave(save, bootOpts({
+      logsDirs: [dir],
+      openBridgeFn: () => Promise.reject(new Error('refused')),
+      executeFn: () => Promise.resolve(),
+      menuPollIntervalMs: 5,
+      menuTimeoutMs: 40,
+      loadTimeoutMs: 5000,
+    }));
+    assert.equal(r.ok, false);
+    assert.equal(r.code, 'load-rejected');
+    assert.ok(r.error.includes(line), r.error);
+    assert.equal(r.loadReason, line);
+    assert.equal(r.needsManualClick, undefined);
+    assert.ok(Date.now() - start < 5000, 'a refused load must not wait out the timeout');
+    playSave.reconcileUnrestoredBoot(APP);
+    assert.equal(fs.readFileSync(APP, 'utf8'), APP_ORIGINAL);
+  });
+});
