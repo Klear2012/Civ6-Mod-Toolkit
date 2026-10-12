@@ -8,6 +8,7 @@
     "ADR enforcement hybrid: orchestrator names <=3 ADRs per dispatch, hot table + grep fallback over Scope/Applies-to, tripwire re-grade to Tier 2",
     "ADR sequence in use at registration: ADR-013, no gaps",
     "spec contracts retired per ADR-014: openspec/specs/ + openspec/config.yaml local-only (gitignored); code + tests + docs are the contract",
+    "gates not vendored (no scripts/ dir): project gate is npm run check:release; base check-gates.py runs consumer-mode advisory only",
     "docs/dev/ + docs/user/ layout active; per-screen user pages pending"
   ],
   "installed_at": "2026-10-08"
