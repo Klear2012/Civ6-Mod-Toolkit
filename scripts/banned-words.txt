@@ -1,0 +1,27 @@
+# Writing-style banned list. Read by base/scripts/check-gates.py
+# (banned-words subcheck). Match rule: one term per line, matched
+# case-insensitively at the start of a word; a term that starts with
+# punctuation matches anywhere.
+#
+# Adapted from the TablePro banned-words list (TablePro scripts/banned-words.txt):
+# same terms, same match rule, plain-text venue instead of docs pages.
+
+—
+comprehensive
+delve
+dive into
+effortless
+elevate
+empower
+facilitate
+game-changer
+game-changing
+intuitive
+leverage
+powerful
+robust
+seamless
+streamlined
+supercharge
+unleash
+utilize
