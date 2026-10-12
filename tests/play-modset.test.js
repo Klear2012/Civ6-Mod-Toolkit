@@ -117,6 +117,68 @@ describe('switch', () => {
     assert.equal(calls, 0);
     assert.equal(playModset.modsSnapshotPending(DB), false);
   });
+  it('an ungrouped-but-default-on required mod is satisfied with no flip', () => {
+    cleanSidecar();
+    const applied = [];
+    const state = () => ({
+      ok: true,
+      mods: [
+        { modId: 'AA', idNorm: 'aa', name: 'Alpha', disabled: false },
+        { modId: 'BB', idNorm: 'bb', name: 'Beta', disabled: true },
+        { modId: 'DD', idNorm: 'dd', name: 'Delta DLC', disabled: null, defaultOn: true },
+      ],
+    });
+    const r = playModset.switchToSaveMods(DB, ['bb', 'dd'], {
+      saveMods: [{ id: 'bb', title: 'Beta' }, { id: 'dd', title: 'Delta DLC' }],
+      readStateFn: state,
+      applyChangesFn: (db, changes) => { applied.push(...changes); return { changed: changes.length }; },
+    });
+    assert.equal(r.switched, true);
+    assert.equal(r.changed, 2);
+    assert.deepEqual(applied, [
+      { modId: 'AA', enabled: false },
+      { modId: 'BB', enabled: true },
+    ]);
+    assert.equal(playModset.modsSnapshotPending(DB), true);
+    cleanSidecar();
+  });
+  it('a default-on required mod in the live read shape flips nothing either', () => {
+    cleanSidecar();
+    let calls = 0;
+    const state = () => ({
+      ok: true,
+      mods: [
+        { modId: 'AA', idNorm: 'aa', name: 'Alpha', disabled: false },
+        { modId: 'EE', idNorm: 'ee', name: 'Epsilon DLC', disabled: false, defaultOn: true },
+      ],
+    });
+    const r = playModset.switchToSaveMods(DB, ['aa', 'ee'], {
+      saveMods: [{ id: 'aa', title: 'Alpha' }, { id: 'ee', title: 'Epsilon DLC' }],
+      readStateFn: state,
+      applyChangesFn: () => { calls += 1; return {}; },
+    });
+    assert.equal(r.switched, false);
+    assert.equal(r.changed, 0);
+    assert.equal(calls, 0);
+    assert.equal(playModset.modsSnapshotPending(DB), false);
+  });
+  it('a refused switch writes zero bytes to the database file', () => {
+    cleanSidecar();
+    const fixture = Buffer.from('fake-sqlite-bytes-for-refusal-proof');
+    fs.writeFileSync(DB, fixture);
+    const before = fs.readFileSync(DB);
+    let calls = 0;
+    const err = awaitThrows(() => playModset.switchToSaveMods(DB, ['AA', 'ZZ'], {
+      saveMods: [{ id: 'ZZ', title: 'Zeta Mod' }],
+      readStateFn: () => fakeState(),
+      applyChangesFn: () => { calls += 1; return {}; },
+    }));
+    assert.equal(err.message, 'unswitchable');
+    assert.deepEqual(fs.readFileSync(DB), before);
+    assert.equal(calls, 0);
+    assert.equal(playModset.modsSnapshotPending(DB), false);
+    fs.unlinkSync(DB);
+  });
   it('the warning names the save and every unreachable mod', () => {
     const w = playModset.unswitchableWarning(
       [{ id: 'ZZ', title: 'Zeta Mod' }], 'Old.Civ6Save');

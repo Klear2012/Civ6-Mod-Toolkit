@@ -52,7 +52,11 @@ function snapshotModSet(dbPath, opts = {}) {
 }
 
 // Switch the enabled set to exactly requiredIds (normalized). Unknown or
-// ungrouped ids refuse with names before anything is written.
+// ungrouped ids refuse with names before anything is written. A required
+// mod that is ungrouped but default-on counts as satisfied: the game loads
+// it with no row in the active group, so there is nothing to flip and
+// nothing to write. The default-on flag is readModState's predicate alone
+// (see src/modsdb.js) and is only read here, never recomputed (see ADR-013).
 function switchToSaveMods(dbPath, requiredIds, opts = {}) {
   const base = dbPath || (() => { try { return paths.getModsDb().path; } catch (_) { return null; } })();
   if (!base) throw new Error('Mod database not found.');
@@ -64,7 +68,7 @@ function switchToSaveMods(dbPath, requiredIds, opts = {}) {
   const unknown = [];
   for (const id of wanted) {
     const row = rows.get(id);
-    if (!row || row.disabled == null) {
+    if (!row || (row.disabled == null && !row.defaultOn)) {
       const fromSave = (opts.saveMods || []).find((m) => normId(m.id) === id);
       unknown.push({ id: fromSave ? fromSave.id : id, title: fromSave ? fromSave.title : null });
     }
