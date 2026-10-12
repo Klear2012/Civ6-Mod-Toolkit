@@ -1051,6 +1051,7 @@ async function bootSave(savePath, opts = {}) {
       leader = { state: 'needsManualClick', needsManualClick: leaderScreen.LEADER_MANUAL_CLICK };
     }
   }
+  if (leader.state !== 'skipped') console.log(`Play-from-save: leader step ${leader.state} after ${leader.presses || 0} Escape press(es).`);
   // A refused load is final: report it with the log line quoted instead of
   // waiting out the timeout, leaving the plant for the startup reconcile.
   if (done.loadState === 'failed') {

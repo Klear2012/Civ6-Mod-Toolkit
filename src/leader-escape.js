@@ -164,19 +164,32 @@ async function escapeLeaderScreen(opts = {}) {
   const settleStart = Date.now();
   for (;;) {
     const logs = readNow();
-    if (mapEnteredIn(logs)) return { state: 'loaded', presses: 0 };
+    if (mapEnteredIn(logs)) {
+      console.log('Leader-screen Escape: already in the map, no Escape sent.');
+      return { state: 'loaded', presses: 0 };
+    }
     if (parkedIn(logs)) break;
-    if (Date.now() - settleStart >= settleMs) return { state: 'not-waiting', presses: 0 };
+    if (Date.now() - settleStart >= settleMs) {
+      console.log('Leader-screen Escape: never parked at the Begin Game screen, no Escape sent.');
+      return { state: 'not-waiting', presses: 0 };
+    }
     await wait(pollMs);
   }
+  console.log(`Leader-screen Escape: parked at the Begin Game screen (settled after ${Date.now() - settleStart} ms).`);
 
   let presses = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const pid = await findPid();
-    if (!validPid(pid) || !(await focus(pid))) {
+    const focused = validPid(pid) ? await focus(pid) : false;
+    console.log(`Leader-screen Escape: attempt ${attempt}/${maxAttempts} (game process ${pid == null ? 'not found' : pid}, focus ${focused ? 'ok' : 'failed'}).`);
+    if (!focused) {
+      console.log(`Leader-screen Escape: finished as needsManualClick after ${presses} Escape press(es).`);
       return { state: 'needsManualClick', presses, needsManualClick: LEADER_FOCUS_FAILED };
     }
-    if ((await sendKey(pid)) === false) {
+    const sent = await sendKey(pid);
+    console.log(`Leader-screen Escape: attempt ${attempt}/${maxAttempts} Escape send ${sent === false ? 'failed' : 'ok'}.`);
+    if (sent === false) {
+      console.log(`Leader-screen Escape: finished as needsManualClick after ${presses} Escape press(es).`);
       return { state: 'needsManualClick', presses, needsManualClick: LEADER_FOCUS_FAILED };
     }
     presses += 1;
@@ -184,10 +197,18 @@ async function escapeLeaderScreen(opts = {}) {
     for (let i = 0; i < polls; i += 1) {
       await wait(pollMs);
       logs = readNow();
-      if (mapEnteredIn(logs)) return { state: 'loaded', presses };
+      if (mapEnteredIn(logs)) {
+        console.log(`Leader-screen Escape: map entered after attempt ${attempt}, finished as loaded with ${presses} Escape press(es).`);
+        return { state: 'loaded', presses };
+      }
     }
-    if (!parkedIn(logs)) return { state: 'unconfirmed', presses };
+    if (!parkedIn(logs)) {
+      console.log(`Leader-screen Escape: left the Begin Game screen with no map markers after attempt ${attempt}, finished as unconfirmed with ${presses} Escape press(es).`);
+      return { state: 'unconfirmed', presses };
+    }
+    console.log(`Leader-screen Escape: still parked after attempt ${attempt} (${presses} Escape press(es) so far).`);
   }
+  console.log(`Leader-screen Escape: still parked after ${maxAttempts} attempt(s), finished as needsManualClick with ${presses} Escape press(es).`);
   return { state: 'needsManualClick', presses, needsManualClick: LEADER_MANUAL_CLICK };
 }
 

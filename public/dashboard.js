@@ -276,8 +276,10 @@ function settlePlayBoot(body) {
     const name = String(body.save || '').split(/[\\/]/).pop() || 'save';
     let detail = `Loaded ${name}.`;
     if (body.modsSwitched) detail += ' Your mods were switched to the save\u2019s set — put them back from the Dashboard after you quit.';
+    if (body.leaderEscape === 'unconfirmed') detail += ' An Escape key was sent, but the map is not confirmed yet — check the game window.';
     setPlayProgress(detail);
     toast(esc(detail), 'ok');
+    if (body.needsManualClick) $('playMissing').innerHTML = `<div class="alert warn">${esc(body.needsManualClick)}</div>`;
     if (dash.data) dash.data.modsSnapshotPending = !!body.modsSwitched;
     renderPlay();
     return;
