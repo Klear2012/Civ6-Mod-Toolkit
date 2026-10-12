@@ -1,0 +1,13 @@
+# quarantine.txt - one line per quarantined case: a failing test parked with
+# a reason and an owner, never silently skipped.
+#
+# Format (one case per line, never a bare suite name):
+#   <SuiteName>/<caseName>() <reason> <owner-change-or-issue>
+# A bare suite mutes nothing and hides regressions: matching the suite
+# instead of the case does two wrong things at once, it never matches the
+# unit file at all (every quarantined case reports as a new failure) and
+# it mutes the whole UI suite (a real regression hides beside a
+# quarantined case). A line no parser matches must report, never mute.
+# (TablePro: verify.sh report_tests quarantine handling.)
+#
+# No quarantined cases.
