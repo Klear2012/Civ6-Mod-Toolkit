@@ -7,6 +7,7 @@
     "Tier orchestration: subagent dispatch with tasks.md ownership + worker reporting contract + mechanical-tail delegation",
     "ADR enforcement hybrid: orchestrator names <=3 ADRs per dispatch, hot table + grep fallback over Scope/Applies-to, tripwire re-grade to Tier 2",
     "ADR sequence in use at registration: ADR-013, no gaps",
+    "spec contracts retired per ADR-014: openspec/specs/ + openspec/config.yaml local-only (gitignored); code + tests + docs are the contract",
     "docs/dev/ + docs/user/ layout active; per-screen user pages pending"
   ],
   "installed_at": "2026-10-08"
